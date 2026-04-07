@@ -37,6 +37,8 @@ type Root struct {
 	results         *tview.TextView
 	sqlLens         *tview.TextView
 	completionList  *tview.List
+	completionItems []editor.CompletionItem
+	completionCtx   editor.CompletionContext
 	active          *db.ConnectionProfile
 	focus           []tview.Primitive
 	focusNames      []string
@@ -128,8 +130,9 @@ func (r *Root) handleGlobalKeys(event *tcell.EventKey) *tcell.EventKey {
 	if r.pages.HasPage("overlay") {
 		return event
 	}
-	if r.pages.HasPage("completion") {
-		return event
+
+	if r.focusIndex == int(focusEditor) && r.handleAutocompleteKey(event) {
+		return nil
 	}
 
 	switch event.Key() {
@@ -151,11 +154,11 @@ func (r *Root) handleGlobalKeys(event *tcell.EventKey) *tcell.EventKey {
 	case tcell.KeyF6:
 		r.setStatusf("[yellow]export not implemented yet[-] future file export will always use full untruncated data")
 		return nil
-	case tcell.KeyCtrlSpace:
-		if r.focusIndex == int(focusEditor) {
-			r.showAutocomplete()
-			return nil
-		}
+	}
+
+	if isAutocompleteTrigger(event) && r.focusIndex == int(focusEditor) {
+		r.showAutocomplete()
+		return nil
 	}
 
 	if event.Key() == tcell.KeyRune && event.Modifiers()&tcell.ModAlt != 0 {
@@ -188,6 +191,9 @@ func (r *Root) setFocusByIndex(index int) {
 		return
 	}
 	r.focusIndex = index
+	if index != int(focusEditor) {
+		r.closeAutocomplete()
+	}
 	r.app.SetFocus(r.focus[index])
 	r.updateEditorStatus()
 	r.updateStatusHints("")
@@ -212,7 +218,7 @@ func (r *Root) buildExplorer() tview.Primitive {
 				r.activateExplorerSelection(tree.GetCurrentNode(), true)
 				return nil
 			case 'r':
-				r.refreshExplorer()
+				r.refreshExplorer(true)
 				r.setStatusf("[green]explorer refreshed[-]")
 				return nil
 			case 'n':
@@ -269,24 +275,38 @@ func (r *Root) activateExplorerSelection(node *tview.TreeNode, preview bool) {
 }
 
 func (r *Root) buildEditor() tview.Primitive {
-	editor := tview.NewTextArea()
-	r.editor = editor
-	editor.SetBorder(true).SetTitle(" Query Editor ")
-	editor.SetWrap(false).SetWordWrap(false)
-	editor.SetPlaceholder("-- Write SQL here.\n-- F4 format, F5 run, F7 SQL lens.\n")
-	editor.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyCtrlSpace {
+	textArea := tview.NewTextArea()
+	r.editor = textArea
+	textArea.SetBorder(true).SetTitle(" Query Editor ")
+	textArea.SetWrap(false).SetWordWrap(false)
+	textArea.SetPlaceholder("-- Write SQL here.\n-- F4 format, F5 run, F7 SQL lens.\n")
+	textArea.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if r.handleAutocompleteKey(event) {
+			return nil
+		}
+		if event.Key() == tcell.KeyEnter {
+			selection, start, end := r.editor.GetSelection()
+			cursor := end
+			if selection == "" {
+				start = cursor
+			}
+			r.editor.Replace(start, end, "\n"+editor.NextLineIndent(r.editor.GetText(), cursor))
+			return nil
+		}
+		if isAutocompleteTrigger(event) {
 			r.showAutocomplete()
 			return nil
 		}
 		return event
 	})
-	editor.SetChangedFunc(func() {
+	textArea.SetChangedFunc(func() {
 		r.updateEditorStatus()
 		r.refreshSQLLens()
+		r.refreshAutocomplete(false)
 	})
-	editor.SetMovedFunc(func() {
+	textArea.SetMovedFunc(func() {
 		r.updateEditorStatus()
+		r.refreshAutocomplete(false)
 	})
 
 	status := tview.NewTextView()
@@ -298,7 +318,7 @@ func (r *Root) buildEditor() tview.Primitive {
 
 	return tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		AddItem(editor, 0, 1, true).
+		AddItem(textArea, 0, 1, true).
 		AddItem(status, 3, 0, false)
 }
 
@@ -361,7 +381,7 @@ func helpText() string {
 
 func (r *Root) closeOverlay() {
 	r.pages.RemovePage("overlay")
-	r.refreshExplorer()
+	r.refreshExplorer(true)
 	r.setFocusByIndex(r.focusIndex)
 }
 
@@ -464,16 +484,35 @@ func (r *Root) attachProfileChildren(profileNode *tview.TreeNode, profile db.Con
 	}
 }
 
-func (r *Root) refreshExplorer() {
+func (r *Root) refreshExplorer(preserveActive bool) {
 	if r.explorer == nil {
 		return
 	}
+	activeName := ""
+	if preserveActive && r.active != nil {
+		activeName = r.active.Name
+	}
 	root := r.buildExplorerTree()
 	r.explorer.SetRoot(root).SetCurrentNode(root)
-	r.active = nil
+	r.active = activeProfileByName(activeName, root.GetChildren())
 	r.completionCache = map[string]db.CompletionMetadata{}
 	r.updateEditorStatus()
 	r.updateStatusHints("")
+}
+
+func activeProfileByName(name string, nodes []*tview.TreeNode) *db.ConnectionProfile {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	for _, node := range nodes {
+		profile, ok := node.GetReference().(db.ConnectionProfile)
+		if !ok || profile.Name != name {
+			continue
+		}
+		profileCopy := profile
+		return &profileCopy
+	}
+	return nil
 }
 
 func (r *Root) runCurrentQuery() {
@@ -556,6 +595,7 @@ func (r *Root) formatEditorSQL() {
 
 	r.editor.SetText(formatted, false)
 	r.editor.Select(0, 0)
+	r.closeAutocomplete()
 	r.refreshSQLLens()
 	r.setStatusf("[green]format complete[-] editor buffer updated")
 }
@@ -592,80 +632,100 @@ func (r *Root) toggleSQLLens() {
 }
 
 func (r *Root) showAutocomplete() {
+	r.refreshAutocomplete(true)
+}
+
+func (r *Root) refreshAutocomplete(force bool) {
 	if r.editor == nil {
 		return
 	}
 	if r.active == nil {
-		r.setStatusf("[red]autocomplete blocked:[-] select an active connection first")
+		r.closeAutocomplete()
+		if force {
+			r.setStatusf("[red]autocomplete blocked:[-] select an active connection first")
+		}
 		return
 	}
 
 	meta, err := r.completionMetadata(*r.active)
 	if err != nil {
-		r.setStatusf("[red]autocomplete unavailable:[-] %v", err)
+		r.closeAutocomplete()
+		if force {
+			r.setStatusf("[red]autocomplete unavailable:[-] %v", err)
+		}
 		return
 	}
 
 	_, _, cursor := r.editorSelection()
 	analysis := editor.AnalyzeSQL(r.editor.GetText(), cursor)
 	ctx := analysis.Context
-	items := editor.BuildCompletionItems(meta, r.editor.GetText(), ctx)
-	if len(items) == 0 {
-		r.setStatusf("[yellow]autocomplete[-] no matches for %q", ctx.Prefix)
+	if !shouldShowAutocomplete(ctx, force) {
+		r.closeAutocomplete()
 		return
 	}
 
-	list := tview.NewList()
-	r.completionList = list
-	list.SetBorder(true).SetTitle(" Autocomplete ")
-	list.ShowSecondaryText(true)
-	list.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
-		if index < 0 || index >= len(items) {
-			return
-		}
-		r.applyCompletion(ctx, items[index])
-	})
-	list.SetDoneFunc(func() {
+	items := editor.BuildCompletionItems(meta, r.editor.GetText(), ctx)
+	if len(items) == 0 {
 		r.closeAutocomplete()
-	})
-	list.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch event.Key() {
-		case tcell.KeyEsc:
-			r.closeAutocomplete()
-			return nil
-		case tcell.KeyTab, tcell.KeyEnter:
-			index := list.GetCurrentItem()
-			if index >= 0 && index < len(items) {
-				r.applyCompletion(ctx, items[index])
-				return nil
-			}
+		if force {
+			r.setStatusf("[yellow]autocomplete[-] no matches for %q", ctx.Prefix)
 		}
-		return event
-	})
+		return
+	}
+	if shouldHideAutocomplete(ctx, items) {
+		r.closeAutocomplete()
+		return
+	}
 
-	maxItems := min(len(items), 15)
+	selectedInsert := ""
+	if r.completionList != nil && len(r.completionItems) > 0 {
+		index := r.completionList.GetCurrentItem()
+		if index >= 0 && index < len(r.completionItems) {
+			selectedInsert = r.completionItems[index].Insert
+		}
+	}
+
+	list := r.ensureCompletionList()
+	list.Clear()
+
+	r.completionCtx = ctx
+	r.completionItems = items
+
+	maxItems := min(len(items), 8)
 	for _, item := range items[:maxItems] {
-		main := item.Label
+		main := tview.Escape(item.Label)
 		if item.Kind != "" {
-			main = fmt.Sprintf("%s [gray](%s)[-]", tview.Escape(item.Label), tview.Escape(item.Kind))
+			main = fmt.Sprintf("%s [gray](%s)[-]", main, tview.Escape(item.Kind))
 		}
 		list.AddItem(main, item.Detail, 0, nil)
 	}
 
-	frame := tview.NewFrame(list).
-		AddText(fmt.Sprintf("Prefix: %s  Qualifier: %s", fallbackText(ctx.Prefix, "(none)"), fallbackText(ctx.Qualifier, "(none)")), true, tview.AlignLeft, tcell.ColorGray).
-		AddText("Enter/Tab insert  Esc close", false, tview.AlignLeft, tcell.ColorGray)
-	frame.SetBorder(true).SetTitle(" Completions ")
+	list.SetCurrentItem(0)
+	if selectedInsert != "" {
+		for index, item := range r.completionItems[:maxItems] {
+			if item.Insert == selectedInsert {
+				list.SetCurrentItem(index)
+				break
+			}
+		}
+	}
 
-	r.pages.AddPage("completion", centerModal(frame, 72, 20), true, true)
-	r.app.SetFocus(list)
-	r.setStatusf("[green]autocomplete[-] %d suggestions", len(items))
+	x, y, width, height := r.autocompleteRect(maxItems)
+	list.SetRect(x, y, width, height)
+	if !r.pages.HasPage("completion") {
+		r.pages.AddPage("completion", list, false, true)
+	}
+	r.pages.ShowPage("completion")
+	if force {
+		r.setStatusf("[green]autocomplete[-] %d suggestions", len(items))
+	}
 }
 
 func (r *Root) closeAutocomplete() {
 	r.pages.RemovePage("completion")
 	r.completionList = nil
-	r.app.SetFocus(r.editor)
+	r.completionItems = nil
+	r.completionCtx = editor.CompletionContext{}
 	r.updateStatusHints("")
 }
 
@@ -799,7 +859,7 @@ func renderHeaderRow(columns []string, widths []int) string {
 	for i, col := range columns {
 		cells = append(cells, formatCell("[yellow]"+tview.Escape(col)+"[-]", runeWidth(col), widths[i]))
 	}
-	return strings.Join(cells, " [gray]|[-] ")
+	return strings.Join(cells, " [gray]|[-] ") + " "
 }
 
 func renderDividerRow(widths []int) string {
@@ -820,7 +880,7 @@ func renderDataRow(row []string, widths []int, truncate bool) string {
 		styled, visible := renderCellValue(value, truncate)
 		cells = append(cells, formatCell(styled, visible, width))
 	}
-	return strings.Join(cells, " [gray]|[-] ")
+	return strings.Join(cells, " [gray]|[-] ") + " "
 }
 
 func renderCellValue(value string, truncate bool) (string, int) {
@@ -970,9 +1030,145 @@ func min(a, b int) int {
 	return b
 }
 
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func fallbackText(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
 	}
 	return value
+}
+
+func (r *Root) ensureCompletionList() *tview.List {
+	if r.completionList != nil {
+		return r.completionList
+	}
+
+	list := tview.NewList()
+	list.SetBorder(true).SetTitle(" Completions ")
+	list.ShowSecondaryText(false)
+	list.SetSelectedFocusOnly(false)
+	list.SetHighlightFullLine(true)
+	r.completionList = list
+	return list
+}
+
+func (r *Root) autocompleteRect(itemCount int) (int, int, int, int) {
+	x, y, width, height := r.editor.GetInnerRect()
+	_, _, cursorRow, cursorColumn := r.editor.GetCursor()
+
+	popupWidth := 32
+	for _, item := range r.completionItems[:itemCount] {
+		lineWidth := runeWidth(item.Label)
+		if item.Kind != "" {
+			lineWidth += runeWidth(item.Kind) + 4
+		}
+		if lineWidth+4 > popupWidth {
+			popupWidth = lineWidth + 4
+		}
+	}
+	popupWidth = min(popupWidth, max(width, 24))
+	popupHeight := min(itemCount+2, max(height, 3))
+
+	popupX := x + cursorColumn
+	if popupX+popupWidth > x+width {
+		popupX = x + width - popupWidth
+	}
+	if popupX < x {
+		popupX = x
+	}
+
+	popupY := y + cursorRow + 1
+	if popupY+popupHeight > y+height {
+		popupY = y + cursorRow - popupHeight
+	}
+	if popupY < y {
+		popupY = y
+	}
+
+	return popupX, popupY, popupWidth, popupHeight
+}
+
+func (r *Root) handleAutocompleteKey(event *tcell.EventKey) bool {
+	if !r.pages.HasPage("completion") || r.completionList == nil || len(r.completionItems) == 0 {
+		return false
+	}
+
+	switch event.Key() {
+	case tcell.KeyEsc:
+		r.closeAutocomplete()
+		return true
+	case tcell.KeyDown:
+		r.moveAutocompleteSelection(1)
+		return true
+	case tcell.KeyUp:
+		r.moveAutocompleteSelection(-1)
+		return true
+	}
+
+	return false
+}
+
+func (r *Root) moveAutocompleteSelection(delta int) {
+	if r.completionList == nil || len(r.completionItems) == 0 {
+		return
+	}
+	index := r.completionList.GetCurrentItem() + delta
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(r.completionItems) {
+		index = len(r.completionItems) - 1
+	}
+	r.completionList.SetCurrentItem(index)
+}
+
+func shouldShowAutocomplete(ctx editor.CompletionContext, force bool) bool {
+	if force {
+		return true
+	}
+	return strings.TrimSpace(ctx.Prefix) != ""
+}
+
+func shouldHideAutocomplete(ctx editor.CompletionContext, items []editor.CompletionItem) bool {
+	if strings.TrimSpace(ctx.Prefix) == "" {
+		return true
+	}
+	if len(items) != 1 {
+		return false
+	}
+	prefix := strings.ToLower(strings.TrimSpace(ctx.Prefix))
+	if prefix == "" {
+		return true
+	}
+	item := items[0]
+	return strings.ToLower(item.Label) == prefix || strings.ToLower(item.Insert) == prefix
+}
+
+func isAutocompleteTrigger(event *tcell.EventKey) bool {
+	if event == nil {
+		return false
+	}
+
+	switch event.Key() {
+	case tcell.KeyCtrlSpace, tcell.KeyNUL:
+		return true
+	case tcell.Key(' '):
+		return event.Modifiers()&tcell.ModCtrl != 0 && event.Modifiers()&tcell.ModAlt == 0
+	case tcell.KeyRune:
+		if event.Modifiers()&tcell.ModCtrl == 0 || event.Modifiers()&tcell.ModAlt != 0 {
+			return false
+		}
+		switch event.Rune() {
+		case ' ', '@', '2':
+			return true
+		}
+	}
+
+	return false
 }

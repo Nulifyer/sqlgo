@@ -42,6 +42,91 @@ func TestFormatSQLPreservesCommentsAndStrings(t *testing.T) {
 	}
 }
 
+func TestFormatSQLIndentsJoinAndOnClauses(t *testing.T) {
+	t.Parallel()
+
+	input := "select u.name, p.name from users u join projects p on p.owner_id = u.id where u.active = 1;"
+	got := FormatSQL(input)
+
+	wantParts := []string{
+		"FROM users u",
+		"    JOIN projects p",
+		"        ON p.owner_id = u.id",
+		"WHERE u.active = 1;",
+	}
+	for _, want := range wantParts {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatted SQL missing %q\n%s", want, got)
+		}
+	}
+}
+
+func TestFormatSQLIndentsNestedSubquery(t *testing.T) {
+	t.Parallel()
+
+	input := "select id from (select id, owner_id from projects where owner_id in (select id from users where active = 1)) p;"
+	got := FormatSQL(input)
+
+	wantParts := []string{
+		"SELECT id",
+		"FROM (",
+		"    SELECT id,",
+		"        owner_id",
+		"    FROM projects",
+		"    WHERE owner_id IN (",
+		"        SELECT id",
+		"        FROM users",
+		"        WHERE active = 1",
+		"    )",
+		") p;",
+	}
+	for _, want := range wantParts {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatted nested SQL missing %q\n%s", want, got)
+		}
+	}
+}
+
+func TestNextLineIndentPreservesAndExtendsIndentation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		text   string
+		cursor int
+		want   string
+	}{
+		{
+			name:   "preserves current line indentation",
+			text:   "SELECT id,\n    name",
+			cursor: len("SELECT id,\n    name"),
+			want:   "    ",
+		},
+		{
+			name:   "indents after clause header",
+			text:   "SELECT",
+			cursor: len("SELECT"),
+			want:   indentUnit,
+		},
+		{
+			name:   "indents after opening paren",
+			text:   "WHERE (",
+			cursor: len("WHERE ("),
+			want:   indentUnit,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := NextLineIndent(tt.text, tt.cursor); got != tt.want {
+				t.Fatalf("NextLineIndent() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHighlightSQLColorsMajorTokenTypes(t *testing.T) {
 	t.Parallel()
 

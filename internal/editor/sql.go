@@ -7,6 +7,8 @@ import (
 	"github.com/rivo/tview"
 )
 
+const indentUnit = "    "
+
 type tokenKind int
 
 const (
@@ -48,6 +50,8 @@ func FormatSQL(input string) string {
 	lineStart := true
 	indent := 0
 	listIndent := 0
+	parenDepth := 0
+	var nestedBlockStack []bool
 	inSelectList := false
 	inSetList := false
 	inValuesList := false
@@ -56,7 +60,7 @@ func FormatSQL(input string) string {
 		if !lineStart {
 			return
 		}
-		b.WriteString(strings.Repeat("    ", indent))
+		b.WriteString(strings.Repeat(indentUnit, indent))
 		lineStart = false
 	}
 
@@ -81,44 +85,57 @@ func FormatSQL(input string) string {
 			return
 		}
 		last := b.String()[b.Len()-1]
-		if last != ' ' && last != '\n' && last != '(' {
+		if last != ' ' && last != '\n' && last != '(' && last != '.' {
 			b.WriteByte(' ')
 		}
 	}
 
 	for i := 0; i < len(tokens); i++ {
 		if matched, size, replacement := clauseAt(tokens, i); matched {
+			baseIndent := parenDepth
 			switch replacement {
 			case "SELECT":
 				if b.Len() > 0 {
 					newLine()
 				}
-				indent = 0
+				indent = baseIndent
 				inSelectList, inSetList, inValuesList = true, false, false
 				listIndent = indent + 1
 			case "SET":
 				newLine()
+				indent = baseIndent + 1
 				inSelectList, inSetList, inValuesList = false, true, false
-				listIndent = indent + 1
+				listIndent = indent
 			case "VALUES":
 				newLine()
+				indent = baseIndent + 1
 				inSelectList, inSetList, inValuesList = false, false, true
-				listIndent = indent + 1
-			case "FROM", "WHERE", "GROUP BY", "HAVING", "ORDER BY", "LIMIT", "OFFSET", "ON", "UNION", "UNION ALL":
+				listIndent = indent
+			case "FROM", "WHERE", "GROUP BY", "HAVING", "ORDER BY", "LIMIT", "OFFSET", "UNION", "UNION ALL":
 				newLine()
-				indent = 0
+				indent = baseIndent
 				inSelectList, inSetList, inValuesList = false, false, false
-			case "INSERT INTO", "UPDATE", "DELETE FROM", "CREATE TABLE", "ALTER TABLE", "DROP TABLE", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "FULL JOIN", "CROSS JOIN", "JOIN":
+			case "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "FULL JOIN", "CROSS JOIN", "JOIN":
 				if b.Len() > 0 {
 					newLine()
 				}
-				indent = 0
+				indent = baseIndent + 1
+				inSelectList, inSetList, inValuesList = false, false, false
+			case "ON":
+				newLine()
+				indent = baseIndent + 2
+				inSelectList, inSetList, inValuesList = false, false, false
+			case "INSERT INTO", "UPDATE", "DELETE FROM", "CREATE TABLE", "ALTER TABLE", "DROP TABLE":
+				if b.Len() > 0 {
+					newLine()
+				}
+				indent = baseIndent
 				inSelectList, inSetList, inValuesList = false, false, false
 			case "WITH":
 				if b.Len() > 0 {
 					newLine()
 				}
-				indent = 0
+				indent = baseIndent
 			}
 
 			writeToken(replacement)
@@ -168,17 +185,28 @@ func FormatSQL(input string) string {
 					writeSpace()
 				}
 			case "(":
+				nestedBlock := opensNestedBlock(tokens, i)
 				if needsSpaceBeforeParen(i, tokens) {
 					writeSpace()
 				}
 				writeToken("(")
-				if i > 0 && isClauseKeyword(tokens[i-1], "SELECT", "VALUES", "IN") {
-					indent++
+				parenDepth++
+				nestedBlockStack = append(nestedBlockStack, nestedBlock)
+				if nestedBlock {
 					newLine()
 				}
 			case ")":
+				nestedBlock := false
+				if len(nestedBlockStack) > 0 {
+					nestedBlock = nestedBlockStack[len(nestedBlockStack)-1]
+					nestedBlockStack = nestedBlockStack[:len(nestedBlockStack)-1]
+				}
+				parenDepth = max(parenDepth-1, 0)
+				if nestedBlock && !lineStart {
+					newLine()
+				}
 				if strings.HasSuffix(b.String(), "\n") {
-					indent = max(indent-1, 0)
+					indent = parenDepth
 					writeIndent()
 				}
 				writeToken(")")
@@ -197,6 +225,29 @@ func FormatSQL(input string) string {
 	}
 
 	return strings.TrimSpace(b.String())
+}
+
+func NextLineIndent(text string, cursor int) string {
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(text) {
+		cursor = len(text)
+	}
+
+	lineStart := strings.LastIndex(text[:cursor], "\n") + 1
+	linePrefix := text[lineStart:cursor]
+	leading := leadingIndentation(linePrefix)
+	trimmed := strings.TrimSpace(linePrefix)
+	if trimmed == "" {
+		return leading
+	}
+
+	indent := leading
+	if shouldIncreaseNextLineIndent(trimmed) {
+		indent += indentUnit
+	}
+	return indent
 }
 
 func HighlightSQL(input string) string {
@@ -500,6 +551,55 @@ func isClauseKeyword(tok token, words ...string) bool {
 		}
 	}
 	return false
+}
+
+func opensNestedBlock(tokens []token, index int) bool {
+	next := nextNonWhitespace(tokens, index+1)
+	if next < 0 {
+		return false
+	}
+	return isClauseKeyword(tokens[next], "SELECT", "WITH")
+}
+
+func nextNonWhitespace(tokens []token, index int) int {
+	for index < len(tokens) {
+		if !isWhitespaceToken(tokens[index]) {
+			return index
+		}
+		index++
+	}
+	return -1
+}
+
+func leadingIndentation(line string) string {
+	end := 0
+	for end < len(line) {
+		if line[end] != ' ' && line[end] != '\t' {
+			break
+		}
+		end++
+	}
+	return line[:end]
+}
+
+func shouldIncreaseNextLineIndent(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+
+	trimmed = strings.TrimRight(trimmed, " \t")
+	if strings.HasSuffix(trimmed, "(") {
+		return true
+	}
+
+	switch strings.ToUpper(trimmed) {
+	case "SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "HAVING", "VALUES", "SET", "WITH", "ON",
+		"JOIN", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "FULL JOIN", "CROSS JOIN":
+		return true
+	default:
+		return false
+	}
 }
 
 func trimTrailingSpaces(b *strings.Builder) {

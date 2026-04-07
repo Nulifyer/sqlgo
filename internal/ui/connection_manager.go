@@ -33,6 +33,7 @@ type connectionManager struct {
 	step            int
 	draft           db.ConnectionProfile
 	password        string
+	originalName    string
 	selectedProfile string
 	testing         bool
 }
@@ -202,6 +203,7 @@ func (m *connectionManager) showListSelection(index int) {
 func (m *connectionManager) resetDraft() {
 	m.step = connectionStepProvider
 	m.password = ""
+	m.originalName = ""
 	m.selectedProfile = ""
 	m.testing = false
 	m.draft = db.ConnectionProfile{
@@ -223,6 +225,7 @@ func (m *connectionManager) loadProfile(index int) {
 	m.step = connectionStepProvider
 	m.draft = m.profiles[index]
 	m.password = ""
+	m.originalName = m.draft.Name
 	m.selectedProfile = m.draft.Name
 	m.testing = false
 	m.setTestStatus("[gray]Use Ctrl+T or the Test button to validate this connection.[-]")
@@ -489,16 +492,15 @@ func (m *connectionManager) saveProfile() {
 		m.root.setStatusf("[red]save failed:[-] %v", err)
 		return
 	}
-	if strings.TrimSpace(m.password) != "" {
-		if err := m.root.secrets.Set(profile.SecretKey(), m.password); err != nil {
-			m.root.setStatusf("[red]password save failed:[-] %v", err)
-			return
-		}
+	if err := migrateProfileSecret(m.root.secrets, m.originalName, profile.Name, m.password); err != nil {
+		m.root.setStatusf("[red]password save failed:[-] %v", err)
+		return
 	}
-	if err := m.root.store.Save(profile); err != nil {
+	if err := m.root.store.SaveAs(profile, m.originalName); err != nil {
 		m.root.setStatusf("[red]save failed:[-] %v", err)
 		return
 	}
+	m.originalName = profile.Name
 	m.selectedProfile = profile.Name
 	m.root.setStatusf("[green]saved connection[-] %s", profile.Name)
 	m.setTestStatus(fmt.Sprintf("[green]Saved connection.[-]\n\nName: %s", profile.Name))
@@ -524,6 +526,49 @@ func (m *connectionManager) deleteProfile() {
 	m.root.setStatusf("[green]deleted connection[-] %s", name)
 	m.resetDraft()
 	m.refresh()
+}
+
+func migrateProfileSecret(secrets db.SecretStore, originalName, newName, password string) error {
+	if secrets == nil {
+		return nil
+	}
+
+	newKey := secretKeyForProfileName(newName)
+	if strings.TrimSpace(password) != "" {
+		if err := secrets.Set(newKey, password); err != nil {
+			return err
+		}
+		if originalKey := secretKeyForProfileName(originalName); originalKey != "" && originalKey != newKey {
+			if err := secrets.Remove(originalKey); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	originalKey := secretKeyForProfileName(originalName)
+	if originalKey == "" || originalKey == newKey {
+		return nil
+	}
+
+	existing, err := secrets.Get(originalKey)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(existing) == "" {
+		return nil
+	}
+	if err := secrets.Set(newKey, existing); err != nil {
+		return err
+	}
+	return secrets.Remove(originalKey)
+}
+
+func secretKeyForProfileName(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return ""
+	}
+	return "profile:" + strings.ToLower(name) + ":password"
 }
 
 func (m *connectionManager) renderWizardHelp() {

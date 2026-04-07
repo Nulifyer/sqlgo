@@ -49,6 +49,10 @@ func (s *ProfileStore) Load() ([]ConnectionProfile, error) {
 }
 
 func (s *ProfileStore) Save(profile ConnectionProfile) error {
+	return s.SaveAs(profile, "")
+}
+
+func (s *ProfileStore) SaveAs(profile ConnectionProfile, previousName string) error {
 	if err := profile.Validate(); err != nil {
 		return err
 	}
@@ -66,7 +70,7 @@ func (s *ProfileStore) Save(profile ConnectionProfile) error {
 
 	replaced := false
 	for i := range profiles {
-		if profiles[i].Name == profile.Name {
+		if profiles[i].Name == profile.Name || (previousName != "" && profiles[i].Name == previousName) {
 			if profile.CreatedAt.IsZero() {
 				profile.CreatedAt = profiles[i].CreatedAt
 			}
