@@ -370,7 +370,7 @@ func (r *Root) showHelp() {
 }
 
 func helpText() string {
-	return "[yellow]Global[-]\nAlt+1 Explorer\nAlt+2 Editor\nAlt+3 Results\nF1 Help\nF2 Connections\nF4 Format SQL\nF5 Run Query\nF7 SQL Lens\nEsc Close overlay\n\n[yellow]Editor[-]\nTab inserts indentation\nCtrl+Space autocomplete\nF4 format current buffer\nF5 run selection or full buffer\nF7 open syntax-highlighted SQL lens\n\n[yellow]Explorer[-]\nEnter activate selection\nSpace preview table/view\nr refresh explorer\nn new connection\n\n[yellow]Connection Wizard[-]\nTab moves between fields\nCtrl+T test connection\nCtrl+S save on review step\nDel delete selected connection"
+	return "[yellow]Global[-]\nAlt+1 Explorer\nAlt+2 Editor\nAlt+3 Results\nF1 Help\nF2 Connections\nF4 Format SQL\nF5 Run Query\nF7 SQL Lens\nEsc Close overlay\n\n[yellow]Editor[-]\nTab accepts completion when open\nShift+Tab outdents\nCtrl+Space autocomplete\nF4 format current buffer\nF5 run selection or full buffer\nF7 open syntax-highlighted SQL lens\n\n[yellow]Explorer[-]\nEnter activate selection\nSpace preview table/view\nr refresh explorer\nn new connection\n\n[yellow]Connection Wizard[-]\nTab moves between fields\nCtrl+T test connection\nCtrl+S save on review step\nDel delete selected connection"
 }
 
 func (r *Root) closeOverlay() {

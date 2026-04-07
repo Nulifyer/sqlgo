@@ -155,6 +155,11 @@ func (e *SQLEditor) HandleAutocompleteKey(event *tcell.EventKey) bool {
 		return true
 	}
 
+	if event != nil && event.Key() == tcell.KeyBacktab {
+		e.outdentSelection()
+		return true
+	}
+
 	if !e.popupVisible || len(e.completionItems) == 0 {
 		return false
 	}
@@ -162,9 +167,6 @@ func (e *SQLEditor) HandleAutocompleteKey(event *tcell.EventKey) bool {
 	switch event.Key() {
 	case tcell.KeyEsc:
 		e.HideAutocomplete()
-		return true
-	case tcell.KeyBacktab:
-		e.outdentSelection()
 		return true
 	case tcell.KeyDown:
 		e.moveAutocompleteSelection(1)
