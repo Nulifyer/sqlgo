@@ -32,13 +32,10 @@ type Root struct {
 	status          *tview.TextView
 	mainLayout      tview.Primitive
 	explorer        *tview.TreeView
-	editor          *tview.TextArea
+	editor          *SQLEditor
 	editorStatus    *tview.TextView
 	results         *tview.TextView
 	sqlLens         *tview.TextView
-	completionList  *tview.List
-	completionItems []editor.CompletionItem
-	completionCtx   editor.CompletionContext
 	active          *db.ConnectionProfile
 	focus           []tview.Primitive
 	focusNames      []string
@@ -156,11 +153,6 @@ func (r *Root) handleGlobalKeys(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	}
 
-	if isAutocompleteTrigger(event) && r.focusIndex == int(focusEditor) {
-		r.showAutocomplete()
-		return nil
-	}
-
 	if event.Key() == tcell.KeyRune && event.Modifiers()&tcell.ModAlt != 0 {
 		switch event.Rune() {
 		case '1':
@@ -275,38 +267,40 @@ func (r *Root) activateExplorerSelection(node *tview.TreeNode, preview bool) {
 }
 
 func (r *Root) buildEditor() tview.Primitive {
-	textArea := tview.NewTextArea()
+	textArea := NewSQLEditor()
 	r.editor = textArea
 	textArea.SetBorder(true).SetTitle(" Query Editor ")
 	textArea.SetWrap(false).SetWordWrap(false)
 	textArea.SetPlaceholder("-- Write SQL here.\n-- F4 format, F5 run, F7 SQL lens.\n")
-	textArea.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if r.handleAutocompleteKey(event) {
-			return nil
-		}
-		if event.Key() == tcell.KeyEnter {
-			selection, start, end := r.editor.GetSelection()
-			cursor := end
-			if selection == "" {
-				start = cursor
+	textArea.SetCompletionProvider(func(force bool, text string, cursor int) (editor.CompletionContext, []editor.CompletionItem, error) {
+		ctx := editor.AnalyzeSQL(text, cursor).Context
+		if r.active == nil {
+			if force {
+				r.setStatusf("[red]autocomplete blocked:[-] select an active connection first")
 			}
-			r.editor.Replace(start, end, "\n"+editor.NextLineIndent(r.editor.GetText(), cursor))
-			return nil
+			return ctx, nil, fmt.Errorf("no active connection")
 		}
-		if isAutocompleteTrigger(event) {
-			r.showAutocomplete()
-			return nil
+
+		meta, err := r.completionMetadata(*r.active)
+		if err != nil {
+			if force {
+				r.setStatusf("[red]autocomplete unavailable:[-] %v", err)
+			}
+			return ctx, nil, err
 		}
-		return event
+
+		items := editor.BuildCompletionItems(meta, text, ctx)
+		if force && len(items) == 0 {
+			r.setStatusf("[yellow]autocomplete[-] no matches for %q", ctx.Prefix)
+		}
+		return ctx, items, nil
 	})
 	textArea.SetChangedFunc(func() {
 		r.updateEditorStatus()
 		r.refreshSQLLens()
-		r.refreshAutocomplete(false)
 	})
 	textArea.SetMovedFunc(func() {
 		r.updateEditorStatus()
-		r.refreshAutocomplete(false)
 	})
 
 	status := tview.NewTextView()
@@ -632,109 +626,17 @@ func (r *Root) toggleSQLLens() {
 }
 
 func (r *Root) showAutocomplete() {
-	r.refreshAutocomplete(true)
-}
-
-func (r *Root) refreshAutocomplete(force bool) {
 	if r.editor == nil {
 		return
 	}
-	if r.active == nil {
-		r.closeAutocomplete()
-		if force {
-			r.setStatusf("[red]autocomplete blocked:[-] select an active connection first")
-		}
-		return
-	}
-
-	meta, err := r.completionMetadata(*r.active)
-	if err != nil {
-		r.closeAutocomplete()
-		if force {
-			r.setStatusf("[red]autocomplete unavailable:[-] %v", err)
-		}
-		return
-	}
-
-	_, _, cursor := r.editorSelection()
-	analysis := editor.AnalyzeSQL(r.editor.GetText(), cursor)
-	ctx := analysis.Context
-	if !shouldShowAutocomplete(ctx, force) {
-		r.closeAutocomplete()
-		return
-	}
-
-	items := editor.BuildCompletionItems(meta, r.editor.GetText(), ctx)
-	if len(items) == 0 {
-		r.closeAutocomplete()
-		if force {
-			r.setStatusf("[yellow]autocomplete[-] no matches for %q", ctx.Prefix)
-		}
-		return
-	}
-	if shouldHideAutocomplete(ctx, items) {
-		r.closeAutocomplete()
-		return
-	}
-
-	selectedInsert := ""
-	if r.completionList != nil && len(r.completionItems) > 0 {
-		index := r.completionList.GetCurrentItem()
-		if index >= 0 && index < len(r.completionItems) {
-			selectedInsert = r.completionItems[index].Insert
-		}
-	}
-
-	list := r.ensureCompletionList()
-	list.Clear()
-
-	r.completionCtx = ctx
-	r.completionItems = items
-
-	maxItems := min(len(items), 8)
-	for _, item := range items[:maxItems] {
-		main := tview.Escape(item.Label)
-		if item.Kind != "" {
-			main = fmt.Sprintf("%s [gray](%s)[-]", main, tview.Escape(item.Kind))
-		}
-		list.AddItem(main, item.Detail, 0, nil)
-	}
-
-	list.SetCurrentItem(0)
-	if selectedInsert != "" {
-		for index, item := range r.completionItems[:maxItems] {
-			if item.Insert == selectedInsert {
-				list.SetCurrentItem(index)
-				break
-			}
-		}
-	}
-
-	x, y, width, height := r.autocompleteRect(maxItems)
-	list.SetRect(x, y, width, height)
-	if !r.pages.HasPage("completion") {
-		r.pages.AddPage("completion", list, false, true)
-	}
-	r.pages.ShowPage("completion")
-	if force {
-		r.setStatusf("[green]autocomplete[-] %d suggestions", len(items))
-	}
+	r.editor.TriggerAutocomplete()
 }
 
 func (r *Root) closeAutocomplete() {
-	r.pages.RemovePage("completion")
-	r.completionList = nil
-	r.completionItems = nil
-	r.completionCtx = editor.CompletionContext{}
+	if r.editor != nil {
+		r.editor.HideAutocomplete()
+	}
 	r.updateStatusHints("")
-}
-
-func (r *Root) applyCompletion(ctx editor.CompletionContext, item editor.CompletionItem) {
-	r.editor.Replace(ctx.Start, ctx.End, item.Insert)
-	r.closeAutocomplete()
-	r.refreshSQLLens()
-	r.updateEditorStatus()
-	r.setStatusf("[green]autocomplete[-] inserted %s", item.Insert)
 }
 
 func (r *Root) completionMetadata(profile db.ConnectionProfile) (db.CompletionMetadata, error) {
@@ -749,11 +651,6 @@ func (r *Root) completionMetadata(profile db.ConnectionProfile) (db.CompletionMe
 	slices.Sort(meta.Schemas)
 	r.completionCache[profile.Name] = meta
 	return meta, nil
-}
-
-func (r *Root) editorSelection() (string, int, int) {
-	selection, start, end := r.editor.GetSelection()
-	return selection, start, end
 }
 
 func (r *Root) refreshSQLLens() {
@@ -1044,110 +941,11 @@ func fallbackText(value, fallback string) string {
 	return value
 }
 
-func (r *Root) ensureCompletionList() *tview.List {
-	if r.completionList != nil {
-		return r.completionList
-	}
-
-	list := tview.NewList()
-	list.SetBorder(true).SetTitle(" Completions ")
-	list.ShowSecondaryText(false)
-	list.SetSelectedFocusOnly(false)
-	list.SetHighlightFullLine(true)
-	r.completionList = list
-	return list
-}
-
-func (r *Root) autocompleteRect(itemCount int) (int, int, int, int) {
-	x, y, width, height := r.editor.GetInnerRect()
-	_, _, cursorRow, cursorColumn := r.editor.GetCursor()
-
-	popupWidth := 32
-	for _, item := range r.completionItems[:itemCount] {
-		lineWidth := runeWidth(item.Label)
-		if item.Kind != "" {
-			lineWidth += runeWidth(item.Kind) + 4
-		}
-		if lineWidth+4 > popupWidth {
-			popupWidth = lineWidth + 4
-		}
-	}
-	popupWidth = min(popupWidth, max(width, 24))
-	popupHeight := min(itemCount+2, max(height, 3))
-
-	popupX := x + cursorColumn
-	if popupX+popupWidth > x+width {
-		popupX = x + width - popupWidth
-	}
-	if popupX < x {
-		popupX = x
-	}
-
-	popupY := y + cursorRow + 1
-	if popupY+popupHeight > y+height {
-		popupY = y + cursorRow - popupHeight
-	}
-	if popupY < y {
-		popupY = y
-	}
-
-	return popupX, popupY, popupWidth, popupHeight
-}
-
 func (r *Root) handleAutocompleteKey(event *tcell.EventKey) bool {
-	if !r.pages.HasPage("completion") || r.completionList == nil || len(r.completionItems) == 0 {
+	if r.editor == nil {
 		return false
 	}
-
-	switch event.Key() {
-	case tcell.KeyEsc:
-		r.closeAutocomplete()
-		return true
-	case tcell.KeyDown:
-		r.moveAutocompleteSelection(1)
-		return true
-	case tcell.KeyUp:
-		r.moveAutocompleteSelection(-1)
-		return true
-	}
-
-	return false
-}
-
-func (r *Root) moveAutocompleteSelection(delta int) {
-	if r.completionList == nil || len(r.completionItems) == 0 {
-		return
-	}
-	index := r.completionList.GetCurrentItem() + delta
-	if index < 0 {
-		index = 0
-	}
-	if index >= len(r.completionItems) {
-		index = len(r.completionItems) - 1
-	}
-	r.completionList.SetCurrentItem(index)
-}
-
-func shouldShowAutocomplete(ctx editor.CompletionContext, force bool) bool {
-	if force {
-		return true
-	}
-	return strings.TrimSpace(ctx.Prefix) != ""
-}
-
-func shouldHideAutocomplete(ctx editor.CompletionContext, items []editor.CompletionItem) bool {
-	if strings.TrimSpace(ctx.Prefix) == "" {
-		return true
-	}
-	if len(items) != 1 {
-		return false
-	}
-	prefix := strings.ToLower(strings.TrimSpace(ctx.Prefix))
-	if prefix == "" {
-		return true
-	}
-	item := items[0]
-	return strings.ToLower(item.Label) == prefix || strings.ToLower(item.Insert) == prefix
+	return r.editor.HandleAutocompleteKey(event)
 }
 
 func isAutocompleteTrigger(event *tcell.EventKey) bool {

@@ -37,3 +37,21 @@ func TestBuildCompletionItemsIncludesAliasColumns(t *testing.T) {
 		t.Fatalf("top completion = %q, want %q", items[0].Insert, "name")
 	}
 }
+
+func TestBuildCompletionItemsIncludesDirectTableColumns(t *testing.T) {
+	t.Parallel()
+
+	meta := db.CompletionMetadata{
+		Objects: []db.ObjectMetadata{
+			{Name: "users", Qualified: `"users"`, Type: db.ExplorerTable, Columns: []string{"id", "name", "email"}},
+		},
+	}
+	ctx := CompletionContext{Prefix: "na", Qualifier: "users"}
+	items := BuildCompletionItems(meta, `SELECT users.na FROM users`, ctx)
+	if len(items) == 0 {
+		t.Fatalf("expected completion items")
+	}
+	if items[0].Insert != "name" {
+		t.Fatalf("top completion = %q, want %q", items[0].Insert, "name")
+	}
+}
