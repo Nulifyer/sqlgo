@@ -15,6 +15,7 @@ type Root struct {
 	app      *tview.Application
 	registry *db.Registry
 	store    *db.ProfileStore
+	secrets  db.SecretStore
 	pages    *tview.Pages
 	status   *tview.TextView
 	focus    []tview.Primitive
@@ -34,11 +35,16 @@ func NewRoot(registry *db.Registry) (*Root, error) {
 	if err != nil {
 		return nil, err
 	}
+	secrets, err := db.NewSecretStore()
+	if err != nil {
+		return nil, err
+	}
 
 	r := &Root{
 		app:      tview.NewApplication(),
 		registry: registry,
 		store:    store,
+		secrets:  secrets,
 		pages:    tview.NewPages(),
 		status:   tview.NewTextView(),
 	}
@@ -55,6 +61,10 @@ func NewRoot(registry *db.Registry) (*Root, error) {
 }
 
 func (r *Root) Run() error {
+	if profiles, err := r.store.Load(); err == nil && len(profiles) == 0 {
+		r.showConnectionManager()
+		r.setStatusf("[yellow]no saved connections[-] create one to get started")
+	}
 	return r.app.SetRoot(r.pages, true).EnableMouse(true).Run()
 }
 
@@ -226,7 +236,7 @@ func (r *Root) buildExplorerTree() *tview.TreeNode {
 }
 
 func (r *Root) attachProfileChildren(profileNode *tview.TreeNode, profile db.ConnectionProfile) {
-	snapshot, err := db.LoadExplorerSnapshot(context.Background(), profile, r.registry)
+	snapshot, err := db.LoadExplorerSnapshotWithSecrets(context.Background(), profile, r.registry, r.secrets)
 	if err != nil {
 		profileNode.AddChild(tview.NewTreeNode("(browse coming soon)").SetColor(tcell.ColorGray))
 		return
@@ -284,7 +294,7 @@ func (r *Root) runCurrentQuery() {
 	r.setStatusf("[yellow]running query[-] %s", profile.Name)
 
 	go func() {
-		result, err := db.RunQuery(context.Background(), profile, r.registry, sqlText)
+		result, err := db.RunQueryWithSecrets(context.Background(), profile, r.registry, r.secrets, sqlText)
 		r.app.QueueUpdateDraw(func() {
 			if err != nil {
 				r.results.SetText(fmt.Sprintf("[red]Query failed[-]\n\nProfile: %s\n\n%v", profile.Name, err))
@@ -309,7 +319,7 @@ func (r *Root) previewExplorerObject(profile db.ConnectionProfile, object db.Exp
 	r.setStatusf("[yellow]previewing[-] %s.%s", profile.Name, object.Name)
 
 	go func() {
-		result, err := db.RunQuery(context.Background(), profile, r.registry, sqlText)
+		result, err := db.RunQueryWithSecrets(context.Background(), profile, r.registry, r.secrets, sqlText)
 		r.app.QueueUpdateDraw(func() {
 			if err != nil {
 				r.results.SetText(fmt.Sprintf("[red]Preview failed[-]\n\nProfile: %s\nObject: %s\n\n%v", profile.Name, object.Name, err))

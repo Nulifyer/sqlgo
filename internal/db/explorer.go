@@ -27,9 +27,13 @@ type ExplorerSnapshot struct {
 }
 
 func LoadExplorerSnapshot(ctx context.Context, profile ConnectionProfile, registry *Registry) (ExplorerSnapshot, error) {
+	return LoadExplorerSnapshotWithSecrets(ctx, profile, registry, nil)
+}
+
+func LoadExplorerSnapshotWithSecrets(ctx context.Context, profile ConnectionProfile, registry *Registry, secrets SecretStore) (ExplorerSnapshot, error) {
 	switch profile.ProviderID {
 	case ProviderSQLite:
-		return loadSQLiteExplorerSnapshot(ctx, profile, registry)
+		return loadSQLiteExplorerSnapshot(ctx, profile, registry, secrets)
 	default:
 		return ExplorerSnapshot{}, fmt.Errorf("explorer metadata not implemented yet for provider %s", profile.ProviderID)
 	}

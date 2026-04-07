@@ -8,12 +8,21 @@ import (
 )
 
 func Open(profile ConnectionProfile, registry *Registry) (*sql.DB, Provider, error) {
+	return OpenWithSecrets(profile, registry, nil)
+}
+
+func OpenWithSecrets(profile ConnectionProfile, registry *Registry, secrets SecretStore) (*sql.DB, Provider, error) {
 	provider, ok := registry.Provider(profile.ProviderID)
 	if !ok {
 		return nil, Provider{}, fmt.Errorf("unknown provider: %s", profile.ProviderID)
 	}
 
-	conn, err := sql.Open(provider.DriverName, profile.DSN)
+	dsn, err := profile.ResolveDSN(secrets)
+	if err != nil {
+		return nil, Provider{}, err
+	}
+
+	conn, err := sql.Open(provider.DriverName, dsn)
 	if err != nil {
 		return nil, Provider{}, err
 	}
@@ -22,7 +31,11 @@ func Open(profile ConnectionProfile, registry *Registry) (*sql.DB, Provider, err
 }
 
 func Ping(ctx context.Context, profile ConnectionProfile, registry *Registry) error {
-	conn, _, err := Open(profile, registry)
+	return PingWithSecrets(ctx, profile, registry, nil)
+}
+
+func PingWithSecrets(ctx context.Context, profile ConnectionProfile, registry *Registry, secrets SecretStore) error {
+	conn, _, err := OpenWithSecrets(profile, registry, secrets)
 	if err != nil {
 		return err
 	}

@@ -25,8 +25,12 @@ type QueryResult struct {
 }
 
 func RunQuery(ctx context.Context, profile ConnectionProfile, registry *Registry, sqlText string) (QueryResult, error) {
+	return RunQueryWithSecrets(ctx, profile, registry, nil, sqlText)
+}
+
+func RunQueryWithSecrets(ctx context.Context, profile ConnectionProfile, registry *Registry, secrets SecretStore, sqlText string) (QueryResult, error) {
 	start := time.Now().UTC()
-	conn, provider, err := Open(profile, registry)
+	conn, provider, err := OpenWithSecrets(profile, registry, secrets)
 	if err != nil {
 		return QueryResult{}, err
 	}

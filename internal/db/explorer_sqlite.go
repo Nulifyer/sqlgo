@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-func loadSQLiteExplorerSnapshot(ctx context.Context, profile ConnectionProfile, registry *Registry) (ExplorerSnapshot, error) {
+func loadSQLiteExplorerSnapshot(ctx context.Context, profile ConnectionProfile, registry *Registry, secrets SecretStore) (ExplorerSnapshot, error) {
 	result := ExplorerSnapshot{
 		Databases: []ExplorerObject{
 			{
@@ -17,7 +17,7 @@ func loadSQLiteExplorerSnapshot(ctx context.Context, profile ConnectionProfile, 
 		},
 	}
 
-	conn, _, err := Open(profile, registry)
+	conn, _, err := OpenWithSecrets(profile, registry, secrets)
 	if err != nil {
 		return ExplorerSnapshot{}, err
 	}
