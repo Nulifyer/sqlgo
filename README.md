@@ -41,6 +41,7 @@ This repo currently contains:
 - an initial provider registry covering the planned database targets
 - persisted connection profiles with a built-in connection manager on `F2`
 - live connection testing through `database/sql` ping
+- a SQLite fixture generator for local development data
 - architecture notes for the next implementation phases
 - DSN examples for early profile setup
 

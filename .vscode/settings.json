@@ -1,0 +1,12 @@
+{
+  "go.useLanguageServer": true,
+  "go.buildFlags": [],
+  "go.testFlags": [],
+  "go.lintFlags": [],
+  "go.vetFlags": [],
+  "go.toolsEnvVars": {},
+  "gopls": {
+    "build.buildFlags": []
+  },
+  "go.toolsManagement.checkForUpdates": "local"
+}

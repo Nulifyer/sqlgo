@@ -140,6 +140,10 @@ func testSQLiteProfile(t *testing.T) ConnectionProfile {
 	t.Helper()
 
 	dbPath := filepath.Join(t.TempDir(), "sqlgo-test.db")
+	if err := CreateSQLiteFixture(context.Background(), dbPath); err != nil {
+		t.Fatalf("CreateSQLiteFixture() error = %v", err)
+	}
+
 	return ConnectionProfile{
 		Name:       "sqlite-test",
 		ProviderID: ProviderSQLite,

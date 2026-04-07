@@ -8,7 +8,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	"sqlgo/internal/db"
+	"github.com/nulifyer/sqlgo/internal/db"
 )
 
 type Root struct {
@@ -22,6 +22,11 @@ type Root struct {
 	editor   *tview.TextArea
 	results  *tview.TextView
 	active   *db.ConnectionProfile
+}
+
+type explorerNodeRef struct {
+	Profile db.ConnectionProfile
+	Object  *db.ExplorerObject
 }
 
 func NewRoot(registry *db.Registry) (*Root, error) {
@@ -126,6 +131,13 @@ func (r *Root) buildExplorer() tview.Primitive {
 			provider, _ := r.registry.Provider(typed.ProviderID)
 			r.active = &typed
 			r.setStatusf("[green]active profile[-] %s  [blue]provider[-] %s", typed.Name, provider.DisplayName)
+		case explorerNodeRef:
+			r.active = &typed.Profile
+			if typed.Object == nil {
+				r.setStatusf("[green]active profile[-] %s", typed.Profile.Name)
+				return
+			}
+			r.previewExplorerObject(typed.Profile, *typed.Object)
 		}
 	})
 
@@ -180,7 +192,7 @@ func (r *Root) setStatusf(format string, args ...any) {
 }
 
 func (r *Root) buildExplorerTree() *tview.TreeNode {
-	root := tview.NewTreeNode("Connections")
+	root := tview.NewTreeNode("Explorer")
 	root.SetColor(tcell.ColorGreen)
 
 	profiles, err := r.store.Load()
@@ -203,6 +215,7 @@ func (r *Root) buildExplorerTree() *tview.TreeNode {
 			}
 			profileNode := tview.NewTreeNode(profile.Name)
 			profileNode.SetReference(profile)
+			r.attachProfileChildren(profileNode, profile)
 			providerNode.AddChild(profileNode)
 		}
 
@@ -210,6 +223,40 @@ func (r *Root) buildExplorerTree() *tview.TreeNode {
 	}
 
 	return root
+}
+
+func (r *Root) attachProfileChildren(profileNode *tview.TreeNode, profile db.ConnectionProfile) {
+	snapshot, err := db.LoadExplorerSnapshot(context.Background(), profile, r.registry)
+	if err != nil {
+		profileNode.AddChild(tview.NewTreeNode("(browse coming soon)").SetColor(tcell.ColorGray))
+		return
+	}
+
+	for _, database := range snapshot.Databases {
+		databaseRef := database
+		databaseNode := tview.NewTreeNode(database.Name)
+		databaseNode.SetReference(explorerNodeRef{Profile: profile, Object: &databaseRef})
+
+		tablesNode := tview.NewTreeNode("Tables")
+		for _, table := range snapshot.Tables {
+			tableRef := table
+			child := tview.NewTreeNode(table.Name)
+			child.SetReference(explorerNodeRef{Profile: profile, Object: &tableRef})
+			tablesNode.AddChild(child)
+		}
+
+		viewsNode := tview.NewTreeNode("Views")
+		for _, view := range snapshot.Views {
+			viewRef := view
+			child := tview.NewTreeNode(view.Name)
+			child.SetReference(explorerNodeRef{Profile: profile, Object: &viewRef})
+			viewsNode.AddChild(child)
+		}
+
+		databaseNode.AddChild(tablesNode)
+		databaseNode.AddChild(viewsNode)
+		profileNode.AddChild(databaseNode)
+	}
 }
 
 func (r *Root) refreshExplorer() {
@@ -247,6 +294,30 @@ func (r *Root) runCurrentQuery() {
 
 			r.results.SetText(renderQueryResult(result))
 			r.setStatusf("[green]query complete[-] %s  duration=%s", profile.Name, result.Duration.Round(10_000_000))
+		})
+	}()
+}
+
+func (r *Root) previewExplorerObject(profile db.ConnectionProfile, object db.ExplorerObject) {
+	if object.Type != db.ExplorerTable && object.Type != db.ExplorerView {
+		r.setStatusf("[green]active profile[-] %s", profile.Name)
+		return
+	}
+
+	sqlText := fmt.Sprintf("SELECT * FROM %s LIMIT 25;", object.Qualified)
+	r.results.SetText(fmt.Sprintf("[yellow]Previewing %s...[-]", object.Name))
+	r.setStatusf("[yellow]previewing[-] %s.%s", profile.Name, object.Name)
+
+	go func() {
+		result, err := db.RunQuery(context.Background(), profile, r.registry, sqlText)
+		r.app.QueueUpdateDraw(func() {
+			if err != nil {
+				r.results.SetText(fmt.Sprintf("[red]Preview failed[-]\n\nProfile: %s\nObject: %s\n\n%v", profile.Name, object.Name, err))
+				r.setStatusf("[red]preview failed:[-] %v", err)
+				return
+			}
+			r.results.SetText(renderQueryResult(result))
+			r.setStatusf("[green]preview ready[-] %s.%s", profile.Name, object.Name)
 		})
 	}()
 }

@@ -1,0 +1,35 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug SQLGo TUI",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/cmd/sqlgo",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "showLog": false
+    },
+    {
+      "name": "Debug DB Tests",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}/internal/db",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "showLog": false
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Run App Then Debug Tests",
+      "configurations": [
+        "Debug SQLGo TUI",
+        "Debug DB Tests"
+      ],
+      "stopAll": true
+    }
+  ]
+}

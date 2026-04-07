@@ -7,7 +7,7 @@ import (
 
 	"github.com/rivo/tview"
 
-	"sqlgo/internal/db"
+	"github.com/nulifyer/sqlgo/internal/db"
 )
 
 type connectionManager struct {

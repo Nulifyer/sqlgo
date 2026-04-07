@@ -1,8 +1,8 @@
 package app
 
 import (
-	"sqlgo/internal/db"
-	"sqlgo/internal/ui"
+	"github.com/nulifyer/sqlgo/internal/db"
+	"github.com/nulifyer/sqlgo/internal/ui"
 )
 
 type App struct {

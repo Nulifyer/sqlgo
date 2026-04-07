@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 
-	"sqlgo/internal/app"
+	"github.com/nulifyer/sqlgo/internal/app"
 )
 
 func main() {
