@@ -92,6 +92,10 @@ func (e *SQLEditor) InputHandler() func(event *tcell.EventKey, setFocus func(p t
 			return
 		}
 
+		if e.HandleAutocompleteKey(event) {
+			return
+		}
+
 		if event.Key() == tcell.KeyEnter {
 			selection, start, end := e.textArea.GetSelection()
 			cursor := end
@@ -155,7 +159,7 @@ func (e *SQLEditor) HandleAutocompleteKey(event *tcell.EventKey) bool {
 		return true
 	}
 
-	if event != nil && event.Key() == tcell.KeyBacktab {
+	if isOutdentTrigger(event) {
 		e.outdentSelection()
 		return true
 	}
@@ -172,6 +176,10 @@ func (e *SQLEditor) HandleAutocompleteKey(event *tcell.EventKey) bool {
 		e.moveAutocompleteSelection(1)
 		return true
 	case tcell.KeyTab:
+		if event.Modifiers()&tcell.ModShift != 0 {
+			e.outdentSelection()
+			return true
+		}
 		e.acceptAutocomplete()
 		return true
 	case tcell.KeyUp:
@@ -518,4 +526,14 @@ func currentLineEnd(text string, offset int) int {
 		return offset + index
 	}
 	return len(text)
+}
+
+func isOutdentTrigger(event *tcell.EventKey) bool {
+	if event == nil {
+		return false
+	}
+	if event.Key() == tcell.KeyBacktab {
+		return true
+	}
+	return event.Key() == tcell.KeyTab && event.Modifiers()&tcell.ModShift != 0
 }

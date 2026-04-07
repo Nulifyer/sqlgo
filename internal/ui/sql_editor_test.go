@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
 
 	"github.com/nulifyer/sqlgo/internal/editor"
 )
@@ -36,6 +37,29 @@ func TestSQLEditorTabAcceptsHighlightedCompletion(t *testing.T) {
 	}
 	if sqlEditor.popupVisible {
 		t.Fatalf("expected autocomplete popup to hide after accepting a completion")
+	}
+}
+
+func TestSQLEditorInputHandlerTabAcceptsHighlightedCompletion(t *testing.T) {
+	t.Parallel()
+
+	sqlEditor := NewSQLEditor().SetCompletionProvider(func(force bool, text string, cursor int) (editor.CompletionContext, []editor.CompletionItem, error) {
+		return editor.CompletionContext{
+				Start:  0,
+				End:    len(text),
+				Prefix: text,
+			}, []editor.CompletionItem{
+				{Label: "users", Insert: "users", Kind: "table"},
+				{Label: "users_archive", Insert: "users_archive", Kind: "table"},
+			}, nil
+	})
+
+	sqlEditor.SetText("us", true)
+	handler := sqlEditor.InputHandler()
+	handler(tcell.NewEventKey(tcell.KeyTAB, 0, tcell.ModNone), func(p tview.Primitive) {})
+
+	if got := sqlEditor.GetText(); got != "users" {
+		t.Fatalf("GetText() = %q, want users", got)
 	}
 }
 
@@ -81,5 +105,35 @@ func TestSQLEditorShiftTabOutdentsCurrentLine(t *testing.T) {
 	}
 	if got := sqlEditor.GetText(); got != "    SELECT\n    name" {
 		t.Fatalf("GetText() = %q, want outdented current line", got)
+	}
+}
+
+func TestSQLEditorInputHandlerShiftTabOutdentsCurrentLine(t *testing.T) {
+	t.Parallel()
+
+	sqlEditor := NewSQLEditor()
+	sqlEditor.SetText("    SELECT\n        name", false)
+	sqlEditor.Select(len("    SELECT\n        name"), len("    SELECT\n        name"))
+
+	handler := sqlEditor.InputHandler()
+	handler(tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModShift), func(p tview.Primitive) {})
+
+	if got := sqlEditor.GetText(); got != "    SELECT\n    name" {
+		t.Fatalf("GetText() = %q, want outdented current line", got)
+	}
+}
+
+func TestSQLEditorInputHandlerShiftTabAsTabWithModifierOutdentsCurrentLine(t *testing.T) {
+	t.Parallel()
+
+	sqlEditor := NewSQLEditor()
+	sqlEditor.SetText("SELECT \n    *\n    ", false)
+	sqlEditor.Select(len("SELECT \n    *\n    "), len("SELECT \n    *\n    "))
+
+	handler := sqlEditor.InputHandler()
+	handler(tcell.NewEventKey(tcell.KeyTAB, 0, tcell.ModShift), func(p tview.Primitive) {})
+
+	if got := sqlEditor.GetText(); got != "SELECT \n    *\n" {
+		t.Fatalf("GetText() = %q, want trailing indent removed from current line", got)
 	}
 }
