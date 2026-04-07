@@ -12,14 +12,22 @@ import (
 type Root struct {
 	app      *tview.Application
 	registry *db.Registry
+	store    *db.ProfileStore
 	pages    *tview.Pages
 	status   *tview.TextView
+	focus    []tview.Primitive
 }
 
-func NewRoot(registry *db.Registry) *Root {
+func NewRoot(registry *db.Registry) (*Root, error) {
+	store, err := db.NewProfileStore()
+	if err != nil {
+		return nil, err
+	}
+
 	r := &Root{
 		app:      tview.NewApplication(),
 		registry: registry,
+		store:    store,
 		pages:    tview.NewPages(),
 		status:   tview.NewTextView(),
 	}
@@ -32,7 +40,7 @@ func NewRoot(registry *db.Registry) *Root {
 
 	r.pages.AddPage("main", r.buildMainPage(), true, true)
 
-	return r
+	return r, nil
 }
 
 func (r *Root) Run() error {
@@ -43,6 +51,7 @@ func (r *Root) buildMainPage() tview.Primitive {
 	explorer := r.buildExplorer()
 	editor := r.buildEditor()
 	results := r.buildResults()
+	r.focus = []tview.Primitive{explorer, editor, results}
 
 	center := tview.NewFlex().
 		SetDirection(tview.FlexRow).
@@ -66,16 +75,32 @@ func (r *Root) buildMainPage() tview.Primitive {
 			r.app.Stop()
 			return nil
 		case tcell.KeyTAB:
-			r.app.SetFocus(r.app.GetFocus().(tview.Primitive))
+			r.cycleFocus()
 			return event
 		case tcell.KeyF2:
-			r.showConnectionModal()
+			r.showConnectionManager()
 			return nil
 		}
 		return event
 	})
 
 	return layout
+}
+
+func (r *Root) cycleFocus() {
+	current := r.app.GetFocus()
+	if current == nil || len(r.focus) == 0 {
+		return
+	}
+
+	for i, primitive := range r.focus {
+		if primitive == current {
+			r.app.SetFocus(r.focus[(i+1)%len(r.focus)])
+			return
+		}
+	}
+
+	r.app.SetFocus(r.focus[0])
 }
 
 func (r *Root) buildExplorer() tview.Primitive {
@@ -133,15 +158,20 @@ func (r *Root) buildResults() tview.Primitive {
 	return results
 }
 
-func (r *Root) showConnectionModal() {
-	modal := tview.NewModal().
-		SetText("Connection manager is the next major feature.\n\nThe provider registry is already in place for SQL Server, Azure SQL, PostgreSQL, MySQL, SQLite, Snowflake, and Sybase ASE.").
-		AddButtons([]string{"Close"}).
-		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-			r.pages.RemovePage("modal")
-		})
+func (r *Root) showConnectionManager() {
+	manager := newConnectionManager(r)
+	r.pages.AddPage("overlay", manager.Primitive(), true, true)
+	r.app.SetFocus(manager.FocusTarget())
+	r.setStatusf("[blue]connection profiles[-] %s", r.store.Path())
+}
 
-	modal.SetBorder(true).SetTitle(" Connections ")
-	r.pages.AddPage("modal", modal, true, true)
-	r.app.SetFocus(modal)
+func (r *Root) closeOverlay() {
+	r.pages.RemovePage("overlay")
+	if len(r.focus) > 0 {
+		r.app.SetFocus(r.focus[0])
+	}
+}
+
+func (r *Root) setStatusf(format string, args ...any) {
+	r.status.SetText(fmt.Sprintf(format, args...))
 }

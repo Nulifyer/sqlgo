@@ -39,7 +39,10 @@ This repo currently contains:
 
 - a runnable `tview`/`tcell` application shell
 - an initial provider registry covering the planned database targets
+- persisted connection profiles with a built-in connection manager on `F2`
+- live connection testing through `database/sql` ping
 - architecture notes for the next implementation phases
+- DSN examples for early profile setup
 
 ## Next steps
 

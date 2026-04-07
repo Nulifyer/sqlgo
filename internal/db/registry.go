@@ -114,3 +114,12 @@ func (r *Registry) Providers() []Provider {
 	copy(out, r.providers)
 	return out
 }
+
+func (r *Registry) Provider(id ProviderID) (Provider, bool) {
+	for _, provider := range r.providers {
+		if provider.ID == id {
+			return provider, true
+		}
+	}
+	return Provider{}, false
+}

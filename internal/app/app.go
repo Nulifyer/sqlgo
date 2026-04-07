@@ -10,7 +10,10 @@ type App struct {
 }
 
 func New() (*App, error) {
-	root := ui.NewRoot(db.DefaultRegistry())
+	root, err := ui.NewRoot(db.DefaultRegistry())
+	if err != nil {
+		return nil, err
+	}
 	return &App{root: root}, nil
 }
 
