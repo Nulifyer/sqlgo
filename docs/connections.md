@@ -56,4 +56,4 @@ tds://user:password@localhost:5000/master?charset=utf8
 
 ## Important note
 
-The current scaffold stores the DSN directly in the profile JSON file so we can move quickly. Secret storage is planned next so we can separate passwords and tokens from the main profile record.
+Profiles can still store a raw DSN, but the current connection wizard primarily builds structured settings and stores passwords in the OS keychain. Raw DSNs remain useful for advanced or unsupported connection shapes, while the structured profile path is the preferred default.

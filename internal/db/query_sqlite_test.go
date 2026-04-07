@@ -136,6 +136,19 @@ func TestRunQuerySQLitePreviewTruncation(t *testing.T) {
 	}
 }
 
+func TestRunQueryReadOnlyBlocksWrites(t *testing.T) {
+	t.Parallel()
+
+	registry := DefaultRegistry()
+	profile := testSQLiteProfile(t)
+	profile.ReadOnly = true
+
+	_, err := RunQuery(context.Background(), profile, registry, `CREATE TABLE blocked (id INTEGER PRIMARY KEY);`)
+	if err == nil {
+		t.Fatalf("expected read-only connection to block write statement")
+	}
+}
+
 func testSQLiteProfile(t *testing.T) ConnectionProfile {
 	t.Helper()
 

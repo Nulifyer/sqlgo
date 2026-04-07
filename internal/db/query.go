@@ -46,7 +46,12 @@ func RunQueryWithSecrets(ctx context.Context, profile ConnectionProfile, registr
 		ExecutedAtUTC: start,
 	}
 
-	if looksLikeQuery(sqlText) {
+	isQuery := looksLikeQuery(sqlText)
+	if profile.ReadOnly && !isQuery {
+		return QueryResult{}, fmt.Errorf("read-only connection blocks write or session-changing statements")
+	}
+
+	if isQuery {
 		rows, err := conn.QueryContext(runCtx, sqlText)
 		if err != nil {
 			return QueryResult{}, err

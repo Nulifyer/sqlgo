@@ -38,6 +38,12 @@ type connectionManager struct {
 	testing         bool
 }
 
+type profileStore interface {
+	Load() ([]db.ConnectionProfile, error)
+	SaveAs(profile db.ConnectionProfile, previousName string) error
+	ReplaceAll(profiles []db.ConnectionProfile) error
+}
+
 func newConnectionManager(root *Root) *connectionManager {
 	m := &connectionManager{
 		root:       root,
@@ -362,6 +368,7 @@ func (m *connectionManager) buildAuthStep(form *tview.Form) {
 	case db.AuthWindowsSSO, db.AuthSQLiteFile:
 		form.AddTextView("Info", "No credentials required for this auth mode.", 0, 2, false, false)
 	case db.AuthAzureAD:
+		form.AddTextView("Info", "Username is optional. Leave it blank to use ActiveDirectoryDefault.", 0, 2, false, false)
 		form.AddInputField("Username", m.draft.Settings.Username, 60, nil, func(text string) {
 			m.draft.Settings.Username = strings.TrimSpace(text)
 		})
@@ -437,6 +444,8 @@ func (m *connectionManager) validateCurrentStep() error {
 		switch m.draft.AuthMode {
 		case db.AuthWindowsSSO, db.AuthSQLiteFile:
 			return nil
+		case db.AuthAzureAD:
+			return nil
 		default:
 			if strings.TrimSpace(m.draft.Settings.Username) == "" {
 				return fmt.Errorf("username is required")
@@ -492,11 +501,7 @@ func (m *connectionManager) saveProfile() {
 		m.root.setStatusf("[red]save failed:[-] %v", err)
 		return
 	}
-	if err := migrateProfileSecret(m.root.secrets, m.originalName, profile.Name, m.password); err != nil {
-		m.root.setStatusf("[red]password save failed:[-] %v", err)
-		return
-	}
-	if err := m.root.store.SaveAs(profile, m.originalName); err != nil {
+	if err := persistProfileAndSecret(m.root.store, m.root.secrets, profile, m.originalName, m.password); err != nil {
 		m.root.setStatusf("[red]save failed:[-] %v", err)
 		return
 	}
@@ -687,4 +692,24 @@ func emptyFallback(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func persistProfileAndSecret(store profileStore, secrets db.SecretStore, profile db.ConnectionProfile, originalName, password string) error {
+	previousProfiles, err := store.Load()
+	if err != nil {
+		return err
+	}
+
+	if err := store.SaveAs(profile, originalName); err != nil {
+		return err
+	}
+
+	if err := migrateProfileSecret(secrets, originalName, profile.Name, password); err != nil {
+		if rollbackErr := store.ReplaceAll(previousProfiles); rollbackErr != nil {
+			return fmt.Errorf("secret save failed: %v; rollback failed: %v", err, rollbackErr)
+		}
+		return err
+	}
+
+	return nil
 }

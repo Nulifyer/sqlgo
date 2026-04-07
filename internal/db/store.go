@@ -63,10 +63,6 @@ func (s *ProfileStore) SaveAs(profile ConnectionProfile, previousName string) er
 	}
 
 	now := time.Now().UTC()
-	if profile.CreatedAt.IsZero() {
-		profile.CreatedAt = now
-	}
-	profile.UpdatedAt = now
 
 	replaced := false
 	for i := range profiles {
@@ -74,25 +70,21 @@ func (s *ProfileStore) SaveAs(profile ConnectionProfile, previousName string) er
 			if profile.CreatedAt.IsZero() {
 				profile.CreatedAt = profiles[i].CreatedAt
 			}
+			profile.UpdatedAt = now
 			profiles[i] = profile
 			replaced = true
 			break
 		}
 	}
 	if !replaced {
+		if profile.CreatedAt.IsZero() {
+			profile.CreatedAt = now
+		}
+		profile.UpdatedAt = now
 		profiles = append(profiles, profile)
 	}
 
-	sort.Slice(profiles, func(i, j int) bool {
-		return profiles[i].Name < profiles[j].Name
-	})
-
-	data, err := json.MarshalIndent(profiles, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(s.path, data, 0o600)
+	return s.ReplaceAll(profiles)
 }
 
 func (s *ProfileStore) Delete(name string) error {
@@ -108,7 +100,15 @@ func (s *ProfileStore) Delete(name string) error {
 		}
 	}
 
-	data, err := json.MarshalIndent(filtered, "", "  ")
+	return s.ReplaceAll(filtered)
+}
+
+func (s *ProfileStore) ReplaceAll(profiles []ConnectionProfile) error {
+	sort.Slice(profiles, func(i, j int) bool {
+		return profiles[i].Name < profiles[j].Name
+	})
+
+	data, err := json.MarshalIndent(profiles, "", "  ")
 	if err != nil {
 		return err
 	}
