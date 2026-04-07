@@ -9,3 +9,20 @@ dev-data/*.sqlite
 dev-data/*.sqlite3
 !dev-data/.gitkeep
 
+# Go build and test artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+.coverprofile
+cpu.out
+mem.out
+
+# VS Code local debug outputs
+.vscode/*-debug.exe
+.vscode/*-debug-tests.exe
+.vscode/manual-debug.exe

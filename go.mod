@@ -7,10 +7,13 @@ require (
 	github.com/gdamore/tcell/v2 v2.13.8
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/jackc/pgx/v5 v5.9.1
+	github.com/mattn/go-runewidth v0.0.22
 	github.com/microsoft/go-mssqldb v1.9.8
 	github.com/rivo/tview v0.42.0
 	github.com/snowflakedb/gosnowflake/v2 v2.0.0
 	github.com/thda/tds v0.1.7
+	github.com/tree-sitter/go-tree-sitter v0.25.0
+	github.com/wippyai/tree-sitter-sql v0.0.4
 	modernc.org/sqlite v1.48.1
 )
 
@@ -45,6 +48,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.10 // indirect
 	github.com/aws/smithy-go v1.24.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
 	github.com/danieljoos/wincred v1.2.3 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/dvsekhvalnov/jose2go v1.8.0 // indirect
@@ -66,6 +70,7 @@ require (
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mattn/go-pointer v0.0.1 // indirect
 	github.com/mtibben/percent v0.2.1 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect

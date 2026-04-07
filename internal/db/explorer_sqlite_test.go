@@ -28,17 +28,20 @@ func TestLoadExplorerSnapshotSQLite(t *testing.T) {
 	if len(snapshot.Databases) != 1 {
 		t.Fatalf("len(Databases) = %d, want 1", len(snapshot.Databases))
 	}
-	if len(snapshot.Tables) != 3 {
-		t.Fatalf("len(Tables) = %d, want 3", len(snapshot.Tables))
+	if len(snapshot.Tables) != 6 {
+		t.Fatalf("len(Tables) = %d, want 6", len(snapshot.Tables))
 	}
-	if len(snapshot.Views) != 0 {
-		t.Fatalf("len(Views) = %d, want 0", len(snapshot.Views))
+	if len(snapshot.Views) != 2 {
+		t.Fatalf("len(Views) = %d, want 2", len(snapshot.Views))
 	}
 
 	wantTables := map[string]bool{
-		"events":   false,
-		"projects": false,
-		"users":    false,
+		"audit_logs":     false,
+		"csv_edge_cases": false,
+		"events":         false,
+		"projects":       false,
+		"tasks":          false,
+		"users":          false,
 	}
 	for _, table := range snapshot.Tables {
 		if _, ok := wantTables[table.Name]; ok {
