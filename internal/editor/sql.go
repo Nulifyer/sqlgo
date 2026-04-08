@@ -49,12 +49,15 @@ func FormatSQL(input string) string {
 	var b strings.Builder
 	lineStart := true
 	indent := 0
-	listIndent := 0
+	clauseBodyIndent := 0
+	fromIndent := -1
 	parenDepth := 0
 	var nestedBlockStack []bool
+	var nestedIndentStack []int
 	inSelectList := false
 	inSetList := false
 	inValuesList := false
+	currentClause := ""
 
 	writeIndent := func() {
 		if !lineStart {
@@ -93,54 +96,83 @@ func FormatSQL(input string) string {
 	for i := 0; i < len(tokens); i++ {
 		if matched, size, replacement := clauseAt(tokens, i); matched {
 			baseIndent := parenDepth
+			if len(nestedIndentStack) > 0 {
+				baseIndent = max(baseIndent, nestedIndentStack[len(nestedIndentStack)-1])
+			}
 			switch replacement {
 			case "SELECT":
 				if b.Len() > 0 {
 					newLine()
 				}
 				indent = baseIndent
+				currentClause = replacement
 				inSelectList, inSetList, inValuesList = true, false, false
-				listIndent = indent + 1
+				clauseBodyIndent = baseIndent + 1
+				fromIndent = -1
 			case "SET":
 				newLine()
-				indent = baseIndent + 1
+				indent = baseIndent
+				currentClause = replacement
 				inSelectList, inSetList, inValuesList = false, true, false
-				listIndent = indent
+				clauseBodyIndent = baseIndent + 1
+				fromIndent = -1
 			case "VALUES":
 				newLine()
-				indent = baseIndent + 1
+				indent = baseIndent
+				currentClause = replacement
 				inSelectList, inSetList, inValuesList = false, false, true
-				listIndent = indent
+				clauseBodyIndent = baseIndent + 1
+				fromIndent = -1
 			case "FROM", "WHERE", "GROUP BY", "HAVING", "ORDER BY", "LIMIT", "OFFSET", "UNION", "UNION ALL":
 				newLine()
 				indent = baseIndent
+				currentClause = replacement
 				inSelectList, inSetList, inValuesList = false, false, false
+				clauseBodyIndent = baseIndent + 1
+				if replacement == "FROM" {
+					fromIndent = clauseBodyIndent
+				} else {
+					fromIndent = -1
+				}
 			case "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "FULL JOIN", "CROSS JOIN", "JOIN":
 				if b.Len() > 0 {
 					newLine()
 				}
-				indent = baseIndent + 1
+				if fromIndent >= 0 {
+					indent = fromIndent
+				} else {
+					indent = baseIndent + 1
+				}
+				currentClause = "JOIN"
 				inSelectList, inSetList, inValuesList = false, false, false
-			case "ON":
-				newLine()
-				indent = baseIndent + 2
-				inSelectList, inSetList, inValuesList = false, false, false
+				clauseBodyIndent = indent + 1
 			case "INSERT INTO", "UPDATE", "DELETE FROM", "CREATE TABLE", "ALTER TABLE", "DROP TABLE":
 				if b.Len() > 0 {
 					newLine()
 				}
 				indent = baseIndent
+				currentClause = replacement
 				inSelectList, inSetList, inValuesList = false, false, false
+				clauseBodyIndent = baseIndent + 1
+				fromIndent = -1
 			case "WITH":
 				if b.Len() > 0 {
 					newLine()
 				}
 				indent = baseIndent
+				currentClause = replacement
+				clauseBodyIndent = baseIndent + 1
+				fromIndent = -1
 			}
 
 			writeToken(replacement)
 			i += size - 1
-			writeSpace()
+			if clauseBodyStartsOnNextLine(replacement) {
+				newLine()
+				indent = clauseBodyIndent
+			} else {
+				writeSpace()
+			}
 			continue
 		}
 
@@ -165,6 +197,21 @@ func FormatSQL(input string) string {
 			writeSpace()
 			writeToken(tok.text)
 		case tokenWord:
+			upper := strings.ToUpper(tok.text)
+			if upper == "ON" && currentClause == "JOIN" {
+				writeSpace()
+				writeToken("ON")
+				writeSpace()
+				currentClause = "ON"
+				continue
+			}
+			if (upper == "AND" || upper == "OR") && isConditionClause(currentClause) {
+				newLine()
+				indent = clauseBodyIndent
+				writeToken(upper)
+				writeSpace()
+				continue
+			}
 			writeSpace()
 			writeToken(normalizeKeyword(tok.text))
 		case tokenNumber:
@@ -178,9 +225,9 @@ func FormatSQL(input string) string {
 			switch tok.text {
 			case ",":
 				writeToken(",")
-				if inSelectList || inSetList || inValuesList {
+				if inSelectList || inSetList || inValuesList || currentClause == "FROM" {
 					newLine()
-					indent = listIndent
+					indent = clauseBodyIndent
 				} else {
 					writeSpace()
 				}
@@ -193,6 +240,9 @@ func FormatSQL(input string) string {
 				parenDepth++
 				nestedBlockStack = append(nestedBlockStack, nestedBlock)
 				if nestedBlock {
+					nestedIndentStack = append(nestedIndentStack, indent+1)
+				}
+				if nestedBlock {
 					newLine()
 				}
 			case ")":
@@ -200,6 +250,9 @@ func FormatSQL(input string) string {
 				if len(nestedBlockStack) > 0 {
 					nestedBlock = nestedBlockStack[len(nestedBlockStack)-1]
 					nestedBlockStack = nestedBlockStack[:len(nestedBlockStack)-1]
+				}
+				if nestedBlock && len(nestedIndentStack) > 0 {
+					nestedIndentStack = nestedIndentStack[:len(nestedIndentStack)-1]
 				}
 				parenDepth = max(parenDepth-1, 0)
 				if nestedBlock && !lineStart {
@@ -215,7 +268,9 @@ func FormatSQL(input string) string {
 				newLine()
 				inSelectList, inSetList, inValuesList = false, false, false
 				indent = 0
-				listIndent = 0
+				clauseBodyIndent = 0
+				currentClause = ""
+				fromIndent = -1
 			case ".":
 				writeToken(".")
 			default:
@@ -461,7 +516,6 @@ func clauseAt(tokens []token, index int) (bool, int, string) {
 		{[]string{"SET"}, "SET"},
 		{[]string{"VALUES"}, "VALUES"},
 		{[]string{"JOIN"}, "JOIN"},
-		{[]string{"ON"}, "ON"},
 		{[]string{"UNION"}, "UNION"},
 		{[]string{"WITH"}, "WITH"},
 	}
@@ -551,6 +605,26 @@ func isClauseKeyword(tok token, words ...string) bool {
 		}
 	}
 	return false
+}
+
+func clauseBodyStartsOnNextLine(clause string) bool {
+	switch clause {
+	case "SELECT", "FROM", "WHERE", "GROUP BY", "HAVING", "ORDER BY", "LIMIT", "OFFSET",
+		"UNION", "UNION ALL", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "FULL JOIN",
+		"CROSS JOIN", "JOIN", "SET", "VALUES", "WITH":
+		return true
+	default:
+		return false
+	}
+}
+
+func isConditionClause(clause string) bool {
+	switch clause {
+	case "WHERE", "HAVING", "ON":
+		return true
+	default:
+		return false
+	}
 }
 
 func opensNestedBlock(tokens []token, index int) bool {

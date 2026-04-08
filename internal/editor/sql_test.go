@@ -12,11 +12,15 @@ func TestFormatSQLNormalizesClausesAndKeywords(t *testing.T) {
 	got := FormatSQL(input)
 
 	wantParts := []string{
-		"SELECT id,",
+		"SELECT",
+		"    id,",
 		"    name",
-		"FROM users",
-		"WHERE status = 'active'",
-		"ORDER BY created_at DESC;",
+		"FROM",
+		"    users",
+		"WHERE",
+		"    status = 'active'",
+		"ORDER BY",
+		"    created_at DESC;",
 	}
 	for _, want := range wantParts {
 		if !strings.Contains(got, want) {
@@ -49,10 +53,12 @@ func TestFormatSQLIndentsJoinAndOnClauses(t *testing.T) {
 	got := FormatSQL(input)
 
 	wantParts := []string{
-		"FROM users u",
-		"    JOIN projects p",
-		"        ON p.owner_id = u.id",
-		"WHERE u.active = 1;",
+		"FROM",
+		"    users u",
+		"    JOIN",
+		"        projects p ON p.owner_id = u.id",
+		"WHERE",
+		"    u.active = 1;",
 	}
 	for _, want := range wantParts {
 		if !strings.Contains(got, want) {
@@ -68,21 +74,67 @@ func TestFormatSQLIndentsNestedSubquery(t *testing.T) {
 	got := FormatSQL(input)
 
 	wantParts := []string{
-		"SELECT id",
-		"FROM (",
-		"    SELECT id,",
-		"        owner_id",
-		"    FROM projects",
-		"    WHERE owner_id IN (",
-		"        SELECT id",
-		"        FROM users",
-		"        WHERE active = 1",
-		"    )",
+		"SELECT",
+		"    id",
+		"FROM",
+		"    (",
+		"        SELECT",
+		"            id,",
+		"            owner_id",
+		"        FROM",
+		"            projects",
+		"        WHERE",
+		"            owner_id IN (",
+		"                SELECT",
+		"                    id",
+		"                FROM",
+		"                    users",
+		"                WHERE",
+		"                    active = 1",
 		") p;",
 	}
 	for _, want := range wantParts {
 		if !strings.Contains(got, want) {
 			t.Fatalf("formatted nested SQL missing %q\n%s", want, got)
+		}
+	}
+}
+
+func TestFormatSQLKeepsIndentedBodiesAfterClauseLineBreaks(t *testing.T) {
+	t.Parallel()
+
+	input := "select\n    *\nfrom\n   audit_logs"
+	got := FormatSQL(input)
+
+	wantParts := []string{
+		"SELECT",
+		"    *",
+		"FROM",
+		"    audit_logs",
+	}
+	for _, want := range wantParts {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatted SQL missing %q\n%s", want, got)
+		}
+	}
+}
+
+func TestFormatSQLUsesLeadingBooleanOperators(t *testing.T) {
+	t.Parallel()
+
+	input := "select * from audit_logs where status = 'ok' and active = 1 order by created_at desc"
+	got := FormatSQL(input)
+
+	wantParts := []string{
+		"WHERE",
+		"    status = 'ok'",
+		"    AND active = 1",
+		"ORDER BY",
+		"    created_at DESC",
+	}
+	for _, want := range wantParts {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatted SQL missing %q\n%s", want, got)
 		}
 	}
 }

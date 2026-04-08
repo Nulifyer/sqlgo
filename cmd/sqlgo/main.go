@@ -7,6 +7,8 @@ import (
 )
 
 func main() {
+	enableVTInput()
+
 	application, err := app.New()
 	if err != nil {
 		log.Fatal(err)

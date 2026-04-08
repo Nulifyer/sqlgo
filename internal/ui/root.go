@@ -33,9 +33,14 @@ type Root struct {
 	mainLayout      tview.Primitive
 	explorer        *tview.TreeView
 	editor          *SQLEditor
+	editorLayout    *tview.Flex
 	editorStatus    *tview.TextView
 	results         *tview.TextView
 	sqlLens         *tview.TextView
+	focusEditor     *SQLEditor
+	focusStatus     *tview.TextView
+	keyDebug        *tview.TextView
+	keyDebugHistory []string
 	active          *db.ConnectionProfile
 	focus           []tview.Primitive
 	focusNames      []string
@@ -43,6 +48,7 @@ type Root struct {
 	truncateResults bool
 	lastResult      *db.QueryResult
 	completionCache map[string]db.CompletionMetadata
+	analyzer        *editor.Analyzer
 }
 
 type explorerNodeRef struct {
@@ -71,6 +77,7 @@ func NewRoot(registry *db.Registry) (*Root, error) {
 		status:          tview.NewTextView(),
 		truncateResults: true,
 		completionCache: map[string]db.CompletionMetadata{},
+		analyzer:        editor.NewAnalyzer(),
 	}
 
 	r.status.SetDynamicColors(true).SetTextAlign(tview.AlignLeft).SetBorder(true).SetTitle(" Status ")
@@ -80,6 +87,7 @@ func NewRoot(registry *db.Registry) (*Root, error) {
 }
 
 func (r *Root) Run() error {
+	defer r.analyzer.Close()
 	r.active = nil
 	if profiles, err := r.store.Load(); err == nil && len(profiles) == 0 {
 		r.showConnectionManager()
@@ -117,15 +125,24 @@ func (r *Root) buildMainPage() tview.Primitive {
 
 func (r *Root) handleGlobalKeys(event *tcell.EventKey) *tcell.EventKey {
 	if event.Key() == tcell.KeyF7 {
-		if r.pages.HasPage("overlay") && !r.pages.HasPage("sql-lens") {
+		if r.pages.HasPage("overlay") {
 			return event
 		}
 		r.toggleSQLLens()
 		return nil
 	}
+	if event.Key() == tcell.KeyF8 {
+		r.toggleKeyDebug()
+		return nil
+	}
 
-	if r.pages.HasPage("overlay") {
+	if r.pages.HasPage("overlay") || r.pages.HasPage("key-debug") {
 		return event
+	}
+
+	if r.pages.HasPage("sql-studio") && event.Key() == tcell.KeyEsc {
+		r.toggleSQLLens()
+		return nil
 	}
 
 	if r.focusIndex == int(focusEditor) && r.handleAutocompleteKey(event) {
@@ -269,35 +286,9 @@ func (r *Root) activateExplorerSelection(node *tview.TreeNode, preview bool) {
 func (r *Root) buildEditor() tview.Primitive {
 	textArea := NewSQLEditor()
 	r.editor = textArea
-	textArea.SetBorder(true).SetTitle(" Query Editor ")
-	textArea.SetWrap(false).SetWordWrap(false)
-	textArea.SetPlaceholder("-- Write SQL here.\n-- F4 format, F5 run, F7 SQL lens.\n")
-	textArea.SetCompletionProvider(func(force bool, text string, cursor int) (editor.CompletionContext, []editor.CompletionItem, error) {
-		ctx := editor.AnalyzeSQL(text, cursor).Context
-		if r.active == nil {
-			if force {
-				r.setStatusf("[red]autocomplete blocked:[-] select an active connection first")
-			}
-			return ctx, nil, fmt.Errorf("no active connection")
-		}
-
-		meta, err := r.completionMetadata(*r.active)
-		if err != nil {
-			if force {
-				r.setStatusf("[red]autocomplete unavailable:[-] %v", err)
-			}
-			return ctx, nil, err
-		}
-
-		items := editor.BuildCompletionItems(meta, text, ctx)
-		if force && len(items) == 0 {
-			r.setStatusf("[yellow]autocomplete[-] no matches for %q", ctx.Prefix)
-		}
-		return ctx, items, nil
-	})
+	r.configureEditor(textArea, " Query Editor ")
 	textArea.SetChangedFunc(func() {
 		r.updateEditorStatus()
-		r.refreshSQLLens()
 	})
 	textArea.SetMovedFunc(func() {
 		r.updateEditorStatus()
@@ -308,11 +299,14 @@ func (r *Root) buildEditor() tview.Primitive {
 	status.SetDynamicColors(true)
 	status.SetBorder(true).SetTitle(" Editor Status ")
 
+	editorLayout := tview.NewFlex()
+	r.editorLayout = editorLayout
+	r.rebuildEditorLayout()
 	r.updateEditorStatus()
 
 	return tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		AddItem(textArea, 0, 1, true).
+		AddItem(editorLayout, 0, 1, true).
 		AddItem(status, 3, 0, false)
 }
 
@@ -370,13 +364,130 @@ func (r *Root) showHelp() {
 }
 
 func helpText() string {
-	return "[yellow]Global[-]\nAlt+1 Explorer\nAlt+2 Editor\nAlt+3 Results\nF1 Help\nF2 Connections\nF4 Format SQL\nF5 Run Query\nF7 SQL Lens\nEsc Close overlay\n\n[yellow]Editor[-]\nTab accepts completion when open\nShift+Tab outdents\nCtrl+Space autocomplete\nF4 format current buffer\nF5 run selection or full buffer\nF7 open syntax-highlighted SQL lens\n\n[yellow]Explorer[-]\nEnter activate selection\nSpace preview table/view\nr refresh explorer\nn new connection\n\n[yellow]Connection Wizard[-]\nTab moves between fields\nCtrl+T test connection\nCtrl+S save on review step\nDel delete selected connection"
+	return "[yellow]Global[-]\nAlt+1 Explorer\nAlt+2 Editor\nAlt+3 Results\nF1 Help\nF2 Connections\nF4 Format SQL\nF5 Run Query\nF7 Fullscreen SQL Studio\nF8 Key Debug\nEsc Close overlay\n\n[yellow]Editor[-]\nTab indents or accepts completion when open\nAlt+] indent line/block\nAlt+[ outdent line/block\nCtrl+Space autocomplete\nF4 format current buffer\nF5 run selection or full buffer\nF7 open fullscreen highlighted SQL studio\nF8 inspect terminal key events\n\n[yellow]Explorer[-]\nEnter activate selection\nSpace preview table/view\nr refresh explorer\nn new connection\n\n[yellow]Connection Wizard[-]\nTab moves between fields\nCtrl+T test connection\nCtrl+S save on review step\nDel delete selected connection"
 }
 
 func (r *Root) closeOverlay() {
 	r.pages.RemovePage("overlay")
 	r.refreshExplorer(true)
 	r.setFocusByIndex(r.focusIndex)
+}
+
+func (r *Root) toggleKeyDebug() {
+	if r.pages.HasPage("key-debug") {
+		r.closeKeyDebug()
+		return
+	}
+
+	debugView := tview.NewTextView().
+		SetDynamicColors(true).
+		SetWrap(true).
+		SetWordWrap(true)
+	debugView.SetBorder(true).SetTitle(" Key Debug ")
+	debugView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyEsc, tcell.KeyF8:
+			r.closeKeyDebug()
+			return nil
+		}
+		r.recordKeyDebugEvent(event)
+		return nil
+	})
+
+	r.keyDebug = debugView
+	r.keyDebugHistory = nil
+	r.renderKeyDebug()
+	r.pages.AddPage("key-debug", centerModal(debugView, 84, 22), true, true)
+	r.app.SetFocus(debugView)
+	r.setStatusf("[green]key debug[-] press keys to inspect terminal events")
+}
+
+func (r *Root) closeKeyDebug() {
+	r.pages.RemovePage("key-debug")
+	r.keyDebug = nil
+	r.keyDebugHistory = nil
+	r.setFocusByIndex(r.focusIndex)
+	r.setStatusf("[green]key debug[-] closed")
+}
+
+func (r *Root) recordKeyDebugEvent(event *tcell.EventKey) {
+	if event == nil {
+		return
+	}
+	entry := formatKeyDebugEvent(event)
+	r.keyDebugHistory = append([]string{entry}, r.keyDebugHistory...)
+	if len(r.keyDebugHistory) > 18 {
+		r.keyDebugHistory = r.keyDebugHistory[:18]
+	}
+	r.renderKeyDebug()
+}
+
+func (r *Root) renderKeyDebug() {
+	if r.keyDebug == nil {
+		return
+	}
+
+	var b strings.Builder
+	b.WriteString("[yellow]Press keys in this window.[-]\n")
+	b.WriteString("[gray]Esc/F8 closes. We care most about how Tab and Shift+Tab arrive.[-]\n\n")
+	b.WriteString("[blue]Expected distinct Shift+Tab:[-] [green]Backtab[-]\n")
+	b.WriteString("[blue]Collapsed Shift+Tab:[-] [yellow]Tab[-]\n\n")
+	if len(r.keyDebugHistory) == 0 {
+		b.WriteString("[gray]No key events captured yet.[-]")
+	} else {
+		for index, entry := range r.keyDebugHistory {
+			fmt.Fprintf(&b, "[yellow]%02d[-] %s\n", index+1, entry)
+		}
+	}
+	r.keyDebug.SetText(b.String())
+}
+
+func formatKeyDebugEvent(event *tcell.EventKey) string {
+	runeText := "none"
+	if event.Rune() != 0 {
+		runeText = fmt.Sprintf("%q U+%04X", event.Rune(), event.Rune())
+	}
+	return fmt.Sprintf(
+		"name=%s  key=%s (%d)  rune=%s  mods=%s",
+		tview.Escape(event.Name()),
+		tview.Escape(keyName(event.Key())),
+		event.Key(),
+		tview.Escape(runeText),
+		tview.Escape(modifierNames(event.Modifiers())),
+	)
+}
+
+func keyName(key tcell.Key) string {
+	if name, ok := tcell.KeyNames[key]; ok {
+		return name
+	}
+	return fmt.Sprintf("Key[%d]", key)
+}
+
+func modifierNames(mod tcell.ModMask) string {
+	if mod == tcell.ModNone {
+		return "none"
+	}
+	parts := make([]string, 0, 4)
+	if mod&tcell.ModShift != 0 {
+		parts = append(parts, "Shift")
+	}
+	if mod&tcell.ModAlt != 0 {
+		parts = append(parts, "Alt")
+	}
+	if mod&tcell.ModCtrl != 0 {
+		parts = append(parts, "Ctrl")
+	}
+	if mod&tcell.ModMeta != 0 {
+		parts = append(parts, "Meta")
+	}
+	if mod&tcell.ModHyper != 0 {
+		parts = append(parts, "Hyper")
+	}
+	if len(parts) == 0 {
+		return fmt.Sprintf("mask=%d", mod)
+	}
+	return strings.Join(parts, "+")
 }
 
 func (r *Root) setStatusf(format string, args ...any) {
@@ -563,23 +674,43 @@ func (r *Root) previewExplorerObject(profile db.ConnectionProfile, object db.Exp
 }
 
 func (r *Root) editorQueryText() (string, string) {
-	selected, _, _ := r.editor.GetSelection()
+	view := r.activeEditor()
+	if view == nil {
+		return "", "buffer"
+	}
+	selected, _, end := view.GetSelection()
 	if trimmed := strings.TrimSpace(selected); trimmed != "" {
 		return trimmed, "selection"
 	}
-	return strings.TrimSpace(r.editor.GetText()), "buffer"
+	text := view.GetText()
+	if strings.TrimSpace(text) == "" {
+		return "", "buffer"
+	}
+	stmtStart, stmtEnd := editor.StatementRangeAt(text, end)
+	if stmtEnd > stmtStart {
+		stmt := strings.TrimSpace(text[stmtStart:stmtEnd])
+		if stmt != "" {
+			return stmt, "statement"
+		}
+	}
+	return strings.TrimSpace(text), "buffer"
 }
 
 func (r *Root) formatEditorSQL() {
-	if r.editor == nil {
+	editorView := r.activeEditor()
+	if editorView == nil {
 		return
 	}
 
-	current := r.editor.GetText()
+	current := editorView.GetText()
 	if strings.TrimSpace(current) == "" {
 		r.setStatusf("[yellow]format skipped[-] query editor is empty")
 		return
 	}
+
+	selection, start, end := editorView.GetSelection()
+	startLine, startColumn := lineColumnFromOffset(current, start)
+	endLine, endColumn := lineColumnFromOffset(current, end)
 
 	formatted := editor.FormatSQL(current)
 	if formatted == current {
@@ -587,54 +718,97 @@ func (r *Root) formatEditorSQL() {
 		return
 	}
 
-	r.editor.SetText(formatted, false)
-	r.editor.Select(0, 0)
+	editorView.SetText(formatted, false)
+	nextStart := offsetForLineColumn(formatted, startLine, startColumn)
+	nextEnd := offsetForLineColumn(formatted, endLine, endColumn)
+	if selection == "" {
+		editorView.Select(nextEnd, nextEnd)
+	} else {
+		editorView.Select(nextStart, nextEnd)
+	}
 	r.closeAutocomplete()
-	r.refreshSQLLens()
+	r.updateFocusStatus()
 	r.setStatusf("[green]format complete[-] editor buffer updated")
 }
 
-func (r *Root) toggleSQLLens() {
-	if r.pages.HasPage("sql-lens") {
-		r.pages.RemovePage("sql-lens")
-		r.sqlLens = nil
-		r.setFocusByIndex(r.focusIndex)
-		r.setStatusf("[green]sql lens[-] closed")
-		return
+func lineColumnFromOffset(text string, offset int) (int, int) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(text) {
+		offset = len(text)
 	}
 
-	lens := tview.NewTextView()
-	r.sqlLens = lens
-	lens.SetDynamicColors(true).SetWrap(false).SetWordWrap(false).SetScrollable(true)
-	lens.SetBorder(true).SetTitle(" SQL Lens ")
-	lens.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch event.Key() {
-		case tcell.KeyEsc, tcell.KeyF7:
-			r.toggleSQLLens()
-			return nil
-		case tcell.KeyF4:
-			r.toggleSQLLens()
-			r.formatEditorSQL()
-			return nil
+	line := 0
+	lineStart := 0
+	for index := 0; index < offset; index++ {
+		if text[index] == '\n' {
+			line++
+			lineStart = index + 1
 		}
-		return event
-	})
-	r.refreshSQLLens()
-	r.pages.AddPage("sql-lens", lens, true, true)
-	r.app.SetFocus(lens)
-	r.setStatusf("[green]sql lens[-] opened")
+	}
+	return line, offset - lineStart
+}
+
+func offsetForLineColumn(text string, targetLine, targetColumn int) int {
+	if targetLine < 0 {
+		targetLine = 0
+	}
+	if targetColumn < 0 {
+		targetColumn = 0
+	}
+
+	line := 0
+	lineStart := 0
+	for index := 0; index < len(text); index++ {
+		if line == targetLine {
+			lineEnd := lineEndFromOffset(text, index)
+			return min(lineStart+targetColumn, lineEnd)
+		}
+		if text[index] == '\n' {
+			line++
+			lineStart = index + 1
+		}
+	}
+
+	if line == targetLine {
+		return min(lineStart+targetColumn, len(text))
+	}
+	return len(text)
+}
+
+func lineEndFromOffset(text string, offset int) int {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(text) {
+		offset = len(text)
+	}
+	if index := strings.Index(text[offset:], "\n"); index >= 0 {
+		return offset + index
+	}
+	return len(text)
+}
+
+func (r *Root) toggleSQLLens() {
+	if r.pages.HasPage("sql-studio") {
+		r.closeSQLStudio()
+		return
+	}
+	r.openSQLStudio()
 }
 
 func (r *Root) showAutocomplete() {
-	if r.editor == nil {
+	editor := r.activeEditor()
+	if editor == nil {
 		return
 	}
-	r.editor.TriggerAutocomplete()
+	editor.TriggerAutocomplete()
 }
 
 func (r *Root) closeAutocomplete() {
-	if r.editor != nil {
-		r.editor.HideAutocomplete()
+	if editor := r.activeEditor(); editor != nil {
+		editor.HideAutocomplete()
 	}
 	r.updateStatusHints("")
 }
@@ -653,14 +827,12 @@ func (r *Root) completionMetadata(profile db.ConnectionProfile) (db.CompletionMe
 	return meta, nil
 }
 
-func (r *Root) refreshSQLLens() {
-	if r.sqlLens == nil {
+func (r *Root) rebuildEditorLayout() {
+	if r.editorLayout == nil || r.editor == nil {
 		return
 	}
-	var b strings.Builder
-	b.WriteString("[gray]Esc/F7 close  F4 format in editor[-]\n\n")
-	b.WriteString(editor.HighlightSQL(r.editor.GetText()))
-	r.sqlLens.SetText(b.String())
+	r.editorLayout.Clear()
+	r.editorLayout.AddItem(r.editor, 0, 3, true)
 }
 
 func (r *Root) refreshRenderedResult() {
@@ -683,14 +855,14 @@ func (r *Root) updateEditorStatus() {
 	}
 
 	selectionInfo := "[gray]0[-]"
-	mode := "buffer"
+	mode := "statement"
 	if selection != "" {
 		selectionInfo = fmt.Sprintf("[yellow]%d[-]", utf8.RuneCountInString(selection))
 		mode = "selection"
 	}
 
 	r.editorStatus.SetText(fmt.Sprintf(
-		"Conn %s  [yellow]Ln[-] %d  [yellow]Col[-] %d  [yellow]Sel[-] %s  [yellow]Run[-] %s  [yellow]Keys[-] F4 format  F5 run  F7 lens",
+		"Conn %s  [yellow]Ln[-] %d  [yellow]Col[-] %d  [yellow]Sel[-] %s  [yellow]Run[-] %s  [yellow]Keys[-] F4 format  F5 run  F7 studio",
 		connection,
 		toRow+1,
 		toColumn+1,
@@ -942,10 +1114,123 @@ func fallbackText(value, fallback string) string {
 }
 
 func (r *Root) handleAutocompleteKey(event *tcell.EventKey) bool {
-	if r.editor == nil {
+	editor := r.activeEditor()
+	if editor == nil {
 		return false
 	}
-	return r.editor.HandleAutocompleteKey(event)
+	return editor.HandleAutocompleteKey(event)
+}
+
+func (r *Root) activeEditor() *SQLEditor {
+	if r.pages.HasPage("sql-studio") && r.focusEditor != nil {
+		return r.focusEditor
+	}
+	return r.editor
+}
+
+func (r *Root) configureEditor(textArea *SQLEditor, title string) {
+	if textArea == nil {
+		return
+	}
+	textArea.SetBorder(true).SetTitle(title)
+	textArea.SetWrap(false).SetWordWrap(false)
+	textArea.SetPlaceholder("-- Write SQL here.\n-- F4 format, F5 run, F7 SQL studio.\n")
+	textArea.SetCompletionProvider(func(force bool, text string, cursor int) (editor.CompletionContext, []editor.CompletionItem, error) {
+		ctx := r.analyzer.Analyze(text, cursor).Context
+		if r.active == nil {
+			if force {
+				r.setStatusf("[red]autocomplete blocked:[-] select an active connection first")
+			}
+			return ctx, nil, fmt.Errorf("no active connection")
+		}
+
+		meta, err := r.completionMetadata(*r.active)
+		if err != nil {
+			if force {
+				r.setStatusf("[red]autocomplete unavailable:[-] %v", err)
+			}
+			return ctx, nil, err
+		}
+
+		items := editor.BuildCompletionItems(meta, text, ctx)
+		if force && len(items) == 0 {
+			r.setStatusf("[yellow]autocomplete[-] no matches for %q", ctx.Prefix)
+		}
+		return ctx, items, nil
+	})
+}
+
+func (r *Root) openSQLStudio() {
+	if r.editor == nil {
+		return
+	}
+
+	studioEditor := NewSQLEditor()
+	r.configureEditor(studioEditor, " SQL Studio ")
+	studioEditor.SetBuffer(r.editor.Buffer())
+	studioEditor.SetRenderModeHighlighted(true)
+	studioEditor.SetChangedFunc(func() {
+		r.updateFocusStatus()
+	})
+	studioEditor.SetMovedFunc(func() {
+		r.updateFocusStatus()
+	})
+
+	status := tview.NewTextView()
+	r.focusStatus = status
+	status.SetDynamicColors(true)
+	status.SetBorder(true).SetTitle(" Studio Status ")
+
+	layout := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(studioEditor, 0, 1, true).
+		AddItem(status, 3, 0, false)
+
+	r.focusEditor = studioEditor
+	r.focusIndex = int(focusEditor)
+	r.updateFocusStatus()
+	r.pages.AddPage("sql-studio", layout, true, true)
+	r.app.SetFocus(studioEditor)
+	r.setStatusf("[green]sql studio[-] fullscreen highlighted editor opened")
+}
+
+func (r *Root) closeSQLStudio() {
+	r.pages.RemovePage("sql-studio")
+	r.focusEditor = nil
+	r.focusStatus = nil
+	r.sqlLens = nil
+	r.updateEditorStatus()
+	r.setFocusByIndex(int(focusEditor))
+	r.setStatusf("[green]sql studio[-] closed")
+}
+
+func (r *Root) updateFocusStatus() {
+	if r.focusEditor == nil || r.focusStatus == nil {
+		return
+	}
+
+	_, _, toRow, toColumn := r.focusEditor.GetCursor()
+	selection, _, _ := r.focusEditor.GetSelection()
+	connection := "[gray]none[-]"
+	if r.active != nil {
+		connection = fmt.Sprintf("[green]%s[-]", tview.Escape(r.active.Name))
+	}
+
+	selectionInfo := "[gray]0[-]"
+	mode := "statement"
+	if selection != "" {
+		selectionInfo = fmt.Sprintf("[yellow]%d[-]", utf8.RuneCountInString(selection))
+		mode = "selection"
+	}
+
+	r.focusStatus.SetText(fmt.Sprintf(
+		"Conn %s  [yellow]Ln[-] %d  [yellow]Col[-] %d  [yellow]Sel[-] %s  [yellow]Run[-] %s  [yellow]Keys[-] F4 format  F5 run  F7/Esc close",
+		connection,
+		toRow+1,
+		toColumn+1,
+		selectionInfo,
+		mode,
+	))
 }
 
 func isAutocompleteTrigger(event *tcell.EventKey) bool {

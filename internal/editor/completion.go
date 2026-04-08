@@ -75,10 +75,11 @@ func BuildCompletionItems(meta db.CompletionMetadata, sqlText string, ctx Comple
 
 	var items []CompletionItem
 	push := func(item CompletionItem) {
-		if prefixLower != "" && !strings.HasPrefix(strings.ToLower(item.Label), prefixLower) && !strings.HasPrefix(strings.ToLower(item.Insert), prefixLower) {
+		score := scoreItem(item, prefixLower)
+		if score < 0 {
 			return
 		}
-		item.Score = scoreItem(item, prefixLower)
+		item.Score = score
 		items = append(items, item)
 	}
 
@@ -255,16 +256,71 @@ func scoreItem(item CompletionItem, prefix string) int {
 
 	labelLower := strings.ToLower(item.Label)
 	insertLower := strings.ToLower(item.Insert)
+
+	// Exact and prefix matches always rank highest so deterministic typing
+	// behavior is preserved.
 	switch {
 	case labelLower == prefix || insertLower == prefix:
-		return 300
+		return 1000
 	case strings.HasPrefix(labelLower, prefix) || strings.HasPrefix(insertLower, prefix):
-		return 220
-	case strings.Contains(labelLower, prefix):
-		return 120
-	default:
-		return 50
+		return 700
 	}
+
+	// Otherwise fall back to a fuzzy subsequence match. This lets users
+	// type "uid" to find "user_id" and similar abbreviations.
+	labelScore := fuzzySubsequenceScore(prefix, labelLower)
+	insertScore := fuzzySubsequenceScore(prefix, insertLower)
+	best := labelScore
+	if insertScore > best {
+		best = insertScore
+	}
+	if best < 0 {
+		return -1
+	}
+	return best
+}
+
+// fuzzySubsequenceScore returns -1 if every byte of pattern does not appear,
+// in order, somewhere in target. Otherwise it returns a positive score that
+// rewards consecutive matches and matches that fall on word boundaries.
+func fuzzySubsequenceScore(pattern, target string) int {
+	if pattern == "" {
+		return 0
+	}
+	if len(target) < len(pattern) {
+		return -1
+	}
+
+	score := 0
+	streak := 0
+	pi := 0
+	firstMatch := -1
+	for ti := 0; ti < len(target) && pi < len(pattern); ti++ {
+		if target[ti] != pattern[pi] {
+			streak = 0
+			continue
+		}
+		if firstMatch < 0 {
+			firstMatch = ti
+		}
+		streak++
+		score += 10 + streak*5
+		if ti == 0 || isFuzzyBoundary(target[ti-1]) {
+			score += 15
+		}
+		pi++
+	}
+	if pi < len(pattern) {
+		return -1
+	}
+	if firstMatch > 0 {
+		score -= firstMatch
+	}
+	return score
+}
+
+func isFuzzyBoundary(prev byte) bool {
+	return prev == '_' || prev == '.' || prev == ' ' || prev == '-'
 }
 
 func isIdentChar(ch byte) bool {

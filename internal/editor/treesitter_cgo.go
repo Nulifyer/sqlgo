@@ -1,3 +1,5 @@
+//go:build cgo
+
 package editor
 
 import (
@@ -14,35 +16,75 @@ type SQLAnalysis struct {
 	StatementEnd   int
 }
 
-func AnalyzeSQL(text string, cursor int) SQLAnalysis {
-	analysis := SQLAnalysis{
-		Context:        DetectCompletionContext(text, cursor),
-		StatementStart: 0,
-		StatementEnd:   len(text),
-	}
+// Analyzer holds a reusable tree-sitter parser and caches the most recently
+// parsed tree so the editor only re-parses when the buffer text actually
+// changes. The zero value is not usable; construct via NewAnalyzer.
+type Analyzer struct {
+	parser   *sitter.Parser
+	lastText string
+	lastTree *sitter.Tree
+}
 
+// NewAnalyzer constructs an Analyzer with the SQL grammar loaded. If the
+// grammar fails to load the returned Analyzer is still safe to use; it just
+// degrades to the regex-style fallback (no tree-sitter aliases).
+func NewAnalyzer() *Analyzer {
 	parser := sitter.NewParser()
-	defer parser.Close()
 	language := sitter.NewLanguage(unsafe.Pointer(sql.Language()))
 	if err := parser.SetLanguage(language); err != nil {
+		parser.Close()
+		return &Analyzer{}
+	}
+	return &Analyzer{parser: parser}
+}
+
+// Close releases the parser and any cached tree. After Close the Analyzer
+// must not be used.
+func (a *Analyzer) Close() {
+	if a == nil {
+		return
+	}
+	if a.lastTree != nil {
+		a.lastTree.Close()
+		a.lastTree = nil
+	}
+	if a.parser != nil {
+		a.parser.Close()
+		a.parser = nil
+	}
+}
+
+// Analyze parses (or returns the cached parse of) the buffer and returns the
+// completion context plus the byte range of the statement under the cursor.
+func (a *Analyzer) Analyze(text string, cursor int) SQLAnalysis {
+	analysis := SQLAnalysis{
+		Context: DetectCompletionContext(text, cursor),
+	}
+	analysis.StatementStart, analysis.StatementEnd = StatementRangeAt(text, cursor)
+	if analysis.StatementEnd <= analysis.StatementStart {
+		analysis.StatementStart = 0
+		analysis.StatementEnd = len(text)
+	}
+
+	if a == nil || a.parser == nil {
 		return analysis
 	}
 
-	source := []byte(text)
-	tree := parser.Parse(source, nil)
+	tree := a.parseCached(text)
 	if tree == nil {
 		return analysis
 	}
-	defer tree.Close()
 
 	root := tree.RootNode()
 	if root == nil {
 		return analysis
 	}
 
+	source := []byte(text)
 	start, end := byteRangeForCursor(text, cursor)
 	node := root.NamedDescendantForByteRange(uint(start), uint(end))
 	if node == nil {
+		analysis.Context.Aliases = collectAliases(root, source)
 		return analysis
 	}
 
@@ -58,6 +100,27 @@ func AnalyzeSQL(text string, cursor int) SQLAnalysis {
 	return analysis
 }
 
+// AnalyzeSQL is a convenience wrapper that allocates a one-shot Analyzer.
+// Long-running editors should hold an Analyzer instance and reuse it.
+func AnalyzeSQL(text string, cursor int) SQLAnalysis {
+	a := NewAnalyzer()
+	defer a.Close()
+	return a.Analyze(text, cursor)
+}
+
+func (a *Analyzer) parseCached(text string) *sitter.Tree {
+	if a.lastTree != nil && a.lastText == text {
+		return a.lastTree
+	}
+	tree := a.parser.Parse([]byte(text), nil)
+	if a.lastTree != nil {
+		a.lastTree.Close()
+	}
+	a.lastTree = tree
+	a.lastText = text
+	return tree
+}
+
 func byteRangeForCursor(text string, cursor int) (int, int) {
 	if cursor < 0 {
 		cursor = 0
@@ -69,12 +132,22 @@ func byteRangeForCursor(text string, cursor int) (int, int) {
 		return 0, 0
 	}
 	if cursor == len(text) {
-		return max(cursor-1, 0), cursor
+		if cursor > 0 {
+			return cursor - 1, cursor
+		}
+		return 0, 0
 	}
 	if cursor > 0 {
 		return cursor - 1, cursor
 	}
-	return 0, min(1, len(text))
+	return 0, minInt(1, len(text))
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func ascendToKind(node *sitter.Node, kind string) *sitter.Node {

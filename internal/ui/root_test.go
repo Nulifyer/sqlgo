@@ -108,6 +108,9 @@ func TestShouldShowAutocompleteRequiresNonBlankPrefixUnlessForced(t *testing.T) 
 	if !shouldShowAutocomplete(editor.CompletionContext{Prefix: ""}, true) {
 		t.Fatalf("forced autocomplete should open even with blank prefix")
 	}
+	if !shouldShowAutocomplete(editor.CompletionContext{Prefix: "", Qualifier: "users"}, false) {
+		t.Fatalf("blank prefix with qualifier should auto-open autocomplete after typing dot")
+	}
 }
 
 func TestShouldHideAutocompleteForExactSingleMatch(t *testing.T) {
@@ -125,5 +128,41 @@ func TestShouldHideAutocompleteForExactSingleMatch(t *testing.T) {
 		{Label: "users_archive", Insert: "users_archive"},
 	}) {
 		t.Fatalf("multiple matches should keep autocomplete visible")
+	}
+}
+
+func TestModifierNamesFormatsModifierMask(t *testing.T) {
+	t.Parallel()
+
+	if got := modifierNames(tcell.ModNone); got != "none" {
+		t.Fatalf("modifierNames(ModNone) = %q, want none", got)
+	}
+	if got := modifierNames(tcell.ModShift | tcell.ModCtrl); got != "Shift+Ctrl" {
+		t.Fatalf("modifierNames(Shift|Ctrl) = %q, want Shift+Ctrl", got)
+	}
+}
+
+func TestFormatKeyDebugEventIncludesBacktabDetails(t *testing.T) {
+	t.Parallel()
+
+	event := tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModNone)
+	got := formatKeyDebugEvent(event)
+	if !strings.Contains(got, "Backtab") {
+		t.Fatalf("formatKeyDebugEvent() = %q, want Backtab details", got)
+	}
+}
+
+func TestLineColumnOffsetRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	text := "SELECT\n    audit_logs\nWHERE\n    status = 'ok'"
+	line, column := lineColumnFromOffset(text, len("SELECT\n    aud"))
+	if line != 1 || column != len("    aud") {
+		t.Fatalf("lineColumnFromOffset() = (%d, %d), want (1, %d)", line, column, len("    aud"))
+	}
+
+	offset := offsetForLineColumn(text, line, column)
+	if offset != len("SELECT\n    aud") {
+		t.Fatalf("offsetForLineColumn() = %d, want %d", offset, len("SELECT\n    aud"))
 	}
 }
