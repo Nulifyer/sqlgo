@@ -168,20 +168,45 @@ func TestBuildSelectDriverSpecific(t *testing.T) {
 	t.Parallel()
 	tr := db.TableRef{Schema: "dbo", Name: "users"}
 	cases := []struct {
-		driver string
-		want   string
+		name string
+		caps db.Capabilities
+		want string
 	}{
-		{"mssql", "SELECT TOP 100 * FROM [dbo].[users];"},
-		{"mysql", "SELECT * FROM `dbo`.`users` LIMIT 100;"},
-		{"postgres", `SELECT * FROM "dbo"."users" LIMIT 100;`},
+		{
+			name: "mssql-top-brackets",
+			caps: db.Capabilities{LimitSyntax: db.LimitSyntaxSelectTop, IdentifierQuote: '['},
+			want: "SELECT TOP 100 * FROM [dbo].[users];",
+		},
+		{
+			name: "mysql-limit-backticks",
+			caps: db.Capabilities{LimitSyntax: db.LimitSyntaxLimit, IdentifierQuote: '`'},
+			want: "SELECT * FROM `dbo`.`users` LIMIT 100;",
+		},
+		{
+			name: "postgres-limit-doublequotes",
+			caps: db.Capabilities{LimitSyntax: db.LimitSyntaxLimit, IdentifierQuote: '"'},
+			want: `SELECT * FROM "dbo"."users" LIMIT 100;`,
+		},
 	}
 	for _, c := range cases {
-		t.Run(c.driver, func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			got := BuildSelect(c.driver, tr, 100)
+			got := BuildSelect(c.caps, tr, 100)
 			if got != c.want {
-				t.Errorf("BuildSelect(%q) = %q, want %q", c.driver, got, c.want)
+				t.Errorf("BuildSelect(%+v) = %q, want %q", c.caps, got, c.want)
 			}
 		})
+	}
+}
+
+// TestQualifiedNameFlatSchema covers the SchemaDepthFlat case used by
+// SQLite, where tables live at the root with no schema prefix.
+func TestQualifiedNameFlatSchema(t *testing.T) {
+	t.Parallel()
+	caps := db.Capabilities{IdentifierQuote: '"', SchemaDepth: db.SchemaDepthFlat}
+	tr := db.TableRef{Name: "users"}
+	got := QualifiedName(caps, tr)
+	if got != `"users"` {
+		t.Errorf("QualifiedName(flat) = %q, want %q", got, `"users"`)
 	}
 }

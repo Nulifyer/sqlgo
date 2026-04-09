@@ -1,9 +1,13 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/config"
+	"github.com/Nulifyer/sqlgo/internal/store"
 )
 
 // picker is the connection selection view. It lists saved connections and
@@ -136,7 +140,7 @@ func newPickerLayer(conns []config.Connection) *pickerLayer {
 }
 
 func (pl *pickerLayer) Draw(a *app, c *cellbuf) {
-	pl.p.setConns(a.confFile.Connections)
+	pl.p.setConns(a.connCache)
 	pl.p.draw(c, a.term.width, a.term.height)
 }
 
@@ -166,13 +170,13 @@ func (pl *pickerLayer) HandleKey(a *app, k Key) {
 	if k.Kind == KeyRune && !k.Ctrl {
 		switch k.Rune {
 		case 'a':
-			a.pushLayer(newFormLayer("Add connection", nil, -1))
+			a.pushLayer(newFormLayer("Add connection", nil))
 		case 'e':
 			if len(pl.p.conns) == 0 {
 				return
 			}
 			sel := pl.p.conns[pl.p.selected]
-			a.pushLayer(newFormLayer("Edit connection", &sel, pl.p.selected))
+			a.pushLayer(newFormLayer("Edit connection", &sel))
 		case 'x':
 			if len(pl.p.conns) == 0 {
 				return
@@ -184,12 +188,25 @@ func (pl *pickerLayer) HandleKey(a *app, k Key) {
 
 func (pl *pickerLayer) deleteSelected(a *app) {
 	i := pl.p.selected
-	a.confFile.Connections = append(a.confFile.Connections[:i], a.confFile.Connections[i+1:]...)
-	if err := config.Save(a.confFile); err != nil {
-		pl.p.status = "save failed: " + err.Error()
+	if i < 0 || i >= len(pl.p.conns) {
 		return
 	}
-	pl.p.setConns(a.confFile.Connections)
+	name := pl.p.conns[i].Name
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.store.DeleteConnection(ctx, name); err != nil {
+		if errors.Is(err, store.ErrConnectionNotFound) {
+			pl.p.status = "already gone"
+		} else {
+			pl.p.status = "delete failed: " + err.Error()
+		}
+		return
+	}
+	if err := a.refreshConnections(); err != nil {
+		pl.p.status = "refresh failed: " + err.Error()
+		return
+	}
+	pl.p.setConns(a.connCache)
 	pl.p.status = "deleted"
 }
 
@@ -204,11 +221,11 @@ func (pl *pickerLayer) Hints(a *app) string {
 	hasList := len(pl.p.conns) > 0
 	return joinHints(
 		"Ctrl+Q=quit",
-		hintIf(hasList, "\u2191\u2193=move"),
-		hintIf(hasList, "\u21b5=connect"),
+		hintIf(hasList, "Up/Dn=move"),
+		hintIf(hasList, "Enter=connect"),
 		"a=add",
 		hintIf(hasList, "e=edit"),
 		hintIf(hasList, "x=delete"),
-		hintIf(a.conn != nil, "\u238b=back"),
+		hintIf(a.conn != nil, "Esc=back"),
 	)
 }

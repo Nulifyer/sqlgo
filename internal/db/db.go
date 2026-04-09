@@ -1,10 +1,18 @@
 // Package db defines the abstract database layer used by sqlgo. Each
-// supported engine (mssql, mysql, postgres, sqlite) implements a Driver that
-// returns a Conn for running queries and inspecting schema.
+// supported engine (mssql, sqlite, postgres, mysql, ...) implements a
+// Driver that returns a Conn for running queries and inspecting schema.
 //
-// The interface is intentionally narrow: the TUI consumes Driver/Conn and
-// never touches engine-specific types. Engine adapters live in subpackages
-// (internal/db/mssql, etc) and register themselves via Register().
+// The interface is intentionally narrow: the TUI consumes Driver/Conn/Rows
+// and never touches engine-specific types. Engine adapters live in
+// subpackages (internal/db/mssql, internal/db/sqlite, ...) and register
+// themselves via Register() in their init().
+//
+// Queries stream. Conn.Query returns a Rows cursor that the caller drains
+// via Next()/Scan(). The caller is responsible for Close(), which releases
+// the underlying driver cursor and is safe to call at any time, including
+// before any Next(). Combined with context cancellation this gives the TUI
+// a clean "stop the in-flight query and throw away the buffer" path even
+// on multi-million-row SELECTs.
 package db
 
 import (
@@ -30,12 +38,70 @@ type Config struct {
 // Driver opens connections for a single database engine. Implementations
 // must be safe to call from multiple goroutines.
 type Driver interface {
-	// Name returns a stable identifier ("mssql", "mysql", ...).
+	// Name returns a stable identifier ("mssql", "sqlite", ...).
 	Name() string
+	// Capabilities describes what the engine supports. The TUI reads this
+	// instead of branching on Name() strings.
+	Capabilities() Capabilities
 	// Open establishes a new connection. The returned Conn is owned by the
 	// caller and must be closed.
 	Open(ctx context.Context, cfg Config) (Conn, error)
 }
+
+// Capabilities describes the features and syntax of a database engine. The
+// TUI uses this to avoid hard-coded `if driver == "mssql"` branches:
+// explorer tree depth, SELECT generation, TLS toggles in the connection
+// form, and cancel wiring all read from here.
+type Capabilities struct {
+	// SchemaDepth describes whether tables are grouped under a schema
+	// level. SQLite is Flat (everything in one bucket); Postgres, MSSQL,
+	// MySQL are Schemas.
+	SchemaDepth SchemaDepth
+
+	// LimitSyntax selects between "SELECT TOP N ..." (MSSQL) and
+	// "SELECT ... LIMIT N" (everything else).
+	LimitSyntax LimitSyntax
+
+	// IdentifierQuote is the opening character used to quote identifiers:
+	// '[' for MSSQL, '`' for MySQL, '"' for ANSI SQL (Postgres, SQLite).
+	// The closing character is derived: '[' -> ']', else same as opening.
+	IdentifierQuote rune
+
+	// SupportsCancel reports whether the driver honors context cancellation
+	// on in-flight queries at the network layer. True for pure-Go MSSQL,
+	// pgx, and go-sql-driver/mysql; false for SQLite (cancel only takes
+	// effect between rows on a local DB, which is still fine for us).
+	SupportsCancel bool
+
+	// SupportsTLS reports whether the DSN accepts TLS/SSL knobs in
+	// Config.Options. Drives the TLS field group in the connection form.
+	SupportsTLS bool
+}
+
+// SchemaDepth describes the object hierarchy the explorer should render
+// for an engine.
+type SchemaDepth int
+
+const (
+	// SchemaDepthFlat is a single bucket of tables+views with no schema
+	// layer above them (e.g. SQLite). The explorer hides the schema node
+	// and shows Tables/Views subgroups at the root.
+	SchemaDepthFlat SchemaDepth = iota
+	// SchemaDepthSchemas groups tables+views under a schema node
+	// (Postgres, MSSQL, MySQL, ...).
+	SchemaDepthSchemas
+)
+
+// LimitSyntax selects between the two "first N rows" forms.
+type LimitSyntax int
+
+const (
+	// LimitSyntaxLimit is the ANSI-ish "SELECT ... LIMIT N" tail used by
+	// Postgres, MySQL, SQLite.
+	LimitSyntaxLimit LimitSyntax = iota
+	// LimitSyntaxSelectTop is the "SELECT TOP N ..." prefix used by MSSQL.
+	LimitSyntaxSelectTop
+)
 
 // Conn is a live connection to a database. It is NOT required to be safe
 // for concurrent use; the TUI serializes queries per connection.
@@ -43,20 +109,51 @@ type Conn interface {
 	io.Closer
 	// Ping verifies the connection is alive.
 	Ping(ctx context.Context) error
-	// Query runs sql and materializes the full result set. Streaming will be
-	// added when the results panel needs it.
-	Query(ctx context.Context, sql string) (*Result, error)
+	// Query starts a query and returns a streaming cursor over its rows.
+	// The query is still executing when Query returns; the caller pulls
+	// results via Rows.Next()/Scan() and must call Rows.Close() when done
+	// (deferred, or on cancel).
+	Query(ctx context.Context, sql string) (Rows, error)
 	// Exec runs a statement that does not return rows (DDL, INSERT/UPDATE/
 	// DELETE). args are positional bind values using whatever placeholder
-	// syntax the driver expects — sqlgoseed is the primary consumer.
+	// syntax the driver expects. The seed package is the primary consumer.
 	Exec(ctx context.Context, sql string, args ...any) error
 	// Schema returns the list of user-visible tables and views, grouped by
 	// schema, so the explorer can render a tree. Engines without schemas
-	// (sqlite, mysql) return everything under a single synthetic schema.
+	// (sqlite) return everything under a single synthetic schema.
 	Schema(ctx context.Context) (*SchemaInfo, error)
 	// Driver returns the engine name this connection was opened with.
-	// The explorer uses this to pick the right SELECT top/limit syntax.
 	Driver() string
+	// Capabilities returns the driver's capability set. Shortcut for
+	// looking up the Driver from the registry and calling its
+	// Capabilities() — kept on Conn so widgets with a Conn don't need a
+	// registry lookup.
+	Capabilities() Capabilities
+}
+
+// Rows is a forward-only cursor over a running query. The driver only
+// pulls from the network when Next() is called, so an 8M-row SELECT never
+// materializes in memory unless the caller keeps draining. Close() aborts
+// the in-flight query (via the caller's context and the underlying
+// driver's row cursor) and is idempotent.
+type Rows interface {
+	// Columns returns the column descriptors. Available as soon as Query
+	// returns without error; does not block on row delivery.
+	Columns() []Column
+	// Next advances to the next row. Returns false on end-of-result or
+	// error; check Err() to distinguish.
+	Next() bool
+	// Scan returns the current row as a freshly allocated slice. The slice
+	// is owned by the caller and is safe to retain across further Next()
+	// calls, unlike stdlib sql.Rows.Scan which reuses buffers.
+	Scan() ([]any, error)
+	// Err returns any error that stopped Next() from returning true. nil
+	// on clean end-of-result.
+	Err() error
+	// Close releases the underlying cursor and any associated resources.
+	// Safe to call at any time, including before the first Next(); safe
+	// to call multiple times.
+	Close() error
 }
 
 // TableKind distinguishes tables from views in the schema tree.
@@ -87,9 +184,10 @@ type Column struct {
 	TypeName string // driver-reported SQL type name, for display
 }
 
-// Result is a materialized query result set. Rows[i][j] is the j-th column
-// of the i-th row, as returned by the driver's Scan (typically string,
-// int64, float64, bool, []byte, time.Time, or nil).
+// Result is a materialized view of a query's rows. Conn.Query does NOT
+// return this — it returns a streaming Rows cursor instead. The TUI's
+// table widget keeps a Result as its in-memory buffer of rows pulled from
+// the cursor so far; tests use it as a convenient fixture shape.
 type Result struct {
 	Columns []Column
 	Rows    [][]any

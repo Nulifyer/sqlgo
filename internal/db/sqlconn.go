@@ -8,12 +8,18 @@ import (
 )
 
 // SQLOptions holds engine-specific knobs for the shared sqlConn wrapper.
-// SchemaQuery runs against the open *sql.DB to populate the explorer. The
-// query MUST return three columns in this order: schema name, object name,
-// and a 1=view/0=table flag (any non-zero int = view).
+// Engine adapters build one of these and hand it to OpenSQL alongside an
+// already-opened *sql.DB.
+//
+// SchemaQuery runs against the *sql.DB to populate the explorer. The query
+// MUST return three columns in this order: schema name, object name, and a
+// 1=view / 0=table flag (any non-zero int = view). Engines without a
+// native schema concept (SQLite) can pass a query that synthesizes a
+// fixed placeholder schema like "main".
 type SQLOptions struct {
-	DriverName  string
-	SchemaQuery string
+	DriverName   string
+	Capabilities Capabilities
+	SchemaQuery  string
 }
 
 // OpenSQL wraps a stdlib *sql.DB as a db.Conn. Engine adapters build a DSN,
@@ -35,6 +41,8 @@ type sqlConn struct {
 }
 
 func (c *sqlConn) Driver() string { return c.opts.DriverName }
+
+func (c *sqlConn) Capabilities() Capabilities { return c.opts.Capabilities }
 
 func (c *sqlConn) Schema(ctx context.Context) (*SchemaInfo, error) {
 	if c.opts.SchemaQuery == "" {
@@ -88,18 +96,24 @@ func (c *sqlConn) Exec(ctx context.Context, query string, args ...any) error {
 	return nil
 }
 
-func (c *sqlConn) Query(ctx context.Context, query string) (*Result, error) {
+// Query starts a query and returns a streaming Rows. The returned cursor
+// keeps the underlying *sql.Rows open until Close() is called; callers
+// MUST call Close() (typically in a defer or on cancel) or the statement
+// will hold the connection indefinitely.
+//
+// Column metadata is fetched up front so the table widget can render the
+// header before any rows stream in. If column discovery fails, the cursor
+// is torn down and Query returns the error.
+func (c *sqlConn) Query(ctx context.Context, query string) (Rows, error) {
 	rows, err := c.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("query: %w", err)
 	}
-	defer rows.Close()
-
 	types, err := rows.ColumnTypes()
 	if err != nil {
+		_ = rows.Close()
 		return nil, fmt.Errorf("column types: %w", err)
 	}
-
 	cols := make([]Column, len(types))
 	for i, t := range types {
 		cols[i] = Column{
@@ -107,33 +121,71 @@ func (c *sqlConn) Query(ctx context.Context, query string) (*Result, error) {
 			TypeName: t.DatabaseTypeName(),
 		}
 	}
+	return &sqlRows{rows: rows, cols: cols}, nil
+}
 
-	var out [][]any
-	for rows.Next() {
-		// Scan into a fresh []any each row; sql.RawBytes would be faster but
-		// the bytes become invalid after the next Scan, which makes the
-		// result buffer unusable. Plain any is fine for materialized results.
-		dest := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range dest {
-			ptrs[i] = &dest[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			return nil, fmt.Errorf("scan: %w", err)
-		}
-		// []byte -> string for display. Drivers hand back bytes for text
-		// types (varchar, text, etc); keeping them as bytes makes rendering
-		// awkward and hides values in the TUI.
-		for i, v := range dest {
-			if b, ok := v.([]byte); ok {
-				dest[i] = string(b)
-			}
-		}
-		out = append(out, dest)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows: %w", err)
-	}
+// sqlRows adapts *sql.Rows to the streaming db.Rows interface. Every Scan()
+// allocates a fresh []any so callers can retain rows in a buffer (the
+// stdlib's Scan reuses destinations, which makes buffering unsafe). []byte
+// values are converted to string here so the TUI never has to worry about
+// RawBytes-like lifetime hazards.
+type sqlRows struct {
+	rows   *sql.Rows
+	cols   []Column
+	closed bool
+	err    error
+}
 
-	return &Result{Columns: cols, Rows: out}, nil
+func (r *sqlRows) Columns() []Column { return r.cols }
+
+func (r *sqlRows) Next() bool {
+	if r.closed || r.err != nil {
+		return false
+	}
+	return r.rows.Next()
+}
+
+func (r *sqlRows) Scan() ([]any, error) {
+	if r.closed {
+		return nil, fmt.Errorf("scan: rows closed")
+	}
+	dest := make([]any, len(r.cols))
+	ptrs := make([]any, len(r.cols))
+	for i := range dest {
+		ptrs[i] = &dest[i]
+	}
+	if err := r.rows.Scan(ptrs...); err != nil {
+		r.err = fmt.Errorf("scan: %w", err)
+		return nil, r.err
+	}
+	// []byte -> string for display. Drivers hand back bytes for text types
+	// (varchar, text, etc); keeping them as bytes makes rendering awkward
+	// and hides values in the TUI.
+	for i, v := range dest {
+		if b, ok := v.([]byte); ok {
+			dest[i] = string(b)
+		}
+	}
+	return dest, nil
+}
+
+func (r *sqlRows) Err() error {
+	if r.err != nil {
+		return r.err
+	}
+	if r.rows == nil {
+		return nil
+	}
+	return r.rows.Err()
+}
+
+// Close tears down the cursor. Safe to call multiple times and safe to call
+// before any Next(). The second call is a no-op so defer + explicit cancel
+// paths both work.
+func (r *sqlRows) Close() error {
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	return r.rows.Close()
 }

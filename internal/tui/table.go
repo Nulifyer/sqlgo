@@ -3,93 +3,176 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 )
 
-// table renders a db.Result as a scrollable aligned grid. Column widths are
-// computed once per SetResult call from the headers and up to sampleRows of
-// data so very tall result sets don't stall rendering.
+// table renders a streamed query result as a scrollable aligned grid. Rows
+// arrive via Append() on a background goroutine (the query runner in tui.go)
+// while the UI goroutine reads them in draw(); the mutex keeps both sides
+// consistent. Column widths are computed from the header and up to
+// sampleRows of data so a very tall result doesn't stall width updates.
 //
 // wrap=false (default): cells are padded to their measured width and the
-// whole row is clipped at the panel's right edge — wide columns simply run
+// whole row is clipped at the panel's right edge -- wide columns simply run
 // off-screen. wrap=true: each row spans as many terminal rows as the widest
 // cell's line count requires, so nothing is hidden but fewer rows fit.
 type table struct {
-	res       *db.Result
+	mu        sync.Mutex
+	cols      []db.Column
 	widths    []int
+	rendered  [][]string // stringified cells, one entry per streamed row
+	streaming bool       // cursor drain in progress
+	capped    bool       // stopped appending because we hit maxBufferedRows
+	err       error      // last streaming error, if any
 	scrollRow int
-	scrollCol int        // horizontal offset in runes into each rendered line
-	rendered  [][]string // stringified cells (lazy, same shape as res.Rows)
+	scrollCol int
 	wrap      bool
 }
 
-const sampleRows = 200
+const (
+	sampleRows      = 200
+	maxBufferedRows = 100_000
+)
 
 func newTable() *table { return &table{} }
 
-// SetResult replaces the displayed result set and resets scroll.
-func (t *table) SetResult(r *db.Result) {
-	t.res = r
+// Clear wipes all result state. Called on disconnect and before starting a
+// new query.
+func (t *table) Clear() {
+	t.mu.Lock()
+	t.cols = nil
+	t.widths = nil
+	t.rendered = nil
+	t.streaming = false
+	t.capped = false
+	t.err = nil
 	t.scrollRow = 0
 	t.scrollCol = 0
-	if r == nil {
-		t.widths = nil
-		t.rendered = nil
-		return
-	}
-	t.rendered = make([][]string, len(r.Rows))
-	for i, row := range r.Rows {
-		cells := make([]string, len(row))
-		for j, v := range row {
-			cells[j] = stringifyCell(v)
-		}
-		t.rendered[i] = cells
-	}
-	t.widths = make([]int, len(r.Columns))
-	for i, c := range r.Columns {
+	t.mu.Unlock()
+}
+
+// Init prepares the table to receive a new streaming result. The caller
+// (the query goroutine in tui.go) supplies the column descriptors pulled
+// from the cursor and then follows up with Append()/Done(). Any prior
+// result is discarded.
+func (t *table) Init(cols []db.Column) {
+	t.mu.Lock()
+	t.cols = cols
+	t.widths = make([]int, len(cols))
+	for i, c := range cols {
 		t.widths[i] = runeLen(c.Name)
 	}
-	limit := len(t.rendered)
-	if limit > sampleRows {
-		limit = sampleRows
+	t.rendered = nil
+	t.streaming = true
+	t.capped = false
+	t.err = nil
+	t.scrollRow = 0
+	t.scrollCol = 0
+	t.mu.Unlock()
+}
+
+// Append adds one streamed row. Returns false once the in-memory cap has
+// been reached; the caller should stop pulling from the cursor and call
+// Done(nil) for final bookkeeping. Column widths only grow from the first
+// sampleRows to keep append cost bounded.
+func (t *table) Append(row []any) bool {
+	cells := make([]string, len(row))
+	for i, v := range row {
+		cells[i] = stringifyCell(v)
 	}
-	for i := 0; i < limit; i++ {
-		for j, cell := range t.rendered[i] {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.rendered) >= maxBufferedRows {
+		t.capped = true
+		return false
+	}
+	if len(t.rendered) < sampleRows {
+		for j, cell := range cells {
+			if j >= len(t.widths) {
+				break
+			}
 			if l := runeLen(cell); l > t.widths[j] {
 				t.widths[j] = l
 			}
 		}
 	}
+	t.rendered = append(t.rendered, cells)
+	return true
 }
 
-// Result returns the current result set (may be nil).
-func (t *table) Result() *db.Result { return t.res }
+// Done marks the stream as finished and records any final error (nil on
+// a clean end-of-result).
+func (t *table) Done(err error) {
+	t.mu.Lock()
+	t.streaming = false
+	t.err = err
+	t.mu.Unlock()
+}
+
+// RowCount returns the number of rows currently in the buffer. This is a
+// snapshot: during streaming, the next draw may see more rows.
+func (t *table) RowCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.rendered)
+}
+
+// HasColumns reports whether Init has been called since the last Clear.
+// Used by hint builders that want to distinguish "no results" from
+// "results shown, 0 rows".
+func (t *table) HasColumns() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.cols) > 0
+}
+
+// Streaming reports whether a cursor drain is currently in progress.
+func (t *table) Streaming() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.streaming
+}
+
+// Capped reports whether appends were stopped because the buffer cap was
+// reached. Surfaced in the status line so the user knows the result set
+// was larger than the buffer.
+func (t *table) Capped() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.capped
+}
 
 // Wrap reports whether the table is in wrap mode.
-func (t *table) Wrap() bool { return t.wrap }
+func (t *table) Wrap() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.wrap
+}
 
 // ToggleWrap flips wrap mode and resets scroll so the top of the result set
 // stays visible when the layout changes.
 func (t *table) ToggleWrap() {
+	t.mu.Lock()
 	t.wrap = !t.wrap
 	t.scrollRow = 0
 	t.scrollCol = 0
+	t.mu.Unlock()
 }
 
 // ScrollBy adjusts the top row by delta, clamped to valid range.
 func (t *table) ScrollBy(delta int) {
-	if t.res == nil {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.rendered) == 0 {
 		return
 	}
 	t.scrollRow += delta
 	if t.scrollRow < 0 {
 		t.scrollRow = 0
 	}
-	max := len(t.res.Rows) - 1
-	if max < 0 {
-		max = 0
-	}
+	max := len(t.rendered) - 1
 	if t.scrollRow > max {
 		t.scrollRow = max
 	}
@@ -98,14 +181,16 @@ func (t *table) ScrollBy(delta int) {
 // ScrollColBy adjusts the horizontal offset by delta runes, clamped so the
 // viewport never scrolls past the end of the widest rendered line.
 func (t *table) ScrollColBy(delta int) {
-	if t.res == nil {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.cols) == 0 {
 		return
 	}
 	t.scrollCol += delta
 	if t.scrollCol < 0 {
 		t.scrollCol = 0
 	}
-	max := t.totalWidth() - 1
+	max := t.totalWidthLocked() - 1
 	if max < 0 {
 		max = 0
 	}
@@ -114,9 +199,9 @@ func (t *table) ScrollColBy(delta int) {
 	}
 }
 
-// totalWidth is the full rendered line width (sum of column widths plus
-// the " | " separators between them). Used to clamp horizontal scroll.
-func (t *table) totalWidth() int {
+// totalWidthLocked is the full rendered line width (sum of column widths
+// plus the " | " separators between them). Caller must hold t.mu.
+func (t *table) totalWidthLocked() int {
 	n := 0
 	for i, w := range t.widths {
 		if i > 0 {
@@ -137,18 +222,17 @@ func (t *table) draw(s *cellbuf, r rect) {
 		return
 	}
 
-	if t.res == nil {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if len(t.cols) == 0 {
 		s.writeAt(innerRow, innerCol, truncate("(no results)", innerW))
-		return
-	}
-	if len(t.res.Columns) == 0 {
-		s.writeAt(innerRow, innerCol, truncate("(query returned no columns)", innerW))
 		return
 	}
 
 	// Clamp horizontal scroll to the current viewport width so shrinking
 	// the panel after scrolling right doesn't leave dead space.
-	total := t.totalWidth()
+	total := t.totalWidthLocked()
 	if t.scrollCol > total-1 {
 		t.scrollCol = total - 1
 	}
@@ -157,7 +241,7 @@ func (t *table) draw(s *cellbuf, r rect) {
 	}
 
 	// Header row.
-	header := renderRow(t.headerCells(), t.widths)
+	header := renderRow(t.headerCellsLocked(), t.widths)
 	s.setFg(colorTitleFocused)
 	s.writeAt(innerRow, innerCol, sliceRunes(header, t.scrollCol, innerW))
 	s.resetStyle()
@@ -172,6 +256,17 @@ func (t *table) draw(s *cellbuf, r rect) {
 		return
 	}
 
+	// Clamp scrollRow against the current buffer (rendered grows as rows
+	// stream in; we don't want to snap the cursor forward if the user had
+	// scrolled manually).
+	if t.scrollRow >= len(t.rendered) {
+		if len(t.rendered) > 0 {
+			t.scrollRow = len(t.rendered) - 1
+		} else {
+			t.scrollRow = 0
+		}
+	}
+
 	if !t.wrap {
 		for i := 0; i < bodyH; i++ {
 			rowIdx := t.scrollRow + i
@@ -184,9 +279,10 @@ func (t *table) draw(s *cellbuf, r rect) {
 		return
 	}
 
-	// Wrap mode: each data row may occupy multiple terminal rows. The
-	// longest cell's wrapped-line count sets the block height; other cells
-	// are padded with blanks so column alignment survives.
+	// Wrap mode: each data row may occupy multiple terminal rows when a
+	// cell's content is longer than its column width. The longest cell's
+	// wrapped-line count sets the block height; other cells are padded
+	// with blanks so column alignment survives across wrapped lines.
 	y := 0
 	for rowIdx := t.scrollRow; rowIdx < len(t.rendered) && y < bodyH; rowIdx++ {
 		block := wrapRow(t.rendered[rowIdx], t.widths)
@@ -197,24 +293,21 @@ func (t *table) draw(s *cellbuf, r rect) {
 			s.writeAt(innerRow+2+y, innerCol, sliceRunes(line, t.scrollCol, innerW))
 			y++
 		}
-		// Blank spacer line between wrapped rows so the next row is visually
-		// distinct. Only emitted when there's still space.
-		if y < bodyH {
-			y++
-		}
 	}
 }
 
-func (t *table) headerCells() []string {
-	out := make([]string, len(t.res.Columns))
-	for i, c := range t.res.Columns {
+// headerCellsLocked builds the header row from the current columns. Caller
+// must hold t.mu.
+func (t *table) headerCellsLocked() []string {
+	out := make([]string, len(t.cols))
+	for i, c := range t.cols {
 		out[i] = c.Name
 	}
 	return out
 }
 
 // renderRow joins cells with " | " padded to their column widths. No
-// horizontal clipping — callers slice the result to fit the viewport so
+// horizontal clipping -- callers slice the result to fit the viewport so
 // scrollCol can slide across the full row width.
 func renderRow(cells []string, widths []int) string {
 	var b strings.Builder

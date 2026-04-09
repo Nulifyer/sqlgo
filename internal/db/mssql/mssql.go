@@ -26,6 +26,19 @@ type driver struct{}
 
 func (driver) Name() string { return driverName }
 
+// capabilities is the MSSQL-specific capability set. MSSQL uses T-SQL's
+// SELECT TOP N, bracket-quoted identifiers, and go-mssqldb honors context
+// cancellation at the network layer (pure-Go, no cgo).
+var capabilities = db.Capabilities{
+	SchemaDepth:     db.SchemaDepthSchemas,
+	LimitSyntax:     db.LimitSyntaxSelectTop,
+	IdentifierQuote: '[',
+	SupportsCancel:  true,
+	SupportsTLS:     true,
+}
+
+func (driver) Capabilities() db.Capabilities { return capabilities }
+
 func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	dsn := buildDSN(cfg)
 	sqlDB, err := sql.Open("sqlserver", dsn)
@@ -33,8 +46,9 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		return nil, fmt.Errorf("mssql open: %w", err)
 	}
 	conn, err := db.OpenSQL(ctx, sqlDB, db.SQLOptions{
-		DriverName:  driverName,
-		SchemaQuery: schemaQuery,
+		DriverName:   driverName,
+		Capabilities: capabilities,
+		SchemaQuery:  schemaQuery,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mssql: %w", err)

@@ -20,6 +20,7 @@ import (
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 	_ "github.com/Nulifyer/sqlgo/internal/db/mssql"
+	_ "github.com/Nulifyer/sqlgo/internal/db/sqlite"
 )
 
 func main() {
@@ -59,12 +60,35 @@ func main() {
 	}
 	defer conn.Close()
 
-	res, err := conn.Query(ctx, *query)
+	rows, err := conn.Query(ctx, *query)
 	if err != nil {
 		die(fmt.Errorf("query: %w", err))
 	}
+	defer rows.Close()
 
+	res, err := drainRows(rows)
+	if err != nil {
+		die(fmt.Errorf("scan: %w", err))
+	}
 	printResult(res)
+}
+
+// drainRows pulls a Rows cursor into a materialized Result. sqlgocheck is
+// a development smoke test, so fully buffering the result set is fine —
+// the TUI uses a streaming consumer instead.
+func drainRows(r db.Rows) (*db.Result, error) {
+	out := &db.Result{Columns: r.Columns()}
+	for r.Next() {
+		row, err := r.Scan()
+		if err != nil {
+			return nil, err
+		}
+		out.Rows = append(out.Rows, row)
+	}
+	if err := r.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func parseOpts(s string) map[string]string {

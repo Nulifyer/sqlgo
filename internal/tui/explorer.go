@@ -354,30 +354,42 @@ func renderExplorerLine(it explorerItem, expanded map[string]bool) string {
 }
 
 // QualifiedName returns "schema.name" with driver-appropriate quoting for a
-// SELECT. Kept on the explorer (not db package) because it's purely a UI
-// concern — the actual query only needs whatever the driver accepts.
-func QualifiedName(driver string, t db.TableRef) string {
-	switch driver {
-	case "mssql":
-		return "[" + t.Schema + "].[" + t.Name + "]"
-	case "mysql":
-		return "`" + t.Schema + "`.`" + t.Name + "`"
+// SELECT. The quote character comes from the driver's Capabilities, so adding
+// a new engine is just a matter of setting IdentifierQuote on its
+// capability struct — no string-switch on Name() here.
+func QualifiedName(caps db.Capabilities, t db.TableRef) string {
+	open, close := quoteChars(caps.IdentifierQuote)
+	if t.Schema == "" {
+		return open + t.Name + close
+	}
+	return open + t.Schema + close + "." + open + t.Name + close
+}
+
+// quoteChars returns the opening and closing identifier quote characters
+// for a given opening quote. '[' pairs with ']'; everything else pairs
+// with itself (backtick, double-quote).
+func quoteChars(open rune) (string, string) {
+	switch open {
+	case '[':
+		return "[", "]"
+	case 0:
+		// Default to ANSI double quotes for drivers that don't set one.
+		return `"`, `"`
 	default:
-		// postgres and sqlite both accept double-quoted identifiers.
-		return `"` + t.Schema + `"."` + t.Name + `"`
+		s := string(open)
+		return s, s
 	}
 }
 
-// BuildSelect produces a driver-appropriate "top N" SELECT for the given
-// table. Kept here so the explorer can prefill the editor in one call.
-func BuildSelect(driver string, t db.TableRef, limit int) string {
-	name := QualifiedName(driver, t)
-	switch driver {
-	case "mssql":
+// BuildSelect produces a capability-appropriate "first N rows" SELECT for
+// the given table. The limit form (TOP vs LIMIT) and identifier quoting
+// both come from caps.
+func BuildSelect(caps db.Capabilities, t db.TableRef, limit int) string {
+	name := QualifiedName(caps, t)
+	if caps.LimitSyntax == db.LimitSyntaxSelectTop {
 		return "SELECT TOP " + itoa(limit) + " * FROM " + name + ";"
-	default:
-		return "SELECT * FROM " + name + " LIMIT " + itoa(limit) + ";"
 	}
+	return "SELECT * FROM " + name + " LIMIT " + itoa(limit) + ";"
 }
 
 // itoa avoids pulling in strconv for one call site.

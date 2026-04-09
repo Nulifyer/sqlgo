@@ -133,7 +133,52 @@ func TestScreenCompositeTopCursorWins(t *testing.T) {
 	}
 }
 
-// Flush emits nothing for the second identical frame — verifies the diff.
+// writeStyled puts runs with different Style values side-by-side without
+// saving/restoring the pen in between. The pen itself must not change.
+func TestCellbufWriteStyledLeavesPenAlone(t *testing.T) {
+	t.Parallel()
+	c := newCellbuf(10, 1)
+	c.setFg(31) // pen fg = 31
+	red := Style{FG: 31, BG: ansiDefaultBG}
+	green := Style{FG: 32, BG: ansiDefaultBG, Attrs: attrBold}
+	c.writeStyled(1, 1, "ab", red)
+	c.writeStyled(1, 3, "cd", green)
+
+	if p := c.at(1, 1); p.style != red {
+		t.Errorf("(1,1).style = %+v, want %+v", p.style, red)
+	}
+	if p := c.at(1, 3); p.style != green {
+		t.Errorf("(1,3).style = %+v, want %+v", p.style, green)
+	}
+	if c.pen.FG != 31 || c.pen.Attrs != 0 {
+		t.Errorf("pen mutated by writeStyled: %+v", c.pen)
+	}
+}
+
+// Changing bg alone (no fg change) must be emitted by the flush diff.
+func TestScreenFlushEmitsBGTransition(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	s := newScreen(&out, 3, 1)
+	b := newCellbuf(3, 1)
+	b.writeStyled(1, 1, "a", Style{FG: ansiDefault, BG: 41})
+	b.writeStyled(1, 2, "b", Style{FG: ansiDefault, BG: 42})
+	b.writeStyled(1, 3, "c", Style{FG: ansiDefault, BG: 41})
+	s.composite([]*cellbuf{b})
+	if err := s.flush(); err != nil {
+		t.Fatal(err)
+	}
+	// Two distinct bg codes should appear in the emitted stream.
+	got := out.String()
+	if !bytes.Contains([]byte(got), []byte("41m")) {
+		t.Errorf("missing bg 41 in flush output: %q", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("42m")) {
+		t.Errorf("missing bg 42 in flush output: %q", got)
+	}
+}
+
+// Flush emits nothing for the second identical frame -- verifies the diff.
 func TestScreenFlushDiffingSkipsUnchanged(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer

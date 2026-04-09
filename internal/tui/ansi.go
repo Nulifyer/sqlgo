@@ -31,3 +31,27 @@ func moveTo(w io.Writer, row, col int) {
 func fgColor(w io.Writer, code int) {
 	fmt.Fprintf(w, "%s%dm", csi, code)
 }
+
+// bgColor sets the background via a raw SGR code (40-47 / 100-107 / 49
+// for default). Kept parallel to fgColor so the emit path can track fg
+// and bg independently in the flush diff loop.
+func bgColor(w io.Writer, code int) {
+	fmt.Fprintf(w, "%s%dm", csi, code)
+}
+
+// setAttrs emits the SGR codes for the given attribute bitmask. Callers
+// must first emit resetStyle (and re-emit any fg/bg they still want) if
+// transitioning from a cell with different attrs: SGR has no "turn off
+// just bold" code that's portable across terminals, so we reset and
+// rebuild. The flush loop already does that when attrs changes.
+func setAttrs(w io.Writer, a cellAttrs) {
+	if a&attrBold != 0 {
+		fmt.Fprintf(w, "%s1m", csi)
+	}
+	if a&attrUnderline != 0 {
+		fmt.Fprintf(w, "%s4m", csi)
+	}
+	if a&attrReverse != 0 {
+		fmt.Fprintf(w, "%s7m", csi)
+	}
+}

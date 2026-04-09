@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"context"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/config"
 )
@@ -15,8 +17,10 @@ type connForm struct {
 	fields []formField
 	active int
 	status string
-	// index of the entry in File.Connections being edited; -1 for new
-	editIndex int
+	// originalName is the Name of the connection being edited. Empty for
+	// adds. On save it's passed to store.SaveConnection as the oldName so
+	// a rename propagates atomically.
+	originalName string
 }
 
 type formField struct {
@@ -26,11 +30,12 @@ type formField struct {
 }
 
 // newConnForm builds a form. If c is nil the form is pre-populated with
-// dev-friendly defaults that match compose.yaml.
-func newConnForm(title string, c *config.Connection, editIndex int) *connForm {
+// dev-friendly defaults that match compose.yaml. On edit, originalName
+// is captured so a rename can be passed to store.SaveConnection as the
+// oldName.
+func newConnForm(title string, c *config.Connection) *connForm {
 	f := &connForm{
-		title:     title,
-		editIndex: editIndex,
+		title: title,
 		fields: []formField{
 			{label: "Name", in: newInput("")},
 			{label: "Driver", in: newInput("mssql")},
@@ -42,6 +47,7 @@ func newConnForm(title string, c *config.Connection, editIndex int) *connForm {
 		},
 	}
 	if c != nil {
+		f.originalName = c.Name
 		f.fields[0].in.SetString(c.Name)
 		f.fields[1].in.SetString(c.Driver)
 		f.fields[2].in.SetString(c.Host)
@@ -235,8 +241,8 @@ type formLayer struct {
 	f *connForm
 }
 
-func newFormLayer(title string, c *config.Connection, editIndex int) *formLayer {
-	return &formLayer{f: newConnForm(title, c, editIndex)}
+func newFormLayer(title string, c *config.Connection) *formLayer {
+	return &formLayer{f: newConnForm(title, c)}
 }
 
 func (fl *formLayer) Draw(a *app, c *cellbuf) {
@@ -252,14 +258,17 @@ func (fl *formLayer) HandleKey(a *app, k Key) {
 	if !submit {
 		return
 	}
-	// Persist.
-	if fl.f.editIndex >= 0 && fl.f.editIndex < len(a.confFile.Connections) {
-		a.confFile.Connections[fl.f.editIndex] = c
-	} else {
-		a.confFile.Connections = append(a.confFile.Connections, c)
-	}
-	if err := config.Save(a.confFile); err != nil {
+	// Persist via the store. Passing originalName as the oldName lets
+	// SaveConnection handle a rename atomically (delete-then-insert
+	// inside a single tx) so the list never shows two rows mid-save.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.store.SaveConnection(ctx, fl.f.originalName, c); err != nil {
 		fl.f.status = "save failed: " + err.Error()
+		return
+	}
+	if err := a.refreshConnections(); err != nil {
+		fl.f.status = "refresh failed: " + err.Error()
 		return
 	}
 	// Pop the form and notify the picker underneath.
@@ -275,9 +284,9 @@ func (fl *formLayer) Hints(a *app) string {
 	_ = a
 	_, canSave := fl.f.toConnection()
 	return joinHints(
-		"Tab/\u2193=next",
-		"Shift+Tab/\u2191=prev",
-		hintIf(canSave == nil, "\u21b5/Ctrl+S=save"),
-		"\u238b=cancel",
+		"Tab/Dn=next",
+		"Shift+Tab/Up=prev",
+		hintIf(canSave == nil, "Enter/Ctrl+S=save"),
+		"Esc=cancel",
 	)
 }

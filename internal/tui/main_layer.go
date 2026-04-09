@@ -1,6 +1,10 @@
 package tui
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/Nulifyer/sqlgo/internal/db"
+)
 
 // FocusTarget identifies which panel owns keyboard input in the main view.
 type FocusTarget int
@@ -221,11 +225,11 @@ func (m *mainLayer) prefillSelectFromExplorer(a *app) {
 	if !ok {
 		return
 	}
-	driverName := ""
+	var caps db.Capabilities
 	if a.conn != nil {
-		driverName = a.conn.Driver()
+		caps = a.conn.Capabilities()
 	}
-	m.editor.buf.SetText(BuildSelect(driverName, t, 100))
+	m.editor.buf.SetText(BuildSelect(caps, t, 100))
 	m.focus = FocusQuery
 }
 
@@ -236,7 +240,13 @@ func (m *mainLayer) handleSpace(a *app, k Key) {
 	}
 	switch k.Rune {
 	case 'c':
-		a.pushLayer(newPickerLayer(a.confFile.Connections))
+		// Refresh from store on open so stale in-memory state from a
+		// background import/export can't shadow the latest list.
+		if err := a.refreshConnections(); err != nil {
+			m.status = "load connections: " + err.Error()
+			return
+		}
+		a.pushLayer(newPickerLayer(a.connCache))
 	case 'x':
 		a.disconnect()
 	case 'q':
@@ -328,17 +338,17 @@ func (m *mainLayer) explorerHints(a *app) string {
 	selectHint := ""
 	switch m.explorer.SelectedKind() {
 	case itemTable, itemView:
-		selectHint = "\u21b5/s=SELECT" // U+21B5 = carriage return arrow
+		selectHint = "Enter/s=SELECT"
 	case itemSchema, itemSubgroup:
-		selectHint = "\u21b5=expand"
+		selectHint = "Enter=expand"
 	}
 	return joinHints(
 		"Ctrl+Q=quit",
 		hintAlwaysFocus(),
-		hintIf(len(m.explorer.items) > 0, "\u2191\u2193/PgUp/PgDn=move"),
+		hintIf(len(m.explorer.items) > 0, "Up/Dn/PgUp/PgDn=move"),
 		selectHint,
 		hintIf(connected, "R=refresh"),
-		"\u2423=menu", // U+2423 = open box (space symbol)
+		"Space=menu",
 	)
 }
 
@@ -357,14 +367,15 @@ func (m *mainLayer) queryHints(a *app) string {
 
 func (m *mainLayer) resultsHints(a *app) string {
 	_ = a
-	hasRows := m.table.Result() != nil && len(m.table.Result().Rows) > 0
+	hasRows := m.table.RowCount() > 0
+	hasCols := m.table.HasColumns()
 	return joinHints(
 		"Ctrl+Q=quit",
 		hintAlwaysFocus(),
-		hintIf(hasRows, "\u2191\u2193/PgUp/PgDn=scroll"),
-		hintIf(hasRows, "\u2190\u2192=hscroll"),
-		hintIf(m.table.Result() != nil, "w=wrap"),
-		"\u2423=menu",
+		hintIf(hasRows, "Up/Dn/PgUp/PgDn=scroll"),
+		hintIf(hasRows, "Lt/Rt=hscroll"),
+		hintIf(hasCols, "w=wrap"),
+		"Space=menu",
 	)
 }
 
@@ -373,6 +384,6 @@ func (m *mainLayer) spaceMenuHints(a *app) string {
 		"c=connect",
 		hintIf(a.conn != nil, "x=disconnect"),
 		"q=quit",
-		"\u238b=cancel", // U+238B = escape symbol
+		"Esc=cancel",
 	)
 }

@@ -6,18 +6,28 @@ import (
 	"github.com/Nulifyer/sqlgo/internal/db"
 )
 
-func TestTableSetResultComputesWidths(t *testing.T) {
+// feedRows is a test helper that pushes a fixture through the streaming
+// Init/Append/Done flow the real query runner uses. Keeping the helper
+// local to the tests avoids tying the production path to any fixture type.
+func feedRows(tbl *table, cols []db.Column, rows [][]any) {
+	tbl.Init(cols)
+	for _, r := range rows {
+		tbl.Append(r)
+	}
+	tbl.Done(nil)
+}
+
+func TestTableStreamingComputesWidths(t *testing.T) {
 	t.Parallel()
-	res := &db.Result{
-		Columns: []db.Column{{Name: "id"}, {Name: "name"}},
-		Rows: [][]any{
+	tbl := newTable()
+	feedRows(tbl,
+		[]db.Column{{Name: "id"}, {Name: "name"}},
+		[][]any{
 			{int64(1), "alice"},
 			{int64(200), "bob"},
 			{int64(3), "charlotte"},
 		},
-	}
-	tbl := newTable()
-	tbl.SetResult(res)
+	)
 
 	// widths: id max("id",1,200,3)=3 ; name max("name",alice,bob,charlotte)=9
 	want := []int{3, 9}
@@ -25,6 +35,12 @@ func TestTableSetResultComputesWidths(t *testing.T) {
 		if tbl.widths[i] != w {
 			t.Errorf("widths[%d] = %d, want %d", i, tbl.widths[i], w)
 		}
+	}
+	if got := tbl.RowCount(); got != 3 {
+		t.Errorf("RowCount = %d, want 3", got)
+	}
+	if tbl.Streaming() {
+		t.Errorf("Streaming still true after Done")
 	}
 }
 
@@ -34,12 +50,8 @@ func TestTableScrollClamping(t *testing.T) {
 	for i := range rows {
 		rows[i] = []any{int64(i)}
 	}
-	res := &db.Result{
-		Columns: []db.Column{{Name: "n"}},
-		Rows:    rows,
-	}
 	tbl := newTable()
-	tbl.SetResult(res)
+	feedRows(tbl, []db.Column{{Name: "n"}}, rows)
 
 	tbl.ScrollBy(-10)
 	if tbl.scrollRow != 0 {
@@ -48,6 +60,22 @@ func TestTableScrollClamping(t *testing.T) {
 	tbl.ScrollBy(100)
 	if tbl.scrollRow != len(rows)-1 {
 		t.Errorf("scrollRow after overscroll = %d, want %d", tbl.scrollRow, len(rows)-1)
+	}
+}
+
+func TestTableClearResetsState(t *testing.T) {
+	t.Parallel()
+	tbl := newTable()
+	feedRows(tbl,
+		[]db.Column{{Name: "id"}},
+		[][]any{{int64(1)}, {int64(2)}},
+	)
+	tbl.Clear()
+	if tbl.HasColumns() {
+		t.Errorf("HasColumns true after Clear")
+	}
+	if tbl.RowCount() != 0 {
+		t.Errorf("RowCount = %d after Clear, want 0", tbl.RowCount())
 	}
 }
 
