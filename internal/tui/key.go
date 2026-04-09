@@ -41,10 +41,14 @@ const (
 
 // Key is a single decoded keypress. Ctrl is true for Ctrl+<rune> combos
 // (Rune holds the lowercase letter; e.g. Ctrl+Q -> Rune='q', Ctrl=true).
+// Alt is true for Alt+<rune> combos — terminals encode these as ESC+<rune>,
+// which we distinguish from bare Esc at decode time by peeking for a
+// follow-up byte.
 type Key struct {
 	Kind KeyKind
 	Rune rune
 	Ctrl bool
+	Alt  bool
 }
 
 // keyReader decodes bytes from a terminal into Key events. It owns its
@@ -105,8 +109,8 @@ func (kr *keyReader) readUTF8(first byte) (Key, error) {
 	return Key{Kind: KeyRune, Rune: r}, nil
 }
 
-// readEscape handles ESC, ESC+[<...>, and ESC+O<...> sequences. A bare ESC
-// (no follow-up within a short window) returns KeyEsc.
+// readEscape handles ESC, ESC+[<...>, ESC+O<...>, and ESC+<rune> (Alt+rune)
+// sequences. A bare ESC (no follow-up within a short window) returns KeyEsc.
 func (kr *keyReader) readEscape() (Key, error) {
 	// Peek with a small wait so we can distinguish bare Esc from CSI.
 	if !kr.peekAvailable(8 * time.Millisecond) {
@@ -133,6 +137,13 @@ func (kr *keyReader) readEscape() (Key, error) {
 		case 'F':
 			return Key{Kind: KeyEnd}, nil
 		}
+		return Key{Kind: KeyEsc}, nil
+	}
+	// Alt+<rune>: ESC followed by a printable ASCII byte. This covers
+	// Alt+1..9, Alt+letters, etc. Multibyte Alt combos are rare enough to
+	// ignore — they fall through to bare Esc.
+	if b >= 0x20 && b < 0x7f {
+		return Key{Kind: KeyRune, Rune: rune(b), Alt: true}, nil
 	}
 	return Key{Kind: KeyEsc}, nil
 }

@@ -32,12 +32,28 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mssql open: %w", err)
 	}
-	conn, err := db.OpenSQL(ctx, sqlDB)
+	conn, err := db.OpenSQL(ctx, sqlDB, db.SQLOptions{
+		DriverName:  driverName,
+		SchemaQuery: schemaQuery,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("mssql: %w", err)
 	}
 	return conn, nil
 }
+
+// schemaQuery lists tables and views from INFORMATION_SCHEMA, filtering out
+// the built-in system schemas so the explorer only shows user objects. The
+// third column is a 0/1 flag (1 = view) to match the shared schema scanner.
+const schemaQuery = `
+SELECT
+	TABLE_SCHEMA AS [schema],
+	TABLE_NAME   AS name,
+	CASE WHEN TABLE_TYPE = 'VIEW' THEN 1 ELSE 0 END AS is_view
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA')
+ORDER BY TABLE_SCHEMA, TABLE_NAME;
+`
 
 // buildDSN produces a sqlserver:// URL understood by go-mssqldb.
 // Connection options from cfg.Options are passed as query parameters, so

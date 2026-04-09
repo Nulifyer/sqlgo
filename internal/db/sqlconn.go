@@ -4,23 +4,73 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 )
+
+// SQLOptions holds engine-specific knobs for the shared sqlConn wrapper.
+// SchemaQuery runs against the open *sql.DB to populate the explorer. The
+// query MUST return three columns in this order: schema name, object name,
+// and a 1=view/0=table flag (any non-zero int = view).
+type SQLOptions struct {
+	DriverName  string
+	SchemaQuery string
+}
 
 // OpenSQL wraps a stdlib *sql.DB as a db.Conn. Engine adapters build a DSN,
 // call sql.Open with the registered database/sql driver name, and hand the
 // result to OpenSQL. This keeps every adapter to a handful of lines.
 //
 // The Conn takes ownership of the *sql.DB and closes it in Close().
-func OpenSQL(ctx context.Context, sqlDB *sql.DB) (Conn, error) {
+func OpenSQL(ctx context.Context, sqlDB *sql.DB, opts SQLOptions) (Conn, error) {
 	if err := sqlDB.PingContext(ctx); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	return &sqlConn{db: sqlDB}, nil
+	return &sqlConn{db: sqlDB, opts: opts}, nil
 }
 
 type sqlConn struct {
-	db *sql.DB
+	db   *sql.DB
+	opts SQLOptions
+}
+
+func (c *sqlConn) Driver() string { return c.opts.DriverName }
+
+func (c *sqlConn) Schema(ctx context.Context) (*SchemaInfo, error) {
+	if c.opts.SchemaQuery == "" {
+		return &SchemaInfo{}, nil
+	}
+	rows, err := c.db.QueryContext(ctx, c.opts.SchemaQuery)
+	if err != nil {
+		return nil, fmt.Errorf("schema query: %w", err)
+	}
+	defer rows.Close()
+
+	var out []TableRef
+	for rows.Next() {
+		var (
+			schema, name string
+			isView       int
+		)
+		if err := rows.Scan(&schema, &name, &isView); err != nil {
+			return nil, fmt.Errorf("schema scan: %w", err)
+		}
+		kind := TableKindTable
+		if isView != 0 {
+			kind = TableKindView
+		}
+		out = append(out, TableRef{Schema: schema, Name: name, Kind: kind})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("schema rows: %w", err)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Schema != out[j].Schema {
+			return out[i].Schema < out[j].Schema
+		}
+		return out[i].Name < out[j].Name
+	})
+	return &SchemaInfo{Tables: out}, nil
 }
 
 func (c *sqlConn) Close() error {

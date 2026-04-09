@@ -46,6 +46,35 @@ type Conn interface {
 	// Query runs sql and materializes the full result set. Streaming will be
 	// added when the results panel needs it.
 	Query(ctx context.Context, sql string) (*Result, error)
+	// Schema returns the list of user-visible tables and views, grouped by
+	// schema, so the explorer can render a tree. Engines without schemas
+	// (sqlite, mysql) return everything under a single synthetic schema.
+	Schema(ctx context.Context) (*SchemaInfo, error)
+	// Driver returns the engine name this connection was opened with.
+	// The explorer uses this to pick the right SELECT top/limit syntax.
+	Driver() string
+}
+
+// TableKind distinguishes tables from views in the schema tree.
+type TableKind int
+
+const (
+	TableKindTable TableKind = iota
+	TableKindView
+)
+
+// TableRef is a single table or view in the schema tree.
+type TableRef struct {
+	Schema string
+	Name   string
+	Kind   TableKind
+}
+
+// SchemaInfo is a flat list of tables+views. The explorer groups by Schema
+// at render time; keeping the storage flat makes it trivial to sort and to
+// compute counts.
+type SchemaInfo struct {
+	Tables []TableRef
 }
 
 // Column describes a single column in a query result.

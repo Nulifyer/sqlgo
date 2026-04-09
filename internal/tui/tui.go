@@ -218,6 +218,7 @@ func (a *app) connectTo(c config.Connection) {
 	m := a.mainLayerPtr()
 	m.status = "connected"
 	m.table.SetResult(nil)
+	a.loadSchema()
 }
 
 func (a *app) disconnect() {
@@ -227,7 +228,30 @@ func (a *app) disconnect() {
 	_ = a.conn.Close()
 	a.conn = nil
 	a.activeConn = nil
-	a.mainLayerPtr().table.SetResult(nil)
+	m := a.mainLayerPtr()
+	m.table.SetResult(nil)
+	m.explorer.SetSchema(nil)
+}
+
+// loadSchema fetches the schema list from the active connection and hands it
+// to the explorer. Called on successful connect and by the 'R' keybind in
+// the Explorer panel. Errors are surfaced inside the explorer rather than
+// the global status line so a transient schema failure doesn't swallow the
+// last query's status.
+func (a *app) loadSchema() {
+	m := a.mainLayerPtr()
+	if a.conn == nil {
+		m.explorer.SetSchema(nil)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	info, err := a.conn.Schema(ctx)
+	if err != nil {
+		m.explorer.SetError(err.Error())
+		return
+	}
+	m.explorer.SetSchema(info)
 }
 
 // --- query execution -------------------------------------------------------

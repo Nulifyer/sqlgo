@@ -10,11 +10,17 @@ import (
 // table renders a db.Result as a scrollable aligned grid. Column widths are
 // computed once per SetResult call from the headers and up to sampleRows of
 // data so very tall result sets don't stall rendering.
+//
+// wrap=false (default): cells are padded to their measured width and the
+// whole row is clipped at the panel's right edge — wide columns simply run
+// off-screen. wrap=true: each row spans as many terminal rows as the widest
+// cell's line count requires, so nothing is hidden but fewer rows fit.
 type table struct {
 	res       *db.Result
 	widths    []int
 	scrollRow int
 	rendered  [][]string // stringified cells (lazy, same shape as res.Rows)
+	wrap      bool
 }
 
 const sampleRows = 200
@@ -57,6 +63,16 @@ func (t *table) SetResult(r *db.Result) {
 
 // Result returns the current result set (may be nil).
 func (t *table) Result() *db.Result { return t.res }
+
+// Wrap reports whether the table is in wrap mode.
+func (t *table) Wrap() bool { return t.wrap }
+
+// ToggleWrap flips wrap mode and resets scroll so the top of the result set
+// stays visible when the layout changes.
+func (t *table) ToggleWrap() {
+	t.wrap = !t.wrap
+	t.scrollRow = 0
+}
 
 // ScrollBy adjusts the top row by delta, clamped to valid range.
 func (t *table) ScrollBy(delta int) {
@@ -110,13 +126,37 @@ func (t *table) draw(s *cellbuf, r rect) {
 	if bodyH <= 0 {
 		return
 	}
-	for i := 0; i < bodyH; i++ {
-		rowIdx := t.scrollRow + i
-		if rowIdx >= len(t.rendered) {
-			break
+
+	if !t.wrap {
+		for i := 0; i < bodyH; i++ {
+			rowIdx := t.scrollRow + i
+			if rowIdx >= len(t.rendered) {
+				break
+			}
+			line := renderRow(t.rendered[rowIdx], t.widths, innerW)
+			s.writeAt(innerRow+2+i, innerCol, line)
 		}
-		line := renderRow(t.rendered[rowIdx], t.widths, innerW)
-		s.writeAt(innerRow+2+i, innerCol, line)
+		return
+	}
+
+	// Wrap mode: each data row may occupy multiple terminal rows. The
+	// longest cell's wrapped-line count sets the block height; other cells
+	// are padded with blanks so column alignment survives.
+	y := 0
+	for rowIdx := t.scrollRow; rowIdx < len(t.rendered) && y < bodyH; rowIdx++ {
+		block := wrapRow(t.rendered[rowIdx], t.widths)
+		for _, line := range block {
+			if y >= bodyH {
+				break
+			}
+			s.writeAt(innerRow+2+y, innerCol, truncate(line, innerW))
+			y++
+		}
+		// Blank spacer line between wrapped rows so the next row is visually
+		// distinct. Only emitted when there's still space.
+		if y < bodyH {
+			y++
+		}
 	}
 }
 
@@ -204,6 +244,61 @@ func rawStringify(v any) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// wrapRow splits a single logical result row into as many aligned terminal
+// lines as its widest cell requires. Each cell is chopped at its column
+// width; columns that run out of content early are filled with spaces so
+// the " | " separators stay aligned.
+func wrapRow(cells []string, widths []int) []string {
+	// Pre-chop every cell into width-sized slices of runes.
+	chunks := make([][]string, len(cells))
+	maxLines := 1
+	for i, cell := range cells {
+		w := widths[i]
+		if w <= 0 {
+			chunks[i] = []string{""}
+			continue
+		}
+		chunks[i] = chopRunes(cell, w)
+		if len(chunks[i]) > maxLines {
+			maxLines = len(chunks[i])
+		}
+	}
+	out := make([]string, maxLines)
+	for line := 0; line < maxLines; line++ {
+		var b strings.Builder
+		for i, col := range chunks {
+			if i > 0 {
+				b.WriteString(" | ")
+			}
+			if line < len(col) {
+				padRight(&b, col[line], widths[i])
+			} else {
+				padRight(&b, "", widths[i])
+			}
+		}
+		out[line] = b.String()
+	}
+	return out
+}
+
+// chopRunes splits s into slices of at most w runes. Empty strings become a
+// single empty slice so wrapRow produces at least one output row per cell.
+func chopRunes(s string, w int) []string {
+	if s == "" {
+		return []string{""}
+	}
+	runes := []rune(s)
+	var out []string
+	for i := 0; i < len(runes); i += w {
+		end := i + w
+		if end > len(runes) {
+			end = len(runes)
+		}
+		out = append(out, string(runes[i:end]))
+	}
+	return out
 }
 
 // sanitizeCell replaces newlines, tabs, and other control characters with

@@ -53,6 +53,23 @@ func (b *buffer) Clear() {
 	b.row, b.col = 0, 0
 }
 
+// SetText replaces the entire buffer with s, splitting on '\n'. The cursor
+// lands at the end of the last line — callers that want the cursor at the
+// start can MoveHome afterward.
+func (b *buffer) SetText(s string) {
+	b.lines = b.lines[:0]
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			b.lines = append(b.lines, []rune(s[start:i]))
+			start = i + 1
+		}
+	}
+	b.lines = append(b.lines, []rune(s[start:]))
+	b.row = len(b.lines) - 1
+	b.col = len(b.lines[b.row])
+}
+
 // Insert writes r at the cursor and advances one column.
 func (b *buffer) Insert(r rune) {
 	line := b.lines[b.row]

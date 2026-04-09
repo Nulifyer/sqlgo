@@ -47,6 +47,7 @@ func (m Mode) String() string {
 type mainLayer struct {
 	editor       *editor
 	table        *table
+	explorer     *explorer
 	focus        FocusTarget
 	mode         Mode
 	status       string
@@ -55,10 +56,11 @@ type mainLayer struct {
 
 func newMainLayer() *mainLayer {
 	m := &mainLayer{
-		editor: newEditor(),
-		table:  newTable(),
-		focus:  FocusQuery,
-		mode:   ModeNormal,
+		editor:   newEditor(),
+		table:    newTable(),
+		explorer: newExplorer(),
+		focus:    FocusQuery,
+		mode:     ModeNormal,
 	}
 	for _, r := range "SELECT @@VERSION AS version;" {
 		m.editor.buf.Insert(r)
@@ -70,13 +72,14 @@ func (m *mainLayer) Draw(a *app, c *cellbuf) {
 	p := computeLayout(a.term.width, a.term.height)
 	drawFrame(c, p.explorer, "Explorer", m.focus == FocusExplorer)
 	drawFrame(c, p.query, m.queryTitle(), m.focus == FocusQuery)
-	drawFrame(c, p.results, "Results", m.focus == FocusResults)
+	drawFrame(c, p.results, m.resultsTitle(), m.focus == FocusResults)
 
 	// Place the editor cursor unconditionally when in insert mode. If an
 	// overlay is stacked on top of us, its cell buffer will be the topmost
 	// one during compositing and the main layer's cursor request gets
 	// discarded automatically.
 	editorCursorVisible := m.focus == FocusQuery && m.mode == ModeInsert
+	m.explorer.draw(c, p.explorer, m.focus == FocusExplorer)
 	m.editor.draw(c, p.query, editorCursorVisible)
 	m.table.draw(c, p.results)
 
@@ -94,6 +97,24 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 	if k.Kind == KeyF5 {
 		a.runQuery()
 		return
+	}
+
+	// Alt+1/2/3 is the global panel-switch shortcut. It fires before any
+	// mode-specific routing so the user can switch out of INSERT mode
+	// without reaching for Esc first — the letter keys in the editor all
+	// stay available as literal input.
+	if k.Alt && k.Kind == KeyRune {
+		switch k.Rune {
+		case '1':
+			m.focus = FocusExplorer
+			return
+		case '2':
+			m.focus = FocusQuery
+			return
+		case '3':
+			m.focus = FocusResults
+			return
+		}
 	}
 
 	// Pending space-menu dispatch. The prefix is only recognized in NORMAL
@@ -114,48 +135,120 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		return
 	}
 
-	// NORMAL mode: panel switching and commands.
-	if k.Kind == KeyRune && !k.Ctrl {
-		switch k.Rune {
-		case ' ':
-			m.pendingSpace = true
-			m.status = "-- SPACE --"
-			return
-		case 'e':
-			m.focus = FocusExplorer
-			return
-		case 'q':
-			m.focus = FocusQuery
-			return
-		case 'r':
-			m.focus = FocusResults
-			return
-		case 'i':
-			if m.focus == FocusQuery {
-				m.mode = ModeInsert
-			}
-			return
-		case 'd':
-			if m.focus == FocusQuery {
-				m.editor.buf.Clear()
-			}
-			return
-		}
+	// NORMAL-mode space-menu prefix. Panel switching has moved to Alt+N
+	// so letters stay free for mnemonic commands inside each panel.
+	if k.Kind == KeyRune && !k.Ctrl && !k.Alt && k.Rune == ' ' {
+		m.pendingSpace = true
+		m.status = "-- SPACE --"
+		return
 	}
 
-	// Results scrolling.
-	if m.focus == FocusResults {
-		switch k.Kind {
-		case KeyUp:
-			m.table.ScrollBy(-1)
-		case KeyDown:
-			m.table.ScrollBy(1)
-		case KeyPgUp:
-			m.table.ScrollBy(-10)
-		case KeyPgDn:
-			m.table.ScrollBy(10)
+	switch m.focus {
+	case FocusExplorer:
+		m.handleExplorerKey(a, k)
+	case FocusQuery:
+		m.handleQueryNormalKey(a, k)
+	case FocusResults:
+		m.handleResultsKey(a, k)
+	}
+}
+
+// handleExplorerKey processes keys when the Explorer panel is focused in
+// NORMAL mode. Up/Down move, Enter expands a schema or prefills a SELECT
+// for the highlighted table, and 's' does the same without needing Enter.
+func (m *mainLayer) handleExplorerKey(a *app, k Key) {
+	switch k.Kind {
+	case KeyUp:
+		m.explorer.MoveCursor(-1)
+		return
+	case KeyDown:
+		m.explorer.MoveCursor(1)
+		return
+	case KeyPgUp:
+		m.explorer.MoveCursor(-10)
+		return
+	case KeyPgDn:
+		m.explorer.MoveCursor(10)
+		return
+	case KeyEnter:
+		switch m.explorer.SelectedKind() {
+		case itemSchema, itemSubgroup:
+			m.explorer.Toggle()
+		default:
+			m.prefillSelectFromExplorer(a)
+		}
+		return
+	}
+	if k.Kind == KeyRune && !k.Ctrl {
+		switch k.Rune {
+		case 's':
+			m.prefillSelectFromExplorer(a)
+			return
+		case 'R':
+			a.loadSchema()
+			return
 		}
 	}
+}
+
+// handleQueryNormalKey processes keys when the Query panel is focused in
+// NORMAL mode. INSERT-mode keys are handled before this runs.
+func (m *mainLayer) handleQueryNormalKey(a *app, k Key) {
+	_ = a
+	if k.Kind == KeyRune && !k.Ctrl {
+		switch k.Rune {
+		case 'i':
+			m.mode = ModeInsert
+		case 'd':
+			m.editor.buf.Clear()
+		}
+	}
+}
+
+// handleResultsKey processes keys when the Results panel is focused. Scroll
+// keys move the viewport; 'w' toggles between truncate and wrap rendering.
+func (m *mainLayer) handleResultsKey(a *app, k Key) {
+	_ = a
+	switch k.Kind {
+	case KeyUp:
+		m.table.ScrollBy(-1)
+		return
+	case KeyDown:
+		m.table.ScrollBy(1)
+		return
+	case KeyPgUp:
+		m.table.ScrollBy(-10)
+		return
+	case KeyPgDn:
+		m.table.ScrollBy(10)
+		return
+	case KeyHome:
+		m.table.ScrollBy(-1 << 30)
+		return
+	case KeyEnd:
+		m.table.ScrollBy(1 << 30)
+		return
+	}
+	if k.Kind == KeyRune && !k.Ctrl && k.Rune == 'w' {
+		m.table.ToggleWrap()
+	}
+}
+
+// prefillSelectFromExplorer writes a driver-aware SELECT for the highlighted
+// table into the editor and moves focus to Query. No-op if nothing selectable
+// is under the cursor.
+func (m *mainLayer) prefillSelectFromExplorer(a *app) {
+	t, ok := m.explorer.Selected()
+	if !ok {
+		return
+	}
+	driverName := ""
+	if a.conn != nil {
+		driverName = a.conn.Driver()
+	}
+	m.editor.buf.SetText(BuildSelect(driverName, t, 100))
+	m.focus = FocusQuery
+	m.mode = ModeNormal
 }
 
 // handleSpace dispatches the second key of the space-menu prefix.
@@ -189,6 +282,13 @@ func (m *mainLayer) queryTitle() string {
 	return "Query"
 }
 
+func (m *mainLayer) resultsTitle() string {
+	if m.table.Wrap() {
+		return "Results  [wrap]"
+	}
+	return "Results"
+}
+
 func (m *mainLayer) statusText(a *app, width int) string {
 	conn := "(not connected)"
 	if a.activeConn != nil {
@@ -196,11 +296,30 @@ func (m *mainLayer) statusText(a *app, width int) string {
 	}
 	msg := m.status
 	if msg == "" {
-		msg = "i=insert Esc=normal F5=run <space>c=connect Ctrl+Q=quit"
+		msg = m.focusHints()
 	}
 	s := fmt.Sprintf(" [%s %s]  %s  |  %s", m.mode, m.focus, conn, msg)
 	if len(s) > width {
 		s = s[:width]
 	}
 	return s
+}
+
+// focusHints returns the keybind hint line for the currently focused panel.
+// Global prefixes (Alt+N panel switch, <space> menu, Ctrl+Q) are shown
+// everywhere; the rest is panel-specific so the hint line stays short.
+func (m *mainLayer) focusHints() string {
+	global := "Alt+1/2/3=focus <space>=menu Ctrl+Q=quit"
+	switch m.focus {
+	case FocusExplorer:
+		return "Enter/s=SELECT R=refresh " + global
+	case FocusQuery:
+		if m.mode == ModeInsert {
+			return "Esc=normal F5=run Ctrl+C=cancel Alt+1/2/3=focus"
+		}
+		return "i=insert d=clear F5=run " + global
+	case FocusResults:
+		return "Up/Dn/PgUp/PgDn=scroll Home/End w=wrap " + global
+	}
+	return global
 }
