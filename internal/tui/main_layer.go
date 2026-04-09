@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 )
@@ -41,6 +43,15 @@ type mainLayer struct {
 	focus        FocusTarget
 	status       string // transient query feedback ("running...", "3 row(s) in 12ms"); never replaces the hint line
 	pendingSpace bool
+
+	// Last-query summary surfaced on the results panel's top-right
+	// border. lastHasResult is the gate: zero on startup / after a
+	// disconnect so no stale "0 rows / 0ms" shows up before any query.
+	lastRowCount  int
+	lastElapsed   time.Duration
+	lastHasResult bool
+	lastCapped    bool
+	lastErr       string
 }
 
 func newMainLayer() *mainLayer {
@@ -60,7 +71,7 @@ func (m *mainLayer) Draw(a *app, c *cellbuf) {
 	p := computeLayout(a.term.width, a.term.height)
 	drawFrame(c, p.explorer, "Explorer", m.focus == FocusExplorer)
 	drawFrame(c, p.query, "Query", m.focus == FocusQuery)
-	drawFrame(c, p.results, m.resultsTitle(), m.focus == FocusResults)
+	drawFrameInfo(c, p.results, m.resultsTitle(), m.resultsRightInfo(a), m.focus == FocusResults)
 
 	// Show the editor cursor whenever the Query panel is focused. If an
 	// overlay is stacked on top of us, its cell buffer will be the topmost
@@ -79,8 +90,10 @@ func (m *mainLayer) Draw(a *app, c *cellbuf) {
 }
 
 func (m *mainLayer) HandleKey(a *app, k Key) {
-	// Query cancellation and F5 are global to the main view.
-	if k.Ctrl && k.Rune == 'c' {
+	// Ctrl+C cancels a running query. When no query is running, it
+	// falls through so the editor can use Ctrl+C as "copy selection"
+	// without stealing it back from the cancel binding.
+	if k.Ctrl && k.Rune == 'c' && a.running {
 		a.cancelQuery()
 		return
 	}
@@ -123,7 +136,7 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 			m.editor.buf.Clear()
 			return
 		}
-		m.editor.handleInsert(k)
+		m.editor.handleInsert(a, k)
 		return
 	}
 
@@ -180,40 +193,88 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 	}
 }
 
-// handleResultsKey processes keys when the Results panel is focused. Up/Dn
-// and PgUp/PgDn scroll vertically; Left/Right scroll horizontally so wide
-// rows that overflow the panel can be read in non-wrap mode. 'w' toggles
-// between truncate and wrap rendering.
+// handleResultsKey processes keys when the Results panel is focused.
+// Navigation moves the cell cursor (Up/Dn/Lt/Rt); PgUp/PgDn page the
+// row cursor. Home/End jump to the first/last row. 'w' toggles wrap.
+// 's' cycles sort state on the current column; '/' opens the filter
+// prompt; 'y' / 'Y' copy cell / row to the system clipboard; Enter
+// opens the cell inspector.
 func (m *mainLayer) handleResultsKey(a *app, k Key) {
-	_ = a
 	switch k.Kind {
 	case KeyUp:
-		m.table.ScrollBy(-1)
+		m.table.MoveCellBy(-1, 0)
 		return
 	case KeyDown:
-		m.table.ScrollBy(1)
-		return
-	case KeyPgUp:
-		m.table.ScrollBy(-10)
-		return
-	case KeyPgDn:
-		m.table.ScrollBy(10)
+		m.table.MoveCellBy(1, 0)
 		return
 	case KeyLeft:
-		m.table.ScrollColBy(-8)
+		m.table.MoveCellBy(0, -1)
 		return
 	case KeyRight:
-		m.table.ScrollColBy(8)
+		m.table.MoveCellBy(0, 1)
+		return
+	case KeyPgUp:
+		m.table.MoveCellPage(-1)
+		return
+	case KeyPgDn:
+		m.table.MoveCellPage(1)
 		return
 	case KeyHome:
-		m.table.ScrollBy(-1 << 30)
+		m.table.MoveCellHome()
 		return
 	case KeyEnd:
-		m.table.ScrollBy(1 << 30)
+		m.table.MoveCellEnd()
+		return
+	case KeyEnter:
+		if m.table.HasColumns() {
+			a.pushLayer(newInspectorLayer(m.table.CursorColumn().Name, m.table.CursorCell()))
+		}
 		return
 	}
-	if k.Kind == KeyRune && !k.Ctrl && k.Rune == 'w' {
+	if k.Kind != KeyRune || k.Ctrl {
+		return
+	}
+	switch k.Rune {
+	case 'w':
 		m.table.ToggleWrap()
+	case 's':
+		col, desc, active := m.table.CycleSortAtCursor()
+		if !active {
+			m.status = "sort cleared"
+		} else {
+			dir := "asc"
+			if desc {
+				dir = "desc"
+			}
+			name := ""
+			if col >= 0 {
+				name = m.table.CursorColumn().Name
+			}
+			m.status = fmt.Sprintf("sort: %s %s", name, dir)
+		}
+	case '/':
+		a.pushLayer(newFilterLayer(m.table.Filter()))
+	case 'y':
+		if !m.table.HasColumns() {
+			return
+		}
+		cell := m.table.CursorCell()
+		if err := a.clipboard.Copy(cell); err != nil {
+			m.status = "copy: " + err.Error()
+		} else {
+			m.status = fmt.Sprintf("copied cell (%d chars)", len(cell))
+		}
+	case 'Y':
+		if !m.table.HasColumns() {
+			return
+		}
+		row := m.table.CursorRow()
+		line := strings.Join(row, "\t")
+		if err := a.clipboard.Copy(line); err != nil {
+			m.status = "copy: " + err.Error()
+		} else {
+			m.status = fmt.Sprintf("copied row (%d cells)", len(row))
+		}
 	}
 }
 
@@ -249,6 +310,20 @@ func (m *mainLayer) handleSpace(a *app, k Key) {
 		a.pushLayer(newPickerLayer(a.connCache))
 	case 'x':
 		a.disconnect()
+	case 'e':
+		// Export is only meaningful with a live result buffer. Silently
+		// ignoring on an empty buffer matches how the space menu treats
+		// the rest of the actions -- the hint line already hides the
+		// key in that state.
+		if !m.table.HasColumns() {
+			m.status = "nothing to export"
+			return
+		}
+		a.pushLayer(newExportLayer("results.csv"))
+	case 'h':
+		hl := newHistoryLayer()
+		hl.reload(a)
+		a.pushLayer(hl)
 	case 'q':
 		a.quit = true
 	}
@@ -259,6 +334,27 @@ func (m *mainLayer) resultsTitle() string {
 		return "Results  [wrap]"
 	}
 	return "Results"
+}
+
+// resultsRightInfo builds the top-right border label on the results panel.
+// While a query is running it streams the live row count; once a query
+// finishes the final row count + elapsed time stays pinned until the next
+// run. Errors collapse to a short tag so the border doesn't grow.
+func (m *mainLayer) resultsRightInfo(a *app) string {
+	if a.running {
+		return fmt.Sprintf("streaming %d rows", m.table.RowCount())
+	}
+	if !m.lastHasResult {
+		return ""
+	}
+	if m.lastErr != "" {
+		return "error"
+	}
+	suffix := ""
+	if m.lastCapped {
+		suffix = " (capped)"
+	}
+	return fmt.Sprintf("%d rows / %s%s", m.lastRowCount, m.lastElapsed.Round(time.Millisecond), suffix)
 }
 
 // statusText builds the footer line. Layout:
@@ -356,11 +452,15 @@ func (m *mainLayer) queryHints(a *app) string {
 	connected := a.conn != nil
 	running := a.running
 	hasText := m.editor.buf.LineCount() > 1 || len(m.editor.buf.Line(0)) > 0
+	hasSel := m.editor.buf.HasSelection()
 	return joinHints(
 		"Ctrl+Q=quit",
 		hintAlwaysFocus(),
 		hintIf(connected && !running, "F5=run"),
 		hintIf(running, "Ctrl+C=cancel"),
+		hintIf(hasSel, "Ctrl+C/X=copy/cut"),
+		hintIf(!hasSel, "Ctrl+V=paste"),
+		"Ctrl+Z/Y=undo/redo",
 		hintIf(hasText, "Ctrl+L=clear"),
 	)
 }
@@ -372,8 +472,11 @@ func (m *mainLayer) resultsHints(a *app) string {
 	return joinHints(
 		"Ctrl+Q=quit",
 		hintAlwaysFocus(),
-		hintIf(hasRows, "Up/Dn/PgUp/PgDn=scroll"),
-		hintIf(hasRows, "Lt/Rt=hscroll"),
+		hintIf(hasRows, "Up/Dn/Lt/Rt=cell"),
+		hintIf(hasRows, "Enter=inspect"),
+		hintIf(hasRows, "y=cell Y=row"),
+		hintIf(hasRows, "s=sort"),
+		hintIf(hasCols, "/=filter"),
 		hintIf(hasCols, "w=wrap"),
 		"Space=menu",
 	)
@@ -383,6 +486,8 @@ func (m *mainLayer) spaceMenuHints(a *app) string {
 	return joinHints(
 		"c=connect",
 		hintIf(a.conn != nil, "x=disconnect"),
+		hintIf(m.table.HasColumns(), "e=export"),
+		"h=history",
 		"q=quit",
 		"Esc=cancel",
 	)

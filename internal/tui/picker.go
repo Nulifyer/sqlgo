@@ -176,6 +176,12 @@ func (pl *pickerLayer) HandleKey(a *app, k Key) {
 				return
 			}
 			sel := pl.p.conns[pl.p.selected]
+			// Resolve the keyring placeholder so the form shows the
+			// real password for editing. If the keyring read fails we
+			// still open the form -- the user can clear and retype.
+			if pass, err := a.resolvePassword(sel); err == nil {
+				sel.Password = pass
+			}
 			a.pushLayer(newFormLayer("Edit connection", &sel))
 		case 'x':
 			if len(pl.p.conns) == 0 {
@@ -194,7 +200,7 @@ func (pl *pickerLayer) deleteSelected(a *app) {
 	name := pl.p.conns[i].Name
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := a.store.DeleteConnection(ctx, name); err != nil {
+	if err := a.deleteConnection(ctx, name); err != nil {
 		if errors.Is(err, store.ErrConnectionNotFound) {
 			pl.p.status = "already gone"
 		} else {

@@ -14,10 +14,16 @@ import (
 // when the named connection does not exist.
 var ErrConnectionNotFound = errors.New("connection not found")
 
+// connectionColumns is the canonical column list reused by every
+// connections SELECT so Get/List/scanConnection stay in sync as new
+// fields land in the schema.
+const connectionColumns = `name, driver, host, port, username, password, database, options,
+    ssh_host, ssh_port, ssh_user, ssh_password, ssh_key_path`
+
 // ListConnections returns every saved connection, sorted by name.
 func (s *Store) ListConnections(ctx context.Context) ([]config.Connection, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT name, driver, host, port, username, password, database, options
+        SELECT `+connectionColumns+`
         FROM connections
         ORDER BY name`)
 	if err != nil {
@@ -42,7 +48,7 @@ func (s *Store) ListConnections(ctx context.Context) ([]config.Connection, error
 // GetConnection returns the connection with the given name.
 func (s *Store) GetConnection(ctx context.Context, name string) (config.Connection, error) {
 	row := s.db.QueryRowContext(ctx, `
-        SELECT name, driver, host, port, username, password, database, options
+        SELECT `+connectionColumns+`
         FROM connections
         WHERE name = ?`, name)
 	c, err := scanConnection(row)
@@ -78,18 +84,26 @@ func (s *Store) SaveConnection(ctx context.Context, oldName string, c config.Con
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-        INSERT INTO connections(name, driver, host, port, username, password, database, options)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO connections(
+            name, driver, host, port, username, password, database, options,
+            ssh_host, ssh_port, ssh_user, ssh_password, ssh_key_path
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(name) DO UPDATE SET
-            driver     = excluded.driver,
-            host       = excluded.host,
-            port       = excluded.port,
-            username   = excluded.username,
-            password   = excluded.password,
-            database   = excluded.database,
-            options    = excluded.options,
-            updated_at = datetime('now')`,
+            driver       = excluded.driver,
+            host         = excluded.host,
+            port         = excluded.port,
+            username     = excluded.username,
+            password     = excluded.password,
+            database     = excluded.database,
+            options      = excluded.options,
+            ssh_host     = excluded.ssh_host,
+            ssh_port     = excluded.ssh_port,
+            ssh_user     = excluded.ssh_user,
+            ssh_password = excluded.ssh_password,
+            ssh_key_path = excluded.ssh_key_path,
+            updated_at   = datetime('now')`,
 		c.Name, c.Driver, c.Host, c.Port, c.User, c.Password, c.Database, optsJSON,
+		c.SSH.Host, c.SSH.Port, c.SSH.User, c.SSH.Password, c.SSH.KeyPath,
 	); err != nil {
 		return fmt.Errorf("save connection: %w", err)
 	}
@@ -132,6 +146,7 @@ func scanConnection(r rowScanner) (config.Connection, error) {
 	if err := r.Scan(
 		&c.Name, &c.Driver, &c.Host, &c.Port,
 		&c.User, &c.Password, &c.Database, &optsStr,
+		&c.SSH.Host, &c.SSH.Port, &c.SSH.User, &c.SSH.Password, &c.SSH.KeyPath,
 	); err != nil {
 		return config.Connection{}, err
 	}

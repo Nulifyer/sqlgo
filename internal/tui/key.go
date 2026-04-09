@@ -41,14 +41,17 @@ const (
 
 // Key is a single decoded keypress. Ctrl is true for Ctrl+<rune> combos
 // (Rune holds the lowercase letter; e.g. Ctrl+Q -> Rune='q', Ctrl=true).
-// Alt is true for Alt+<rune> combos — terminals encode these as ESC+<rune>,
-// which we distinguish from bare Esc at decode time by peeking for a
-// follow-up byte.
+// Alt is true for Alt+<rune> combos -- terminals encode these as
+// ESC+<rune>, which we distinguish from bare Esc at decode time by
+// peeking for a follow-up byte. Shift is set on arrow/home/end/pg keys
+// when the terminal reports an xterm modifier of 2 or higher, so the
+// editor can drive shift-select without needing its own shift latch.
 type Key struct {
-	Kind KeyKind
-	Rune rune
-	Ctrl bool
-	Alt  bool
+	Kind  KeyKind
+	Rune  rune
+	Ctrl  bool
+	Alt   bool
+	Shift bool
 }
 
 // keyReader decodes bytes from a terminal into Key events. It owns its
@@ -164,35 +167,51 @@ func (kr *keyReader) readCSI() (Key, error) {
 }
 
 func decodeCSI(params []byte, final byte) Key {
+	// xterm modifier encoding: two params "<code>;<mod>" for arrow/
+	// home/end keys, and "<n>;<mod>" for tilde codes. mod = 1 + bits
+	// where bit 0 = Shift, bit 1 = Alt, bit 2 = Ctrl. No mod param
+	// means unmodified.
+	p1, p2 := splitCSIParams(params)
+	mod := parseModifier(p2)
+	apply := func(k Key) Key {
+		if mod.Shift {
+			k.Shift = true
+		}
+		if mod.Alt {
+			k.Alt = true
+		}
+		if mod.Ctrl {
+			k.Ctrl = true
+		}
+		return k
+	}
 	switch final {
 	case 'A':
-		return Key{Kind: KeyUp}
+		return apply(Key{Kind: KeyUp})
 	case 'B':
-		return Key{Kind: KeyDown}
+		return apply(Key{Kind: KeyDown})
 	case 'C':
-		return Key{Kind: KeyRight}
+		return apply(Key{Kind: KeyRight})
 	case 'D':
-		return Key{Kind: KeyLeft}
+		return apply(Key{Kind: KeyLeft})
 	case 'H':
-		return Key{Kind: KeyHome}
+		return apply(Key{Kind: KeyHome})
 	case 'F':
-		return Key{Kind: KeyEnd}
+		return apply(Key{Kind: KeyEnd})
 	case 'Z':
 		return Key{Kind: KeyBackTab}
 	case '~':
-		// CSI <n>~ : 1=Home 3=Del 4=End 5=PgUp 6=PgDn
-		// 15=F5 17=F6 18=F7 19=F8 20=F9 21=F10 23=F11 24=F12
-		switch string(params) {
+		switch p1 {
 		case "1":
-			return Key{Kind: KeyHome}
+			return apply(Key{Kind: KeyHome})
 		case "3":
-			return Key{Kind: KeyDelete}
+			return apply(Key{Kind: KeyDelete})
 		case "4":
-			return Key{Kind: KeyEnd}
+			return apply(Key{Kind: KeyEnd})
 		case "5":
-			return Key{Kind: KeyPgUp}
+			return apply(Key{Kind: KeyPgUp})
 		case "6":
-			return Key{Kind: KeyPgDn}
+			return apply(Key{Kind: KeyPgDn})
 		case "15":
 			return Key{Kind: KeyF5}
 		case "17":
@@ -212,6 +231,51 @@ func decodeCSI(params []byte, final byte) Key {
 		}
 	}
 	return Key{Kind: KeyEsc}
+}
+
+// splitCSIParams divides a CSI param byte string at the first ';' and
+// returns the two halves as strings. Extra params beyond the second
+// are ignored -- none of the sequences we care about use them.
+func splitCSIParams(params []byte) (string, string) {
+	for i, b := range params {
+		if b == ';' {
+			return string(params[:i]), string(params[i+1:])
+		}
+	}
+	return string(params), ""
+}
+
+// csiModifier carries the decoded modifier bits from an xterm-style
+// keypress param. Unknown / missing params decode to zero value.
+type csiModifier struct {
+	Shift bool
+	Alt   bool
+	Ctrl  bool
+}
+
+// parseModifier turns a CSI modifier param ("2", "5", etc) into a
+// csiModifier. Per xterm, the value is 1 + bitmask of Shift(1) /
+// Alt(2) / Ctrl(4). An empty or unparseable string yields no modifiers.
+func parseModifier(s string) csiModifier {
+	if s == "" {
+		return csiModifier{}
+	}
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return csiModifier{}
+		}
+		n = n*10 + int(c-'0')
+	}
+	if n < 1 {
+		return csiModifier{}
+	}
+	bits := n - 1
+	return csiModifier{
+		Shift: bits&1 != 0,
+		Alt:   bits&2 != 0,
+		Ctrl:  bits&4 != 0,
+	}
 }
 
 // peekAvailable returns true if at least one byte is buffered or arrives

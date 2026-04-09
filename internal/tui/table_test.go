@@ -44,7 +44,7 @@ func TestTableStreamingComputesWidths(t *testing.T) {
 	}
 }
 
-func TestTableScrollClamping(t *testing.T) {
+func TestTableCellCursorClamps(t *testing.T) {
 	t.Parallel()
 	rows := make([][]any, 5)
 	for i := range rows {
@@ -53,13 +53,79 @@ func TestTableScrollClamping(t *testing.T) {
 	tbl := newTable()
 	feedRows(tbl, []db.Column{{Name: "n"}}, rows)
 
-	tbl.ScrollBy(-10)
-	if tbl.scrollRow != 0 {
-		t.Errorf("scrollRow after negative = %d, want 0", tbl.scrollRow)
+	// Moving up past the top clamps to row 0.
+	tbl.MoveCellBy(-10, 0)
+	if tbl.cellRow != 0 {
+		t.Errorf("cellRow after overscroll up = %d, want 0", tbl.cellRow)
 	}
-	tbl.ScrollBy(100)
-	if tbl.scrollRow != len(rows)-1 {
-		t.Errorf("scrollRow after overscroll = %d, want %d", tbl.scrollRow, len(rows)-1)
+	// Moving down past the bottom clamps to the last row.
+	tbl.MoveCellBy(100, 0)
+	if tbl.cellRow != len(rows)-1 {
+		t.Errorf("cellRow after overscroll down = %d, want %d", tbl.cellRow, len(rows)-1)
+	}
+	// Column cursor clamps on a single-column table.
+	tbl.MoveCellBy(0, 10)
+	if tbl.cellCol != 0 {
+		t.Errorf("cellCol after overscroll right = %d, want 0", tbl.cellCol)
+	}
+}
+
+func TestTableFilterNarrowsView(t *testing.T) {
+	t.Parallel()
+	tbl := newTable()
+	feedRows(tbl,
+		[]db.Column{{Name: "id"}, {Name: "name"}},
+		[][]any{
+			{int64(1), "alice"},
+			{int64(2), "Bob"},
+			{int64(3), "Charlie"},
+			{int64(4), "alicia"},
+		},
+	)
+	tbl.SetFilter("ali")
+	_, snap := tbl.Snapshot()
+	if len(snap) != 2 {
+		t.Errorf("filter 'ali' got %d rows, want 2", len(snap))
+	}
+	tbl.SetFilter("")
+	_, snap = tbl.Snapshot()
+	if len(snap) != 4 {
+		t.Errorf("cleared filter got %d rows, want 4", len(snap))
+	}
+}
+
+func TestTableSortCyclesAscDescNone(t *testing.T) {
+	t.Parallel()
+	tbl := newTable()
+	feedRows(tbl,
+		[]db.Column{{Name: "id"}, {Name: "name"}},
+		[][]any{
+			{int64(3), "alice"},
+			{int64(1), "bob"},
+			{int64(2), "charlie"},
+		},
+	)
+	// Put the cursor on the id column.
+	tbl.MoveCellBy(0, 0)
+	_, _, active := tbl.CycleSortAtCursor()
+	if !active {
+		t.Fatalf("expected sort to activate asc")
+	}
+	_, snap := tbl.Snapshot()
+	if snap[0][0] != "1" || snap[2][0] != "3" {
+		t.Errorf("asc sort order = %v", snap)
+	}
+	_, desc, active := tbl.CycleSortAtCursor()
+	if !active || !desc {
+		t.Fatalf("expected sort desc")
+	}
+	_, snap = tbl.Snapshot()
+	if snap[0][0] != "3" || snap[2][0] != "1" {
+		t.Errorf("desc sort order = %v", snap)
+	}
+	_, _, active = tbl.CycleSortAtCursor()
+	if active {
+		t.Fatalf("expected sort cleared")
 	}
 }
 
@@ -91,7 +157,7 @@ func TestTableStringifyCell(t *testing.T) {
 		{false, "false"},
 		{int64(42), "42"},
 		{[]byte{1, 2, 3, 4}, "<4 bytes>"},
-		{"line1\nline2\tend", "line1 line2 end"},
+		{"line1\nline2\tend", "line1\nline2\tend"}, // preserved; draw dims them
 	}
 	for _, tc := range cases {
 		if got := stringifyCell(tc.in); got != tc.want {

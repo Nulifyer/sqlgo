@@ -26,6 +26,23 @@ type Connection struct {
 	Password string            `json:"password,omitempty"`
 	Database string            `json:"database,omitempty"`
 	Options  map[string]string `json:"options,omitempty"`
+
+	// SSH holds the optional jump-host tunnel settings. Zero value
+	// means no tunneling; when SSH.Host is non-empty the TUI dials
+	// the target database through a local port forwarded over SSH.
+	// Kept as a nested struct so the JSON shape stays tidy.
+	SSH SSHTunnel `json:"ssh,omitempty"`
+}
+
+// SSHTunnel describes an SSH jump host used to reach the database.
+// Exactly one of Password or KeyPath authenticates the SSH connection;
+// KeyPath takes precedence when both are set. Empty Host means no tunnel.
+type SSHTunnel struct {
+	Host     string `json:"host,omitempty"`
+	Port     int    `json:"port,omitempty"`
+	User     string `json:"user,omitempty"`
+	Password string `json:"password,omitempty"`
+	KeyPath  string `json:"key_path,omitempty"`
 }
 
 // File is the root of the on-disk config.

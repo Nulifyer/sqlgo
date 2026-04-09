@@ -25,6 +25,8 @@ import (
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 	_ "github.com/Nulifyer/sqlgo/internal/db/mssql"
+	_ "github.com/Nulifyer/sqlgo/internal/db/mysql"
+	_ "github.com/Nulifyer/sqlgo/internal/db/postgres"
 	_ "github.com/Nulifyer/sqlgo/internal/db/sqlite"
 	"github.com/Nulifyer/sqlgo/internal/seed"
 )

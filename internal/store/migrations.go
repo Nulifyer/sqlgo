@@ -79,6 +79,18 @@ var migrations = []string{
         INSERT INTO history_fts(history_fts, rowid, sql) VALUES ('delete', old.id, old.sql);
         INSERT INTO history_fts(rowid, sql) VALUES (new.id, new.sql);
     END`,
+
+	// v4: SSH tunnel columns on connections.
+	//
+	// Columns are nullable / defaulted to empty strings so existing
+	// rows keep working. ssh_host="" means no tunnel. ssh_password is
+	// plaintext on disk when the OS keyring is unavailable; otherwise
+	// it gets migrated into the keyring same as the db password.
+	`ALTER TABLE connections ADD COLUMN ssh_host TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE connections ADD COLUMN ssh_port INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE connections ADD COLUMN ssh_user TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE connections ADD COLUMN ssh_password TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE connections ADD COLUMN ssh_key_path TEXT NOT NULL DEFAULT ''`,
 }
 
 // migrate brings the schema forward using the package-level migrations

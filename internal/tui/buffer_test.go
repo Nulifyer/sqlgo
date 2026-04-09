@@ -81,3 +81,100 @@ func TestBufferDeleteJoin(t *testing.T) {
 		t.Errorf("text = %q, want %q", got, "abcd")
 	}
 }
+
+func TestBufferSelectionSingleLine(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	b.SetText("hello world")
+	b.MoveHome()
+	// Select "hello"
+	for i := 0; i < 5; i++ {
+		b.SelectRight()
+	}
+	if !b.HasSelection() {
+		t.Fatal("HasSelection = false, want true")
+	}
+	if got := b.Selection(); got != "hello" {
+		t.Errorf("Selection = %q, want %q", got, "hello")
+	}
+}
+
+func TestBufferSelectionAcrossLines(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	b.SetText("one\ntwo\nthree")
+	// Cursor starts at end of "three". Anchor there, select upward by
+	// two lines to land at end of "one".
+	b.SelectUp()
+	b.SelectUp()
+	b.SelectEnd()
+	got := b.Selection()
+	want := "\ntwo\nthree"
+	if got != want {
+		t.Errorf("Selection = %q, want %q", got, want)
+	}
+}
+
+func TestBufferDeleteSelectionCollapses(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	b.SetText("abc123xyz")
+	b.MoveHome()
+	for i := 0; i < 3; i++ {
+		b.MoveRight()
+	}
+	// Select "123".
+	for i := 0; i < 3; i++ {
+		b.SelectRight()
+	}
+	b.DeleteSelection()
+	if got := b.Text(); got != "abcxyz" {
+		t.Errorf("after delete sel: %q, want %q", got, "abcxyz")
+	}
+	if b.HasSelection() {
+		t.Errorf("selection still active after DeleteSelection")
+	}
+}
+
+func TestBufferInsertTextMultiline(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	b.SetText("start")
+	b.MoveEnd()
+	b.InsertText("\nmiddle\nend")
+	if got := b.Text(); got != "start\nmiddle\nend" {
+		t.Errorf("InsertText: %q", got)
+	}
+}
+
+func TestBufferUndoRedo(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	for _, r := range "hello" {
+		b.Insert(r)
+	}
+	if !b.Undo() {
+		t.Fatal("Undo returned false on non-empty history")
+	}
+	// Undo pops the last Insert; after one undo the buffer should
+	// contain "hell".
+	if got := b.Text(); got != "hell" {
+		t.Errorf("after one undo: %q, want %q", got, "hell")
+	}
+	if !b.Redo() {
+		t.Fatal("Redo returned false after undo")
+	}
+	if got := b.Text(); got != "hello" {
+		t.Errorf("after redo: %q", got)
+	}
+}
+
+func TestBufferSelectAll(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	b.SetText("line1\nline2")
+	b.SelectAll()
+	if got := b.Selection(); got != "line1\nline2" {
+		t.Errorf("SelectAll: %q", got)
+	}
+}
