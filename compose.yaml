@@ -1,0 +1,19 @@
+# Local development databases for sqlgo. Bring up with:
+#   podman compose up -d mssql
+#
+# Credentials are dev-only. Do not reuse in production.
+services:
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sqlgo-mssql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "SqlGo_dev_Pass1!"
+      MSSQL_PID: "Developer"
+    ports:
+      - "11433:1433"
+    volumes:
+      - mssql-data:/var/opt/mssql
+
+volumes:
+  mssql-data:
