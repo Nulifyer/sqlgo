@@ -12,14 +12,11 @@ const (
 	esc = "\x1b"
 	csi = esc + "["
 
-	clearScreen = csi + "2J"
-	clearLine   = csi + "2K"
-	cursorHome  = csi + "H"
-	cursorHide  = csi + "?25l"
-	cursorShow  = csi + "?25h"
-	altScreenOn = csi + "?1049h"
+	cursorHide   = csi + "?25l"
+	cursorShow   = csi + "?25h"
+	altScreenOn  = csi + "?1049h"
 	altScreenOff = csi + "?1049l"
-	resetStyle  = csi + "0m"
+	resetStyle   = csi + "0m"
 )
 
 // moveTo positions the cursor (1-based row, col).
@@ -33,14 +30,4 @@ func moveTo(w io.Writer, row, col int) {
 // 256-color index.
 func fgColor(w io.Writer, code int) {
 	fmt.Fprintf(w, "%s%dm", csi, code)
-}
-
-// reverse toggles reverse video.
-func reverse(w io.Writer) {
-	io.WriteString(w, csi+"7m")
-}
-
-// reset clears all SGR attributes.
-func reset(w io.Writer) {
-	io.WriteString(w, resetStyle)
 }

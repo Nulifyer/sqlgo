@@ -10,7 +10,7 @@ var borderSingle = borderSet{tl: '┌', tr: '┐', bl: '└', br: '┘', h: '─
 
 // drawFrame renders a bordered panel with an optional title. Focused panels
 // use colorBorderFocused / colorTitleFocused; others use the dim variants.
-func drawFrame(s *screen, r rect, title string, focused bool) {
+func drawFrame(s *cellbuf, r rect, title string, focused bool) {
 	if r.w < 2 || r.h < 2 {
 		return
 	}

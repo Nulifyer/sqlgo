@@ -2,7 +2,6 @@ package tui
 
 import (
 	"bufio"
-	"errors"
 	"io"
 	"time"
 )
@@ -27,6 +26,17 @@ const (
 	KeyPgDn
 	KeyDelete
 	KeyF1
+	KeyF2
+	KeyF3
+	KeyF4
+	KeyF5
+	KeyF6
+	KeyF7
+	KeyF8
+	KeyF9
+	KeyF10
+	KeyF11
+	KeyF12
 )
 
 // Key is a single decoded keypress. Ctrl is true for Ctrl+<rune> combos
@@ -160,6 +170,7 @@ func decodeCSI(params []byte, final byte) Key {
 		return Key{Kind: KeyBackTab}
 	case '~':
 		// CSI <n>~ : 1=Home 3=Del 4=End 5=PgUp 6=PgDn
+		// 15=F5 17=F6 18=F7 19=F8 20=F9 21=F10 23=F11 24=F12
 		switch string(params) {
 		case "1":
 			return Key{Kind: KeyHome}
@@ -171,6 +182,22 @@ func decodeCSI(params []byte, final byte) Key {
 			return Key{Kind: KeyPgUp}
 		case "6":
 			return Key{Kind: KeyPgDn}
+		case "15":
+			return Key{Kind: KeyF5}
+		case "17":
+			return Key{Kind: KeyF6}
+		case "18":
+			return Key{Kind: KeyF7}
+		case "19":
+			return Key{Kind: KeyF8}
+		case "20":
+			return Key{Kind: KeyF9}
+		case "21":
+			return Key{Kind: KeyF10}
+		case "23":
+			return Key{Kind: KeyF11}
+		case "24":
+			return Key{Kind: KeyF12}
 		}
 	}
 	return Key{Kind: KeyEsc}
@@ -210,5 +237,3 @@ func decodeUTF8(b []byte) (rune, int) {
 	}
 	return 0xFFFD, 1
 }
-
-var errNoData = errors.New("no data")
