@@ -436,15 +436,6 @@ func (a *app) connectTo(c config.Connection) {
 		cfg.Host = t.LocalHost
 		cfg.Port = t.LocalPort
 	}
-	// Sensible MSSQL default: skip cert validation for dev containers.
-	if c.Driver == "mssql" {
-		if cfg.Options == nil {
-			cfg.Options = map[string]string{}
-		}
-		if _, ok := cfg.Options["encrypt"]; !ok {
-			cfg.Options["encrypt"] = "disable"
-		}
-	}
 
 	if pl != nil {
 		pl.setStatus("connecting...")
@@ -515,7 +506,7 @@ func (a *app) disconnect() {
 	a.activeConn = nil
 	m := a.mainLayerPtr()
 	m.table.Clear()
-	m.explorer.SetSchema(nil)
+	m.explorer.SetSchema(nil, db.SchemaDepthSchemas)
 	m.lastHasResult = false
 	m.lastErr = ""
 }
@@ -528,7 +519,7 @@ func (a *app) disconnect() {
 func (a *app) loadSchema() {
 	m := a.mainLayerPtr()
 	if a.conn == nil {
-		m.explorer.SetSchema(nil)
+		m.explorer.SetSchema(nil, db.SchemaDepthSchemas)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -538,7 +529,7 @@ func (a *app) loadSchema() {
 		m.explorer.SetError(err.Error())
 		return
 	}
-	m.explorer.SetSchema(info)
+	m.explorer.SetSchema(info, a.conn.Capabilities().SchemaDepth)
 }
 
 // --- query execution -------------------------------------------------------

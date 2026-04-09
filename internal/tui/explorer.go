@@ -54,6 +54,7 @@ func (s subgroupKind) label() string {
 // SELECT for.
 type explorer struct {
 	info     *db.SchemaInfo
+	depth    db.SchemaDepth // rendering mode: flat or schemas
 	expanded map[string]bool
 	items    []explorerItem // rebuilt from info+expanded on SetSchema / toggle
 	cursor   int            // index into items
@@ -65,11 +66,15 @@ func newExplorer() *explorer {
 	return &explorer{expanded: map[string]bool{}}
 }
 
-// SetSchema replaces the displayed schema and resets cursor/scroll. Schemas
-// and both subgroups start expanded the first time we see them so the user
-// doesn't land on a wall of closed groups after connecting.
-func (e *explorer) SetSchema(info *db.SchemaInfo) {
+// SetSchema replaces the displayed schema and resets cursor/scroll.
+// depth controls whether a schema header is emitted above the
+// Tables/Views subgroups: Schemas for Postgres/MSSQL/MySQL, Flat for
+// SQLite (which has no schema concept). Schemas and both subgroups
+// start expanded the first time we see them so the user doesn't land
+// on a wall of closed groups after connecting.
+func (e *explorer) SetSchema(info *db.SchemaInfo, depth db.SchemaDepth) {
 	e.info = info
+	e.depth = depth
 	e.err = ""
 	e.cursor = 0
 	e.scroll = 0
@@ -81,6 +86,17 @@ func (e *explorer) SetSchema(info *db.SchemaInfo) {
 			}
 			for _, sg := range []subgroupKind{subgroupTables, subgroupViews} {
 				k := subgroupExpansionKey(t.Schema, sg)
+				if _, seen := e.expanded[k]; !seen {
+					e.expanded[k] = true
+				}
+			}
+		}
+		// Flat mode uses a synthetic empty-string schema name for its
+		// subgroups; seed those expansion keys too so the Tables/Views
+		// groups start expanded instead of rendering collapsed.
+		if depth == db.SchemaDepthFlat {
+			for _, sg := range []subgroupKind{subgroupTables, subgroupViews} {
+				k := subgroupExpansionKey("", sg)
 				if _, seen := e.expanded[k]; !seen {
 					e.expanded[k] = true
 				}
@@ -189,14 +205,23 @@ func (e *explorer) Toggle() {
 	}
 }
 
-// rebuild flattens info+expanded into the visible items slice. The tree is:
+// rebuild flattens info+expanded into the visible items slice.
+//
+// Schemas mode (Postgres/MSSQL/MySQL) produces:
 //
 //	schema
 //	  Tables
 //	    tableA
-//	    tableB
 //	  Views
 //	    viewA
+//
+// Flat mode (SQLite) drops the schema header entirely, emitting
+// Tables/Views subgroups at the root:
+//
+//	Tables
+//	  tableA
+//	Views
+//	  viewA
 //
 // Subgroup headers are only emitted when their group has at least one entry.
 func (e *explorer) rebuild() {
@@ -205,8 +230,8 @@ func (e *explorer) rebuild() {
 		return
 	}
 	// Group tables+views by schema (info.Tables is already sorted by
-	// schema+name). Splitting into tables/views buckets is driven off the
-	// TableKind so the source ordering doesn't have to care.
+	// schema+name). Splitting into tables/views buckets is driven off
+	// the TableKind so the source ordering doesn't have to care.
 	type schemaBucket struct {
 		tables []db.TableRef
 		views  []db.TableRef
@@ -227,19 +252,35 @@ func (e *explorer) rebuild() {
 		}
 	}
 	sort.Strings(schemas)
-	for _, s := range schemas {
-		e.items = append(e.items, explorerItem{
-			kind:       itemSchema,
-			label:      s,
-			schemaName: s,
-		})
-		if !e.expanded[s] {
-			continue
+
+	if e.depth == db.SchemaDepthFlat {
+		// Merge every bucket into one synthetic "" schema so the Tables/
+		// Views subgroups contain everything. sqlite normally reports
+		// a single "main" schema, but we join across any rogue buckets
+		// defensively.
+		var allTables, allViews []db.TableRef
+		for _, s := range schemas {
+			allTables = append(allTables, buckets[s].tables...)
+			allViews = append(allViews, buckets[s].views...)
 		}
-		b := buckets[s]
-		e.appendSubgroup(s, subgroupTables, b.tables)
-		e.appendSubgroup(s, subgroupViews, b.views)
+		e.appendSubgroup("", subgroupTables, allTables)
+		e.appendSubgroup("", subgroupViews, allViews)
+	} else {
+		for _, s := range schemas {
+			e.items = append(e.items, explorerItem{
+				kind:       itemSchema,
+				label:      s,
+				schemaName: s,
+			})
+			if !e.expanded[s] {
+				continue
+			}
+			b := buckets[s]
+			e.appendSubgroup(s, subgroupTables, b.tables)
+			e.appendSubgroup(s, subgroupViews, b.views)
+		}
 	}
+
 	if e.cursor >= len(e.items) {
 		e.cursor = len(e.items) - 1
 	}
@@ -329,10 +370,11 @@ func (e *explorer) draw(c *cellbuf, r rect, focused bool) {
 	}
 }
 
-// renderExplorerLine formats one visible row with indent + marker. Indent
-// mirrors the tree depth: schemas at column 0, subgroups at column 2, leaves
-// at column 4. Collapsible rows (schema, subgroup) get a +/- marker; leaves
-// get a plain indent.
+// renderExplorerLine formats one visible row with indent + marker.
+// In Schemas mode indent is schemas=0, subgroups=2, leaves=4. In Flat
+// mode (SQLite) the schema layer is skipped so subgroups sit at 0 and
+// leaves at 2. The Flat case is distinguished by an empty schemaName
+// on the subgroup / leaf (populated by rebuild()).
 func renderExplorerLine(it explorerItem, expanded map[string]bool) string {
 	switch it.kind {
 	case itemSchema:
@@ -346,8 +388,14 @@ func renderExplorerLine(it explorerItem, expanded map[string]bool) string {
 		if expanded[subgroupExpansionKey(it.schemaName, it.subgroup)] {
 			marker = "-"
 		}
+		if it.schemaName == "" {
+			return marker + " " + it.label
+		}
 		return "  " + marker + " " + it.label
 	case itemTable, itemView:
+		if it.schemaName == "" {
+			return "    " + it.label
+		}
 		return "      " + it.label
 	}
 	return it.label

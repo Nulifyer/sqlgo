@@ -1,0 +1,388 @@
+package sqltok
+
+import (
+	"strings"
+)
+
+// Format rewrites an SQL statement using a small set of heuristics
+// driven by the tokenizer. It is deliberately not an AST-based
+// formatter -- dialects differ too much for a strict grammar to be
+// worth the cost at this stage. What it guarantees:
+//
+//   - Recognized keywords are normalized to uppercase.
+//   - Strings and comments round-trip byte-for-byte.
+//   - Major clauses (SELECT, FROM, WHERE, GROUP BY, HAVING, ORDER BY,
+//     LIMIT, OFFSET, UNION, INSERT, UPDATE, DELETE, VALUES, SET) each
+//     begin a new line at the current clause indent.
+//   - Each clause's items (the SELECT list, FROM tables, WHERE
+//     predicates) sit one indent level deeper than the clause keyword.
+//   - JOIN forms line up with the tables they join, not with the
+//     surrounding FROM keyword.
+//   - AND / OR at parenthesis depth zero wrap to a new line at the
+//     current item indent.
+//   - Parentheses that are NOT immediately preceded by an identifier
+//     (so: subqueries and grouping, not function calls) increase the
+//     clause indent by one level for their contents.
+//
+// If the input is empty or can't be tokenized meaningfully, Format
+// returns it unchanged so Ctrl+Z always restores the user's original
+// text.
+func Format(src string) string {
+	if strings.TrimSpace(src) == "" {
+		return src
+	}
+	tokens := TokenizeText(src)
+	if len(tokens) == 0 {
+		return src
+	}
+	f := &formatter{}
+	for i, t := range tokens {
+		f.writeToken(tokens, i, t)
+	}
+	return tidy(f.buf.String())
+}
+
+// indentWidth is the number of spaces per indent level. Four matches
+// what most SQL style guides and the user's example request.
+const indentWidth = 4
+
+// majorClause lists keywords that always begin a new line at the
+// current clause indent, resetting whatever item indent the previous
+// clause was using.
+var majorClause = map[string]struct{}{
+	"SELECT": {}, "FROM": {}, "WHERE": {}, "HAVING": {}, "LIMIT": {},
+	"OFFSET": {}, "UNION": {}, "INSERT": {}, "UPDATE": {}, "DELETE": {},
+	"VALUES": {}, "SET": {}, "RETURNING": {},
+}
+
+// joinHead identifies the first word of a JOIN phrase. These wrap to
+// the current item indent so `JOIN b ON ...` lines up with the tables
+// it's joining against.
+var joinHead = map[string]struct{}{
+	"JOIN": {}, "INNER": {}, "LEFT": {}, "RIGHT": {}, "FULL": {}, "CROSS": {},
+}
+
+// commaSplitters are clause keywords whose comma-separated lists
+// should wrap onto separate lines at the item indent.
+var commaSplitters = map[string]bool{
+	"SELECT": true, "FROM": true, "SET": true, "VALUES": true,
+	"GROUP": true, "ORDER": true,
+}
+
+type formatter struct {
+	buf strings.Builder
+
+	// baseIndent is where clause keywords (SELECT, FROM, ...) land on
+	// the current paren level. Item indent is always baseIndent +
+	// indentWidth; callers never raise the raw indent themselves.
+	baseIndent int
+
+	// Pending newline state. When atLine is true, the next writeRaw
+	// emits pendingIndent spaces before the token. This lets
+	// different parts of the emit path pick different line-start
+	// indents (baseIndent for a clause keyword, itemIndent for its
+	// content) without fighting each other.
+	atLine        bool
+	pendingIndent int
+
+	// parenStack saves the baseIndent that was active when each open
+	// paren was seen. -1 means "function call paren; don't change
+	// indent". ')' pops and (if not -1) restores baseIndent.
+	parenStack []int
+	// splitStack mirrors parenStack: true if the paren opened inside
+	// a comma-splitting context (so a subquery SELECT list also
+	// wraps on commas).
+	splitStack []bool
+
+	// currentSplit is the outermost split state at paren depth zero.
+	// Flipped on SELECT/FROM/SET/VALUES/GROUP BY/ORDER BY.
+	currentSplit bool
+}
+
+// itemIndent is the indent used for items inside the current clause
+// (SELECT list, FROM tables, WHERE conditions, ...).
+func (f *formatter) itemIndent() int {
+	return f.baseIndent + indentWidth
+}
+
+func (f *formatter) writeToken(tokens []Token, i int, t Token) {
+	switch t.Kind {
+	case Whitespace:
+		return
+	case Comment:
+		f.writeRaw(t.Text)
+		if strings.HasSuffix(t.Text, "\n") {
+			f.newlineTo(f.itemIndent())
+		} else {
+			f.writeRaw(" ")
+		}
+		return
+	case String:
+		f.writeRaw(t.Text)
+		f.writeRaw(" ")
+		return
+	case Number:
+		f.writeRaw(t.Text)
+		f.writeRaw(" ")
+		return
+	case Ident:
+		f.writeRaw(t.Text)
+		f.writeRaw(" ")
+		return
+	case Keyword:
+		upper := strings.ToUpper(t.Text)
+
+		// GROUP BY / ORDER BY are two-word clause heads. We detect the
+		// pair and emit "GROUP BY" / "ORDER BY" together, then swallow
+		// the follow-up BY token when it comes around below.
+		if (upper == "GROUP" || upper == "ORDER") && nextKeyword(tokens, i) == "BY" {
+			f.newlineTo(f.baseIndent)
+			f.writeRaw(upper + " BY")
+			f.newlineTo(f.itemIndent())
+			f.currentSplit = true
+			return
+		}
+		if upper == "BY" {
+			if prev := prevKeyword(tokens, i); prev == "GROUP" || prev == "ORDER" {
+				return
+			}
+		}
+
+		// Major clause: reset to baseIndent, write the keyword, then
+		// move down to itemIndent for its content. Because baseIndent
+		// never changes between sibling major clauses at the same
+		// paren level, consecutive clauses always line up with each
+		// other instead of accumulating indent.
+		if _, ok := majorClause[upper]; ok {
+			f.newlineTo(f.baseIndent)
+			f.writeRaw(upper)
+			f.newlineTo(f.itemIndent())
+			f.currentSplit = commaSplitters[upper]
+			return
+		}
+
+		// JOIN phrase: wraps to itemIndent so joined tables line up
+		// with the tables they join against.
+		if _, ok := joinHead[upper]; ok {
+			f.newlineTo(f.itemIndent())
+			f.writeRaw(upper)
+			f.writeRaw(" ")
+			// JOINs don't split the surrounding clause on commas.
+			f.currentSplit = false
+			return
+		}
+
+		// AND / OR at top level (paren depth zero) wrap to the
+		// current item indent so long WHERE predicates read cleanly.
+		if (upper == "AND" || upper == "OR") && len(f.parenStack) == 0 {
+			f.newlineTo(f.itemIndent())
+			f.writeRaw(upper)
+			f.writeRaw(" ")
+			return
+		}
+
+		// Default: inline uppercase with a trailing space.
+		f.writeRaw(upper)
+		f.writeRaw(" ")
+
+	case Punct:
+		switch t.Text {
+		case ",":
+			f.trimTrailingSpace()
+			f.writeRaw(",")
+			// Wrap the comma if we're in a top-level split context or
+			// inside a paren that opened from one (nested SELECT
+			// list).
+			split := f.currentSplit && len(f.parenStack) == 0
+			if !split && len(f.splitStack) > 0 && f.splitStack[len(f.splitStack)-1] {
+				split = true
+			}
+			if split {
+				f.newlineTo(f.itemIndent())
+			} else {
+				f.writeRaw(" ")
+			}
+		case "(":
+			if isFunctionCall(tokens, i) {
+				f.trimTrailingSpace()
+				f.writeRaw("(")
+				f.parenStack = append(f.parenStack, -1)
+				f.splitStack = append(f.splitStack, false)
+			} else {
+				f.writeRaw("(")
+				// Subquery / grouping paren: snapshot the current
+				// baseIndent so ')' can restore it, then bump to the
+				// next indent level and drop onto a fresh line.
+				f.parenStack = append(f.parenStack, f.baseIndent)
+				f.splitStack = append(f.splitStack, f.currentSplit)
+				f.baseIndent += indentWidth
+				f.newlineTo(f.baseIndent)
+				// Reset the child context so the inner clauses can
+				// pick their own state from scratch.
+				f.currentSplit = false
+			}
+		case ")":
+			f.trimTrailingSpace()
+			if n := len(f.parenStack); n > 0 {
+				saved := f.parenStack[n-1]
+				prevSplit := f.splitStack[n-1]
+				f.parenStack = f.parenStack[:n-1]
+				f.splitStack = f.splitStack[:n-1]
+				if saved >= 0 {
+					f.baseIndent = saved
+					f.currentSplit = prevSplit
+					f.newlineTo(f.baseIndent)
+				}
+			}
+			f.writeRaw(")")
+			f.writeRaw(" ")
+		case ";":
+			f.trimTrailingSpace()
+			f.writeRaw(";")
+			f.newlineTo(f.baseIndent)
+		case ".":
+			f.trimTrailingSpace()
+			f.writeRaw(".")
+		default:
+			f.writeRaw(t.Text)
+		}
+	case Operator:
+		f.writeRaw(t.Text)
+		f.writeRaw(" ")
+	default:
+		f.writeRaw(t.Text)
+	}
+}
+
+// isFunctionCall looks backward from tokens[i] (an open paren) and
+// returns true if the preceding non-whitespace token is an identifier
+// or a keyword that's conventionally followed by a function call
+// (CAST, COUNT, etc). This keeps `COUNT(*)` and `CAST(x AS INT)`
+// inline while `SELECT ... FROM (SELECT ...)` still indents.
+func isFunctionCall(tokens []Token, i int) bool {
+	for j := i - 1; j >= 0; j-- {
+		t := tokens[j]
+		if t.Kind == Whitespace || t.Kind == Comment {
+			continue
+		}
+		if t.Kind == Ident {
+			return true
+		}
+		if t.Kind == Keyword {
+			switch strings.ToUpper(t.Text) {
+			case "CAST", "CONVERT", "COUNT", "SUM", "AVG", "MIN", "MAX",
+				"COALESCE", "NULLIF", "SUBSTRING", "TRIM", "LOWER", "UPPER",
+				"LENGTH", "ABS", "ROUND", "FLOOR", "CEIL", "CEILING",
+				"EXTRACT", "DATE_PART", "NOW", "CURRENT_TIMESTAMP", "CURRENT_DATE":
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// nextKeyword returns the uppercase text of the next Keyword token
+// after i, skipping whitespace. "" if none.
+func nextKeyword(tokens []Token, i int) string {
+	for j := i + 1; j < len(tokens); j++ {
+		if tokens[j].Kind == Whitespace {
+			continue
+		}
+		if tokens[j].Kind == Keyword {
+			return strings.ToUpper(tokens[j].Text)
+		}
+		return ""
+	}
+	return ""
+}
+
+// prevKeyword is the mirror of nextKeyword for the token before i.
+func prevKeyword(tokens []Token, i int) string {
+	for j := i - 1; j >= 0; j-- {
+		if tokens[j].Kind == Whitespace {
+			continue
+		}
+		if tokens[j].Kind == Keyword {
+			return strings.ToUpper(tokens[j].Text)
+		}
+		return ""
+	}
+	return ""
+}
+
+// writeRaw appends s to the output buffer, flushing any pending
+// indent first. Callers are responsible for whitespace inside s.
+func (f *formatter) writeRaw(s string) {
+	if s == "" {
+		return
+	}
+	if f.atLine {
+		if f.pendingIndent > 0 {
+			f.buf.WriteString(strings.Repeat(" ", f.pendingIndent))
+		}
+		f.atLine = false
+	}
+	f.buf.WriteString(s)
+}
+
+// newlineTo begins a new output line and arms pendingIndent so the
+// next writeRaw emits that many leading spaces. Calling this while
+// already at a line-start is idempotent except for the indent
+// target, which is updated -- the last caller wins.
+func (f *formatter) newlineTo(indent int) {
+	if f.atLine {
+		f.pendingIndent = indent
+		return
+	}
+	f.trimTrailingSpace()
+	b := f.buf.String()
+	if b != "" && b[len(b)-1] != '\n' {
+		f.buf.WriteByte('\n')
+	}
+	f.pendingIndent = indent
+	f.atLine = true
+}
+
+// trimTrailingSpace drops any trailing space characters on the
+// current output line so ",", "(", ";" etc don't leave holes.
+func (f *formatter) trimTrailingSpace() {
+	b := f.buf.String()
+	i := len(b)
+	for i > 0 && b[i-1] == ' ' {
+		i--
+	}
+	if i < len(b) {
+		f.buf.Reset()
+		f.buf.WriteString(b[:i])
+	}
+}
+
+// tidy strips trailing whitespace from each line and collapses runs
+// of blank lines to at most one. Applied once at the end of Format
+// so the rest of the formatter doesn't have to worry about
+// intermediate artifacts.
+func tidy(s string) string {
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	blankStreak := 0
+	for _, line := range lines {
+		trimmed := strings.TrimRight(line, " \t")
+		if trimmed == "" {
+			blankStreak++
+			if blankStreak > 1 {
+				continue
+			}
+		} else {
+			blankStreak = 0
+		}
+		out = append(out, trimmed)
+	}
+	for len(out) > 0 && out[0] == "" {
+		out = out[1:]
+	}
+	for len(out) > 0 && out[len(out)-1] == "" {
+		out = out[:len(out)-1]
+	}
+	return strings.Join(out, "\n")
+}

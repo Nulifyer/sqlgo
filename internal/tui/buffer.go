@@ -311,6 +311,133 @@ func (b *buffer) MoveEnd() {
 	b.col = len(b.lines[b.row])
 }
 
+// MoveWordLeft jumps backward over one word boundary. Skips any run
+// of non-word characters at the cursor, then skips the preceding run
+// of word characters. Crosses line boundaries when at the start of a
+// line, matching what most terminal editors do with Ctrl+Left.
+func (b *buffer) MoveWordLeft() {
+	b.clearSelection()
+	b.moveWordLeftNoSel()
+}
+
+func (b *buffer) moveWordLeftNoSel() {
+	if b.col == 0 {
+		if b.row == 0 {
+			return
+		}
+		b.row--
+		b.col = len(b.lines[b.row])
+		return
+	}
+	line := b.lines[b.row]
+	// Skip non-word chars immediately before the cursor.
+	for b.col > 0 && !isWordChar(line[b.col-1]) {
+		b.col--
+	}
+	// Skip the run of word chars.
+	for b.col > 0 && isWordChar(line[b.col-1]) {
+		b.col--
+	}
+}
+
+// MoveWordRight jumps forward over one word boundary. Mirror of
+// MoveWordLeft.
+func (b *buffer) MoveWordRight() {
+	b.clearSelection()
+	b.moveWordRightNoSel()
+}
+
+func (b *buffer) moveWordRightNoSel() {
+	line := b.lines[b.row]
+	if b.col >= len(line) {
+		if b.row == len(b.lines)-1 {
+			return
+		}
+		b.row++
+		b.col = 0
+		return
+	}
+	// Skip the run of word chars the cursor is inside/at the start of.
+	for b.col < len(line) && isWordChar(line[b.col]) {
+		b.col++
+	}
+	// Skip the trailing run of non-word chars.
+	for b.col < len(line) && !isWordChar(line[b.col]) {
+		b.col++
+	}
+}
+
+// SelectWordLeft / SelectWordRight are the shift-held counterparts.
+// They set the anchor (if not already) and move without clearing it.
+func (b *buffer) SelectWordLeft() {
+	b.ensureAnchor()
+	b.moveWordLeftNoSel()
+}
+
+func (b *buffer) SelectWordRight() {
+	b.ensureAnchor()
+	b.moveWordRightNoSel()
+}
+
+// DeleteWordLeft deletes from the cursor backward to the previous word
+// boundary. Uses the selection+delete machinery so it integrates with
+// undo and matches what a selection-then-delete would do.
+func (b *buffer) DeleteWordLeft() {
+	b.snapshot()
+	// Drop any existing selection; we're building a fresh range to
+	// delete, anchored at the current cursor.
+	b.anchorSet = false
+	savedRow, savedCol := b.row, b.col
+	// Temporarily treat the move as a selection extension so we can
+	// reuse the multi-line delete path.
+	b.ensureAnchor()
+	b.moveWordLeftNoSel()
+	// Normalize so anchor > cursor (we're deleting leftward).
+	if b.row == savedRow && b.col == savedCol {
+		b.anchorSet = false
+		return
+	}
+	b.anchorRow, b.anchorCol = savedRow, savedCol
+	b.deleteSelectionNoSnap()
+}
+
+// DeleteWordRight deletes from the cursor forward to the next word
+// boundary.
+func (b *buffer) DeleteWordRight() {
+	b.snapshot()
+	b.anchorSet = false
+	savedRow, savedCol := b.row, b.col
+	b.ensureAnchor()
+	b.moveWordRightNoSel()
+	if b.row == savedRow && b.col == savedCol {
+		b.anchorSet = false
+		return
+	}
+	// anchor at saved position, cursor at the forward boundary --
+	// deleteSelectionNoSnap handles the ordering.
+	b.anchorRow, b.anchorCol = savedRow, savedCol
+	b.deleteSelectionNoSnap()
+}
+
+// isWordChar reports whether r belongs inside an identifier-like word
+// run for the purposes of Ctrl+Left/Right navigation. Letters, digits,
+// and underscore count; everything else is a boundary character.
+func isWordChar(r rune) bool {
+	if r == '_' {
+		return true
+	}
+	if r >= '0' && r <= '9' {
+		return true
+	}
+	if r >= 'a' && r <= 'z' {
+		return true
+	}
+	if r >= 'A' && r <= 'Z' {
+		return true
+	}
+	return false
+}
+
 // --- selection -------------------------------------------------------------
 
 // SelectLeft extends the selection one rune to the left, setting the

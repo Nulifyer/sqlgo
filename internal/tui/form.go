@@ -427,11 +427,7 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 
 	if f.status != "" {
 		s.setFg(colorBorderFocused)
-		status := f.status
-		if len(status) > innerW {
-			status = status[:innerW]
-		}
-		s.writeAt(r.row+r.h-2, innerCol, status)
+		s.writeAt(r.row+r.h-2, innerCol, truncate(f.status, innerW))
 		s.resetStyle()
 	}
 }

@@ -586,7 +586,14 @@ func (t *table) draw(s *cellbuf, r rect) {
 		return
 	}
 
-	// Wrap mode: each data row may occupy multiple terminal rows.
+	// Wrap mode: each data row may occupy multiple terminal visual
+	// rows. We produce a styled runs grid for the row (one inner slice
+	// per wrapped line), then paint each line via drawRunsWithHighlight
+	// so escape-char dim styling and cursor highlight work the same
+	// way they do in non-wrap mode. The highlight span is computed
+	// once per logical row and applied to every wrapped line of that
+	// row so the cursor cell stays visible even when its value spans
+	// multiple terminal lines.
 	y := 0
 	for rowIdx := t.scrollRow; rowIdx < len(view) && y < bodyH; rowIdx++ {
 		src := t.rendered[view[rowIdx]]
@@ -594,40 +601,35 @@ func (t *table) draw(s *cellbuf, r rect) {
 		if rowIdx == t.cellRow {
 			highlightCol = t.cellCol
 		}
-		block := wrapRow(src, t.widths)
+		hi0, hi1 := highlightSpan(t.widths, highlightCol)
+		block := wrapRowRuns(src, t.widths)
 		for _, line := range block {
 			if y >= bodyH {
 				break
 			}
-			// Wrap mode doesn't currently paint escape chars because
-			// wrap already chops the cell; add styling in a later pass
-			// once the wrap path is also convert to run-based draw.
-			s.writeAt(innerRow+2+y, innerCol, sliceRunes(line, t.scrollCol, innerW))
+			drawRunsWithHighlight(s, innerRow+2+y, innerCol, innerW, line, t.scrollCol, hi0, hi1)
 			y++
 		}
-		_ = highlightCol
 	}
 }
 
-// drawDataRow writes a single non-wrapped data row, painting each cell
-// with the normal style (escape chars dimmed) and applying a reverse-
-// video highlight to the cursor cell. innerW bounds the total runes
-// written so the row clips at the panel's right edge.
+// drawDataRow writes a single non-wrapped data row, painting each
+// cell with the normal style (escape chars dimmed) and applying a
+// reverse-video highlight to the cursor cell. innerW bounds the total
+// runes written so the row clips at the panel's right edge.
 func drawDataRow(s *cellbuf, row, col, innerW int, cells []string, widths []int, scrollCol, highlightCol int) {
-	// Build the full rendered line once so scrollCol math is trivial,
-	// then paint rune-by-rune starting at (scrollCol, 0).
 	runes := rowRuneRuns(cells, widths)
+	hi0, hi1 := highlightSpan(widths, highlightCol)
+	drawRunsWithHighlight(s, row, col, innerW, runes, scrollCol, hi0, hi1)
+}
 
-	// Highlight span in rune offsets [hi0, hi1) within the full row.
-	hi0, hi1 := -1, -1
-	if highlightCol >= 0 && highlightCol < len(cells) {
-		hi0 = 0
-		for i := 0; i < highlightCol; i++ {
-			hi0 += widths[i] + 3
-		}
-		hi1 = hi0 + widths[highlightCol]
-	}
-
+// drawRunsWithHighlight paints one horizontal line of runeRun values
+// starting at (row, col), clipped to innerW. Runs flagged as escape
+// (expanded \n/\r/\t) are drawn in the dim style; runs whose full-row
+// rune offset falls inside [hi0, hi1) are drawn in the reverse-video
+// cursor style. Used by both non-wrap and wrap modes so styling stays
+// consistent across both.
+func drawRunsWithHighlight(s *cellbuf, row, col, innerW int, runes []runeRun, scrollCol, hi0, hi1 int) {
 	normal := defaultStyle()
 	dim := Style{FG: ansiBrightBlack, BG: ansiDefaultBG}
 	selected := Style{FG: ansiDefault, BG: ansiDefaultBG, Attrs: attrReverse}
@@ -655,6 +657,20 @@ func drawDataRow(s *cellbuf, row, col, innerW int, cells []string, widths []int,
 	}
 }
 
+// highlightSpan returns the [lo, hi) rune-offset range a given column
+// occupies in a full rendered row. col == -1 (no highlight) returns
+// (-1, -1) so the main draw loop can skip the range check entirely.
+func highlightSpan(widths []int, col int) (int, int) {
+	if col < 0 || col >= len(widths) {
+		return -1, -1
+	}
+	lo := 0
+	for i := 0; i < col; i++ {
+		lo += widths[i] + 3 // " | "
+	}
+	return lo, lo + widths[col]
+}
+
 // runeRun is a single visible cell to paint: exactly one terminal cell
 // wide, either a plain rune or one half of an expanded escape sequence.
 type runeRun struct {
@@ -673,6 +689,103 @@ func rowRuneRuns(cells []string, widths []int) []runeRun {
 			out = append(out, runeRun{s: " "}, runeRun{s: "|"}, runeRun{s: " "})
 		}
 		out = appendCellRuns(out, cell, widths[i])
+	}
+	return out
+}
+
+// wrapRowRuns is the wrap-mode parallel of rowRuneRuns. Each cell is
+// chopped into as many visual lines as its content requires (at its
+// column width, counting expanded escapes); lines are then zipped
+// side-by-side with the separator runs so every visual line covers the
+// full row width. Short cells are padded with blank runs so column
+// alignment is preserved across all wrapped lines, which lets
+// highlightSpan math from the non-wrap path apply unchanged.
+func wrapRowRuns(cells []string, widths []int) [][]runeRun {
+	if len(cells) == 0 {
+		return nil
+	}
+	chopped := make([][][]runeRun, len(cells))
+	maxLines := 1
+	for i, cell := range cells {
+		chopped[i] = chopCellRuns(cell, widths[i])
+		if len(chopped[i]) > maxLines {
+			maxLines = len(chopped[i])
+		}
+	}
+	out := make([][]runeRun, maxLines)
+	for line := 0; line < maxLines; line++ {
+		var row []runeRun
+		for i, col := range chopped {
+			if i > 0 {
+				row = append(row, runeRun{s: " "}, runeRun{s: "|"}, runeRun{s: " "})
+			}
+			if line < len(col) {
+				row = append(row, col[line]...)
+			} else {
+				// Pad the empty slot to the column's full width so
+				// separators line up with the non-wrap layout.
+				for j := 0; j < widths[i]; j++ {
+					row = append(row, runeRun{s: " "})
+				}
+			}
+		}
+		out[line] = row
+	}
+	return out
+}
+
+// chopCellRuns splits a single cell into runeRun slices, each exactly
+// `width` cells wide. Handles the same escape expansions as
+// appendCellRuns and pads the trailing slice with blanks so every
+// returned slice has identical length. An empty string yields a single
+// all-blank slice so callers always see at least one visual line.
+func chopCellRuns(cell string, width int) [][]runeRun {
+	if width <= 0 {
+		return [][]runeRun{{}}
+	}
+	var out [][]runeRun
+	cur := make([]runeRun, 0, width)
+	written := 0
+	flush := func() {
+		for written < width {
+			cur = append(cur, runeRun{s: " "})
+			written++
+		}
+		out = append(out, cur)
+		cur = make([]runeRun, 0, width)
+		written = 0
+	}
+	emitEscape := func(ch string) {
+		if written+2 > width {
+			flush()
+		}
+		cur = append(cur,
+			runeRun{s: "\\", escape: true},
+			runeRun{s: ch, escape: true},
+		)
+		written += 2
+	}
+	for _, r := range cell {
+		switch r {
+		case '\n':
+			emitEscape("n")
+		case '\r':
+			emitEscape("r")
+		case '\t':
+			emitEscape("t")
+		default:
+			if r < 0x20 || r == 0x7f {
+				continue
+			}
+			if written >= width {
+				flush()
+			}
+			cur = append(cur, runeRun{s: string(r)})
+			written++
+		}
+	}
+	if written > 0 || len(out) == 0 {
+		flush()
 	}
 	return out
 }
@@ -922,129 +1035,6 @@ func sanitizeCell(s string) string {
 		}
 	}
 	return b.String()
-}
-
-// wrapRow splits a single logical result row into as many aligned
-// terminal lines as its widest cell requires. Each cell is chopped at
-// its column width; columns that run out of content early are filled
-// with spaces so the " | " separators stay aligned. Kept plain for the
-// current wrap mode -- escape-char styling in wrap mode comes later.
-func wrapRow(cells []string, widths []int) []string {
-	chunks := make([][]string, len(cells))
-	maxLines := 1
-	for i, cell := range cells {
-		w := widths[i]
-		if w <= 0 {
-			chunks[i] = []string{""}
-			continue
-		}
-		chunks[i] = chopCellDisplay(cell, w)
-		if len(chunks[i]) > maxLines {
-			maxLines = len(chunks[i])
-		}
-	}
-	out := make([]string, maxLines)
-	for line := 0; line < maxLines; line++ {
-		var b strings.Builder
-		for i, col := range chunks {
-			if i > 0 {
-				b.WriteString(" | ")
-			}
-			if line < len(col) {
-				padDisplayTo(&b, col[line], widths[i])
-			} else {
-				padDisplayTo(&b, "", widths[i])
-			}
-		}
-		out[line] = b.String()
-	}
-	return out
-}
-
-// chopCellDisplay splits a cell into width-sized slices, counting escape
-// chars as two display cells so the wrapped segments don't overflow.
-// Empty strings become a single empty slice so wrapRow produces at least
-// one output row per cell.
-func chopCellDisplay(s string, w int) []string {
-	if s == "" {
-		return []string{""}
-	}
-	var out []string
-	var b strings.Builder
-	written := 0
-	flush := func() {
-		out = append(out, b.String())
-		b.Reset()
-		written = 0
-	}
-	for _, r := range s {
-		size := 1
-		repr := string(r)
-		switch r {
-		case '\n':
-			repr = `\n`
-			size = 2
-		case '\r':
-			repr = `\r`
-			size = 2
-		case '\t':
-			repr = `\t`
-			size = 2
-		default:
-			if r < 0x20 || r == 0x7f {
-				continue
-			}
-		}
-		if written+size > w {
-			flush()
-		}
-		b.WriteString(repr)
-		written += size
-	}
-	if written > 0 {
-		flush()
-	}
-	if len(out) == 0 {
-		out = append(out, "")
-	}
-	return out
-}
-
-// padDisplayTo writes s's display form (escapes expanded) into b and
-// pads to w display cells.
-func padDisplayTo(b *strings.Builder, s string, w int) {
-	written := 0
-	for _, r := range s {
-		if written >= w {
-			break
-		}
-		size := 1
-		repr := string(r)
-		switch r {
-		case '\n':
-			repr = `\n`
-			size = 2
-		case '\r':
-			repr = `\r`
-			size = 2
-		case '\t':
-			repr = `\t`
-			size = 2
-		default:
-			if r < 0x20 || r == 0x7f {
-				continue
-			}
-		}
-		if written+size > w {
-			break
-		}
-		b.WriteString(repr)
-		written += size
-	}
-	for written < w {
-		b.WriteByte(' ')
-		written++
-	}
 }
 
 // padRight writes s then spaces up to width w. Used by legacy callers

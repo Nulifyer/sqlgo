@@ -6,9 +6,14 @@ package tui
 // configured with.
 const (
 	// Foreground.
-	ansiDefault     = 39 // reset fg to terminal default
-	ansiBrightBlack = 90 // usually rendered as grey
-	ansiBrightCyan  = 96
+	ansiDefault       = 39 // reset fg to terminal default
+	ansiBrightBlack   = 90 // usually rendered as grey
+	ansiBrightRed     = 91
+	ansiBrightGreen   = 92
+	ansiBrightYellow  = 93
+	ansiBrightBlue    = 94
+	ansiBrightMagenta = 95
+	ansiBrightCyan    = 96
 
 	// Background. Parallel to the fg codes but offset by 10.
 	ansiDefaultBG = 49 // reset bg to terminal default
@@ -29,11 +34,24 @@ type Theme struct {
 	TitleUnfocused  Style
 	StatusBar       Style
 	Selection       Style // e.g. explorer cursor row, picker highlight
+
+	// SQL syntax highlight roles used by the query editor. Each maps
+	// directly to a sqltok.Kind; Text/Ident both render with the
+	// default style to preserve contrast against the terminal bg.
+	SQLKeyword  Style
+	SQLString   Style
+	SQLNumber   Style
+	SQLComment  Style
+	SQLOperator Style
+	SQLPunct    Style
 }
 
-// defaultTheme is the out-of-the-box color scheme. Foregrounds track the
-// pre-Phase-1.9 constants so the visual output is unchanged; backgrounds
-// stay at terminal default so we don't clobber the user's background.
+// defaultTheme is the out-of-the-box color scheme. Foregrounds for the
+// non-SQL roles track the pre-Phase-1.9 constants so the visual output
+// of panels / borders / status bar is unchanged; SQL syntax roles are
+// new in Phase 3 and pick bright ANSI colors that track the user's
+// terminal palette. Backgrounds stay at terminal default so we don't
+// clobber the user's background.
 var defaultTheme = Theme{
 	BorderFocused:   Style{FG: ansiBrightCyan, BG: ansiDefaultBG},
 	BorderUnfocused: Style{FG: ansiBrightBlack, BG: ansiDefaultBG},
@@ -41,6 +59,13 @@ var defaultTheme = Theme{
 	TitleUnfocused:  Style{FG: ansiDefault, BG: ansiDefaultBG},
 	StatusBar:       Style{FG: ansiBrightBlack, BG: ansiDefaultBG},
 	Selection:       Style{FG: ansiBrightCyan, BG: ansiDefaultBG},
+
+	SQLKeyword:  Style{FG: ansiBrightBlue, BG: ansiDefaultBG, Attrs: attrBold},
+	SQLString:   Style{FG: ansiBrightGreen, BG: ansiDefaultBG},
+	SQLNumber:   Style{FG: ansiBrightMagenta, BG: ansiDefaultBG},
+	SQLComment:  Style{FG: ansiBrightBlack, BG: ansiDefaultBG},
+	SQLOperator: Style{FG: ansiBrightYellow, BG: ansiDefaultBG},
+	SQLPunct:    Style{FG: ansiDefault, BG: ansiDefaultBG},
 }
 
 // currentTheme is the theme consulted by widgets. Swapping this is how a

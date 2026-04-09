@@ -1,5 +1,9 @@
 package tui
 
+import (
+	"github.com/Nulifyer/sqlgo/internal/sqltok"
+)
+
 // editor is a text-input widget wrapping a buffer and a viewport. It
 // draws inside a rect (minus a 1-cell border the caller has already
 // drawn) and handles insert-mode keys with selection + clipboard +
@@ -26,14 +30,23 @@ func newEditor() *editor {
 // keys without wiring a full app.
 func (e *editor) handleInsert(a *app, k Key) bool {
 	// Shift+arrow: extend selection. Handled before the plain-arrow
-	// branch so selection is the default when Shift is held.
+	// branch so selection is the default when Shift is held. Ctrl +
+	// Shift combos extend by a word at a time.
 	if k.Shift {
 		switch k.Kind {
 		case KeyLeft:
-			e.buf.SelectLeft()
+			if k.Ctrl {
+				e.buf.SelectWordLeft()
+			} else {
+				e.buf.SelectLeft()
+			}
 			return true
 		case KeyRight:
-			e.buf.SelectRight()
+			if k.Ctrl {
+				e.buf.SelectWordRight()
+			} else {
+				e.buf.SelectRight()
+			}
 			return true
 		case KeyUp:
 			e.buf.SelectUp()
@@ -46,6 +59,26 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 			return true
 		case KeyEnd:
 			e.buf.SelectEnd()
+			return true
+		}
+	}
+
+	// Ctrl + arrow / Ctrl + backspace / Ctrl + delete: word-granular
+	// navigation and deletion. Must be checked before the generic
+	// Ctrl+<rune> block below because the keys arrive as non-KeyRune.
+	if k.Ctrl {
+		switch k.Kind {
+		case KeyLeft:
+			e.buf.MoveWordLeft()
+			return true
+		case KeyRight:
+			e.buf.MoveWordRight()
+			return true
+		case KeyBackspace:
+			e.buf.DeleteWordLeft()
+			return true
+		case KeyDelete:
+			e.buf.DeleteWordRight()
 			return true
 		}
 	}
@@ -134,9 +167,15 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 
 // draw renders the editor into the interior of r (inside the border).
 // If cursorVisible is true it also registers the terminal cursor
-// position on the screen so it gets moved after flush. When a
+// position on the screen so it gets moved after flush.
+//
+// Each visible line is tokenized with sqltok and each rune is painted
+// with the style belonging to whichever token contains it. When a
 // selection is active, selected cells are painted with a reversed
-// style so the highlight survives any theme.
+// style instead -- the selection always wins over syntax highlighting
+// so the user can see their selection clearly. Trailing empty space
+// on multi-line selections is also filled with the selection style so
+// the highlight reads as a continuous block.
 func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 	innerRow := r.row + 1
 	innerCol := r.col + 1
@@ -169,17 +208,21 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 		if end > len(line) {
 			end = len(line)
 		}
-		// Write the visible slice one rune at a time so we can flip
-		// style on selected cells. The common no-selection case still
-		// issues one styled run per cell, but cellbuf batches these
-		// into a single ANSI run during flush-time diffing.
+
+		// Tokenize the visible slice's underlying line so the token
+		// col offsets align with the buffer. StartCol/EndCol in the
+		// returned tokens index into `line`, so the viewport math
+		// below just compares rune columns directly.
+		tokens := sqltok.TokenizeLine(line)
+
 		for vc := start; vc < end; vc++ {
-			st := defaultStyle()
+			st := styleForCol(tokens, vc)
 			if hasSel && inSelection(lineIdx, vc, selR1, selC1, selR2, selC2) {
 				st = selStyle
 			}
 			s.writeStyled(innerRow+i, innerCol+(vc-start), string(line[vc]), st)
 		}
+
 		// Extend the selection highlight across trailing empty space
 		// on wrapped or short lines so a multi-line block selection
 		// looks continuous.
@@ -197,6 +240,45 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 		row, col := e.buf.Cursor()
 		s.placeCursor(innerRow+(row-e.scrollRow), innerCol+(col-e.scrollCol))
 	}
+}
+
+// styleForCol returns the syntax-highlight style for the column offset
+// within a line. A linear scan is fine here because the token list per
+// line is short and the editor's viewport is likewise bounded by
+// innerW. Whitespace between tokens and anything past the last token
+// fall back to the default style.
+func styleForCol(tokens []sqltok.Token, col int) Style {
+	for _, t := range tokens {
+		if col < t.StartCol {
+			return defaultStyle()
+		}
+		if col < t.EndCol {
+			return styleForKind(t.Kind)
+		}
+	}
+	return defaultStyle()
+}
+
+// styleForKind maps a tokenizer kind to the current theme's
+// corresponding Style. Text / Ident / Whitespace fall through to the
+// default so identifiers retain readable contrast against the user's
+// terminal background.
+func styleForKind(k sqltok.Kind) Style {
+	switch k {
+	case sqltok.Keyword:
+		return currentTheme.SQLKeyword
+	case sqltok.String:
+		return currentTheme.SQLString
+	case sqltok.Number:
+		return currentTheme.SQLNumber
+	case sqltok.Comment:
+		return currentTheme.SQLComment
+	case sqltok.Operator:
+		return currentTheme.SQLOperator
+	case sqltok.Punct:
+		return currentTheme.SQLPunct
+	}
+	return defaultStyle()
 }
 
 // inSelection reports whether (row, col) falls inside a normalized

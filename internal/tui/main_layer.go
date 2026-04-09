@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
+	"github.com/Nulifyer/sqlgo/internal/sqltok"
 )
 
 // FocusTarget identifies which panel owns keyboard input in the main view.
@@ -44,6 +45,12 @@ type mainLayer struct {
 	status       string // transient query feedback ("running...", "3 row(s) in 12ms"); never replaces the hint line
 	pendingSpace bool
 
+	// editorFullscreen hides the explorer and results panels and
+	// expands the query editor to fill the terminal (minus the status
+	// line). Toggled by F11. When on, focus is locked to FocusQuery
+	// so Alt+1/3 silently no-op.
+	editorFullscreen bool
+
 	// Last-query summary surfaced on the results panel's top-right
 	// border. lastHasResult is the gate: zero on startup / after a
 	// disconnect so no stale "0 rows / 0ms" shows up before any query.
@@ -68,6 +75,10 @@ func newMainLayer() *mainLayer {
 }
 
 func (m *mainLayer) Draw(a *app, c *cellbuf) {
+	if m.editorFullscreen {
+		m.drawFullscreen(a, c)
+		return
+	}
 	p := computeLayout(a.term.width, a.term.height)
 	drawFrame(c, p.explorer, "Explorer", m.focus == FocusExplorer)
 	drawFrame(c, p.query, "Query", m.focus == FocusQuery)
@@ -89,6 +100,29 @@ func (m *mainLayer) Draw(a *app, c *cellbuf) {
 	c.resetStyle()
 }
 
+// drawFullscreen renders the editor filling the entire terminal (minus
+// the footer status line). Explorer and results panels are hidden.
+// Focus is forced to the query editor -- toggleFullscreen takes care
+// of the forward set, and HandleKey ignores Alt+1/3 while in this
+// mode.
+func (m *mainLayer) drawFullscreen(a *app, c *cellbuf) {
+	termW := a.term.width
+	termH := a.term.height
+	statusH := 1
+	bodyH := termH - statusH
+	if bodyH < 4 {
+		bodyH = 4
+	}
+	queryRect := rect{row: 1, col: 1, w: termW, h: bodyH}
+	drawFrame(c, queryRect, "Query [fullscreen]", true)
+	m.editor.draw(c, queryRect, true)
+
+	statusRect := rect{row: bodyH + 1, col: 1, w: termW, h: statusH}
+	c.setFg(colorStatusBar)
+	c.writeAt(statusRect.row, statusRect.col, m.statusText(a, statusRect.w))
+	c.resetStyle()
+}
+
 func (m *mainLayer) HandleKey(a *app, k Key) {
 	// Ctrl+C cancels a running query. When no query is running, it
 	// falls through so the editor can use Ctrl+C as "copy selection"
@@ -101,21 +135,43 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		a.runQuery()
 		return
 	}
+	// F11 toggles fullscreen editor mode. Available from any focus
+	// so the user can jump straight into a distraction-free editor.
+	if k.Kind == KeyF11 {
+		m.editorFullscreen = !m.editorFullscreen
+		if m.editorFullscreen {
+			m.focus = FocusQuery
+		}
+		return
+	}
 
-	// Alt+1/2/3 is the global panel-switch shortcut. It fires before any
-	// mode-specific routing so the user can switch out of INSERT mode
-	// without reaching for Esc first — the letter keys in the editor all
-	// stay available as literal input.
+	// Alt+1/2/3 is the global panel-switch shortcut. Locked out in
+	// fullscreen so the user has to press F11 to exit (avoids the
+	// confusing case where Alt+1 "does nothing" visually).
 	if k.Alt && k.Kind == KeyRune {
 		switch k.Rune {
 		case '1':
-			m.focus = FocusExplorer
+			if !m.editorFullscreen {
+				m.focus = FocusExplorer
+			}
 			return
 		case '2':
 			m.focus = FocusQuery
 			return
 		case '3':
-			m.focus = FocusResults
+			if !m.editorFullscreen {
+				m.focus = FocusResults
+			}
+			return
+		case 'f', 'F':
+			// Alt+F reformats the query buffer using the sqltok
+			// heuristic formatter. Only meaningful when the editor
+			// has content; silently ignored otherwise. The buffer's
+			// own undo stack covers Ctrl+Z for "that looks worse,
+			// give me my original back".
+			if m.editor.buf.LineCount() > 1 || len(m.editor.buf.Line(0)) > 0 {
+				m.formatQuery()
+			}
 			return
 		}
 	}
@@ -276,6 +332,22 @@ func (m *mainLayer) handleResultsKey(a *app, k Key) {
 			m.status = fmt.Sprintf("copied row (%d cells)", len(row))
 		}
 	}
+}
+
+// formatQuery reformats the editor's current buffer using the
+// sqltok heuristic formatter. The buffer's SetText path pushes a
+// snapshot for undo, so Ctrl+Z restores the original text if the
+// formatted output isn't what the user wanted. Empty buffers short
+// out here and in the Alt+F binding above.
+func (m *mainLayer) formatQuery() {
+	src := m.editor.buf.Text()
+	formatted := sqltok.Format(src)
+	if formatted == src {
+		m.status = "already formatted"
+		return
+	}
+	m.editor.buf.SetText(formatted)
+	m.status = "formatted"
 }
 
 // prefillSelectFromExplorer writes a driver-aware SELECT for the highlighted
@@ -461,6 +533,8 @@ func (m *mainLayer) queryHints(a *app) string {
 		hintIf(hasSel, "Ctrl+C/X=copy/cut"),
 		hintIf(!hasSel, "Ctrl+V=paste"),
 		"Ctrl+Z/Y=undo/redo",
+		hintIf(hasText, "Alt+F=format"),
+		"F11=fullscreen",
 		hintIf(hasText, "Ctrl+L=clear"),
 	)
 }

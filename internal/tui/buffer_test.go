@@ -178,3 +178,93 @@ func TestBufferSelectAll(t *testing.T) {
 		t.Errorf("SelectAll: %q", got)
 	}
 }
+
+func TestBufferMoveWordLeft(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	b.SetText("SELECT id, name FROM users")
+	// Cursor at end.
+	b.MoveWordLeft()
+	if r, c := b.Cursor(); r != 0 || c != 21 {
+		t.Errorf("after 1 MoveWordLeft: (%d,%d), want (0,21)", r, c)
+	}
+	b.MoveWordLeft()
+	if r, c := b.Cursor(); r != 0 || c != 16 {
+		t.Errorf("after 2 MoveWordLeft: (%d,%d), want (0,16)", r, c)
+	}
+	b.MoveWordLeft()
+	if r, c := b.Cursor(); r != 0 || c != 11 {
+		t.Errorf("after 3 MoveWordLeft: (%d,%d), want (0,11)", r, c)
+	}
+}
+
+func TestBufferMoveWordRight(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	b.SetText("SELECT id, name FROM users")
+	// 0         1         2
+	// 012345678901234567890123456
+	// SELECT id, name FROM users
+	// Word starts: 0, 7, 11, 16, 21
+	b.MoveHome()
+	b.MoveWordRight()
+	if r, c := b.Cursor(); r != 0 || c != 7 {
+		t.Errorf("after 1 MoveWordRight: (%d,%d), want (0,7)", r, c)
+	}
+	b.MoveWordRight()
+	if r, c := b.Cursor(); r != 0 || c != 11 {
+		t.Errorf("after 2 MoveWordRight: (%d,%d), want (0,11)", r, c)
+	}
+	b.MoveWordRight()
+	if r, c := b.Cursor(); r != 0 || c != 16 {
+		t.Errorf("after 3 MoveWordRight: (%d,%d), want (0,16)", r, c)
+	}
+}
+
+func TestBufferMoveWordLeftCrossesLines(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	b.SetText("first\nsecond")
+	b.row, b.col = 1, 0
+	b.MoveWordLeft()
+	if r, c := b.Cursor(); r != 0 || c != 5 {
+		t.Errorf("cross-line MoveWordLeft: (%d,%d), want (0,5)", r, c)
+	}
+}
+
+func TestBufferDeleteWordLeft(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	b.SetText("SELECT users FROM")
+	// Cursor after "users" (position 12).
+	b.row, b.col = 0, 12
+	b.DeleteWordLeft()
+	if got := b.Text(); got != "SELECT  FROM" {
+		t.Errorf("after DeleteWordLeft: %q, want %q", got, "SELECT  FROM")
+	}
+}
+
+func TestBufferDeleteWordRight(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	b.SetText("SELECT users FROM")
+	b.row, b.col = 0, 7
+	b.DeleteWordRight()
+	if got := b.Text(); got != "SELECT FROM" {
+		t.Errorf("after DeleteWordRight: %q, want %q", got, "SELECT FROM")
+	}
+}
+
+func TestBufferDeleteWordLeftUndoes(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	b.SetText("SELECT users FROM")
+	b.row, b.col = 0, 12
+	b.DeleteWordLeft()
+	if !b.Undo() {
+		t.Fatal("Undo returned false")
+	}
+	if got := b.Text(); got != "SELECT users FROM" {
+		t.Errorf("after undo: %q", got)
+	}
+}

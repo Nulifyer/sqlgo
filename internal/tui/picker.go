@@ -108,13 +108,11 @@ func (p *picker) draw(s *cellbuf, termW, termH int) {
 
 	// Transient status line inside the box (e.g. "connecting...",
 	// "save failed"). Key hints live in the bottom footer via Hints().
+	// Use the rune-aware truncate so a long DSN error doesn't cut a
+	// UTF-8 sequence mid-byte or drop without an ellipsis.
 	if p.status != "" {
 		s.setFg(colorBorderFocused)
-		status := p.status
-		if len(status) > boxW-4 {
-			status = status[:boxW-4]
-		}
-		s.writeAt(r.row+r.h-2, innerCol, status)
+		s.writeAt(r.row+r.h-2, innerCol, truncate(p.status, boxW-4))
 		s.resetStyle()
 	}
 }

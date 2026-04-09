@@ -22,7 +22,7 @@ func fixtureSchema() *db.SchemaInfo {
 func TestExplorerBuildsTreeExpanded(t *testing.T) {
 	t.Parallel()
 	e := newExplorer()
-	e.SetSchema(fixtureSchema())
+	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
 
 	want := []struct {
 		kind  explorerItemKind
@@ -51,7 +51,7 @@ func TestExplorerBuildsTreeExpanded(t *testing.T) {
 func TestExplorerToggleCollapsesSchema(t *testing.T) {
 	t.Parallel()
 	e := newExplorer()
-	e.SetSchema(fixtureSchema())
+	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
 
 	// Move cursor to the dbo schema header and collapse it.
 	e.cursor = 0
@@ -82,7 +82,7 @@ func TestExplorerToggleCollapsesSchema(t *testing.T) {
 func TestExplorerToggleCollapsesSubgroup(t *testing.T) {
 	t.Parallel()
 	e := newExplorer()
-	e.SetSchema(fixtureSchema())
+	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
 
 	// Find the dbo "Views" subgroup and collapse it.
 	target := -1
@@ -124,7 +124,7 @@ func TestExplorerToggleCollapsesSubgroup(t *testing.T) {
 func TestExplorerMoveCursorClamps(t *testing.T) {
 	t.Parallel()
 	e := newExplorer()
-	e.SetSchema(fixtureSchema())
+	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
 
 	e.MoveCursor(-50)
 	if e.cursor != 0 {
@@ -139,7 +139,7 @@ func TestExplorerMoveCursorClamps(t *testing.T) {
 func TestExplorerSelectedOnlyOnLeaf(t *testing.T) {
 	t.Parallel()
 	e := newExplorer()
-	e.SetSchema(fixtureSchema())
+	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
 
 	// cursor on the dbo schema header → no selection
 	e.cursor = 0
@@ -196,6 +196,49 @@ func TestBuildSelectDriverSpecific(t *testing.T) {
 				t.Errorf("BuildSelect(%+v) = %q, want %q", c.caps, got, c.want)
 			}
 		})
+	}
+}
+
+// TestExplorerFlatSchemaOmitsSchemaHeader proves SchemaDepthFlat drops
+// the per-schema parent node entirely, emitting the Tables/Views
+// subgroups at the root so a SQLite connection doesn't show a stray
+// "main" header above every object.
+func TestExplorerFlatSchemaOmitsSchemaHeader(t *testing.T) {
+	t.Parallel()
+	info := &db.SchemaInfo{
+		Tables: []db.TableRef{
+			{Schema: "main", Name: "orders", Kind: db.TableKindTable},
+			{Schema: "main", Name: "users", Kind: db.TableKindTable},
+			{Schema: "main", Name: "v_active", Kind: db.TableKindView},
+		},
+	}
+	e := newExplorer()
+	e.SetSchema(info, db.SchemaDepthFlat)
+
+	// No itemSchema row should appear; the tree starts with Tables.
+	want := []struct {
+		kind  explorerItemKind
+		label string
+	}{
+		{itemSubgroup, "Tables"},
+		{itemTable, "orders"},
+		{itemTable, "users"},
+		{itemSubgroup, "Views"},
+		{itemView, "v_active"},
+	}
+	if len(e.items) != len(want) {
+		t.Fatalf("items len = %d, want %d: %+v", len(e.items), len(want), e.items)
+	}
+	for i, w := range want {
+		if e.items[i].kind != w.kind || e.items[i].label != w.label {
+			t.Errorf("items[%d] = (%d %q), want (%d %q)",
+				i, e.items[i].kind, e.items[i].label, w.kind, w.label)
+		}
+	}
+	for _, it := range e.items {
+		if it.kind == itemSchema {
+			t.Errorf("flat mode emitted a schema header: %+v", it)
+		}
 	}
 }
 
