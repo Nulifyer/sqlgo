@@ -19,6 +19,7 @@ type table struct {
 	res       *db.Result
 	widths    []int
 	scrollRow int
+	scrollCol int        // horizontal offset in runes into each rendered line
 	rendered  [][]string // stringified cells (lazy, same shape as res.Rows)
 	wrap      bool
 }
@@ -31,6 +32,7 @@ func newTable() *table { return &table{} }
 func (t *table) SetResult(r *db.Result) {
 	t.res = r
 	t.scrollRow = 0
+	t.scrollCol = 0
 	if r == nil {
 		t.widths = nil
 		t.rendered = nil
@@ -72,6 +74,7 @@ func (t *table) Wrap() bool { return t.wrap }
 func (t *table) ToggleWrap() {
 	t.wrap = !t.wrap
 	t.scrollRow = 0
+	t.scrollCol = 0
 }
 
 // ScrollBy adjusts the top row by delta, clamped to valid range.
@@ -90,6 +93,38 @@ func (t *table) ScrollBy(delta int) {
 	if t.scrollRow > max {
 		t.scrollRow = max
 	}
+}
+
+// ScrollColBy adjusts the horizontal offset by delta runes, clamped so the
+// viewport never scrolls past the end of the widest rendered line.
+func (t *table) ScrollColBy(delta int) {
+	if t.res == nil {
+		return
+	}
+	t.scrollCol += delta
+	if t.scrollCol < 0 {
+		t.scrollCol = 0
+	}
+	max := t.totalWidth() - 1
+	if max < 0 {
+		max = 0
+	}
+	if t.scrollCol > max {
+		t.scrollCol = max
+	}
+}
+
+// totalWidth is the full rendered line width (sum of column widths plus
+// the " | " separators between them). Used to clamp horizontal scroll.
+func (t *table) totalWidth() int {
+	n := 0
+	for i, w := range t.widths {
+		if i > 0 {
+			n += 3 // " | "
+		}
+		n += w
+	}
+	return n
 }
 
 // draw renders the table inside r (caller has already drawn the border).
@@ -111,15 +146,25 @@ func (t *table) draw(s *cellbuf, r rect) {
 		return
 	}
 
+	// Clamp horizontal scroll to the current viewport width so shrinking
+	// the panel after scrolling right doesn't leave dead space.
+	total := t.totalWidth()
+	if t.scrollCol > total-1 {
+		t.scrollCol = total - 1
+	}
+	if t.scrollCol < 0 {
+		t.scrollCol = 0
+	}
+
 	// Header row.
-	header := renderRow(t.headerCells(), t.widths, innerW)
+	header := renderRow(t.headerCells(), t.widths)
 	s.setFg(colorTitleFocused)
-	s.writeAt(innerRow, innerCol, header)
+	s.writeAt(innerRow, innerCol, sliceRunes(header, t.scrollCol, innerW))
 	s.resetStyle()
 
 	// Separator (single dash line).
-	sep := renderSeparator(t.widths, innerW)
-	s.writeAt(innerRow+1, innerCol, sep)
+	sep := renderSeparator(t.widths)
+	s.writeAt(innerRow+1, innerCol, sliceRunes(sep, t.scrollCol, innerW))
 
 	// Body rows.
 	bodyH := innerH - 2
@@ -133,8 +178,8 @@ func (t *table) draw(s *cellbuf, r rect) {
 			if rowIdx >= len(t.rendered) {
 				break
 			}
-			line := renderRow(t.rendered[rowIdx], t.widths, innerW)
-			s.writeAt(innerRow+2+i, innerCol, line)
+			line := renderRow(t.rendered[rowIdx], t.widths)
+			s.writeAt(innerRow+2+i, innerCol, sliceRunes(line, t.scrollCol, innerW))
 		}
 		return
 	}
@@ -149,7 +194,7 @@ func (t *table) draw(s *cellbuf, r rect) {
 			if y >= bodyH {
 				break
 			}
-			s.writeAt(innerRow+2+y, innerCol, truncate(line, innerW))
+			s.writeAt(innerRow+2+y, innerCol, sliceRunes(line, t.scrollCol, innerW))
 			y++
 		}
 		// Blank spacer line between wrapped rows so the next row is visually
@@ -168,9 +213,10 @@ func (t *table) headerCells() []string {
 	return out
 }
 
-// renderRow joins cells with " | " padded to their column widths, clipped
-// to maxW runes.
-func renderRow(cells []string, widths []int, maxW int) string {
+// renderRow joins cells with " | " padded to their column widths. No
+// horizontal clipping — callers slice the result to fit the viewport so
+// scrollCol can slide across the full row width.
+func renderRow(cells []string, widths []int) string {
 	var b strings.Builder
 	for i, cell := range cells {
 		if i > 0 {
@@ -178,10 +224,10 @@ func renderRow(cells []string, widths []int, maxW int) string {
 		}
 		padRight(&b, cell, widths[i])
 	}
-	return truncate(b.String(), maxW)
+	return b.String()
 }
 
-func renderSeparator(widths []int, maxW int) string {
+func renderSeparator(widths []int) string {
 	var b strings.Builder
 	for i, w := range widths {
 		if i > 0 {
@@ -189,7 +235,25 @@ func renderSeparator(widths []int, maxW int) string {
 		}
 		b.WriteString(strings.Repeat("-", w))
 	}
-	return truncate(b.String(), maxW)
+	return b.String()
+}
+
+// sliceRunes returns up to width runes of s starting at offset. Out-of-range
+// offsets yield an empty string rather than panicking, so callers can scroll
+// freely without bounds-checking first.
+func sliceRunes(s string, offset, width int) string {
+	if width <= 0 || offset < 0 {
+		return ""
+	}
+	rs := []rune(s)
+	if offset >= len(rs) {
+		return ""
+	}
+	end := offset + width
+	if end > len(rs) {
+		end = len(rs)
+	}
+	return string(rs[offset:end])
 }
 
 func padRight(b *strings.Builder, s string, w int) {

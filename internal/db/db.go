@@ -46,6 +46,10 @@ type Conn interface {
 	// Query runs sql and materializes the full result set. Streaming will be
 	// added when the results panel needs it.
 	Query(ctx context.Context, sql string) (*Result, error)
+	// Exec runs a statement that does not return rows (DDL, INSERT/UPDATE/
+	// DELETE). args are positional bind values using whatever placeholder
+	// syntax the driver expects — sqlgoseed is the primary consumer.
+	Exec(ctx context.Context, sql string, args ...any) error
 	// Schema returns the list of user-visible tables and views, grouped by
 	// schema, so the explorer can render a tree. Engines without schemas
 	// (sqlite, mysql) return everything under a single synthetic schema.

@@ -52,9 +52,12 @@ func (e *editor) handleInsert(k Key) bool {
 		e.buf.MoveEnd()
 		return true
 	case KeyTab:
-		// treat tab as two spaces for now
-		e.buf.Insert(' ')
-		e.buf.Insert(' ')
+		// Soft tabs: insert spaces up to the next 4-column stop so Tab
+		// aligns visually regardless of the current cursor column.
+		_, col := e.buf.Cursor()
+		for n := 4 - (col % 4); n > 0; n-- {
+			e.buf.Insert(' ')
+		}
 		return true
 	}
 	return false

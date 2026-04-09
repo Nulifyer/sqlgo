@@ -202,20 +202,17 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 		}
 	}
 
-	// Status + hint at the bottom of the box.
-	hintRow := r.row + r.h - 2
+	// Transient status line inside the box (e.g. "port must be 1..65535").
+	// Key hints live in the bottom footer via Hints().
 	if f.status != "" {
 		s.setFg(colorBorderFocused)
 		status := f.status
 		if len(status) > boxW-4 {
 			status = status[:boxW-4]
 		}
-		s.writeAt(hintRow-1, innerCol, status)
+		s.writeAt(r.row+r.h-2, innerCol, status)
 		s.resetStyle()
 	}
-	s.setFg(colorStatusBar)
-	s.writeAt(hintRow, innerCol, "Tab=next  Enter/Ctrl+S=save  Esc=cancel")
-	s.resetStyle()
 }
 
 func padRightString(s string, w int) string {
@@ -270,4 +267,17 @@ func (fl *formLayer) HandleKey(a *app, k Key) {
 	if pl, ok := a.topLayer().(*pickerLayer); ok {
 		pl.setStatus("saved")
 	}
+}
+
+// Hints builds the footer hint line for the add/edit form. Save is only
+// shown when the fields actually parse; otherwise Enter wouldn't advance.
+func (fl *formLayer) Hints(a *app) string {
+	_ = a
+	_, canSave := fl.f.toConnection()
+	return joinHints(
+		"Tab/\u2193=next",
+		"Shift+Tab/\u2191=prev",
+		hintIf(canSave == nil, "\u21b5/Ctrl+S=save"),
+		"\u238b=cancel",
+	)
 }

@@ -18,6 +18,11 @@ type Layer interface {
 	Draw(a *app, c *cellbuf)
 	// HandleKey processes a key press. Only called on the topmost layer.
 	HandleKey(a *app, k Key)
+	// Hints returns the key hint line for this layer given the current
+	// app state. The bottom status bar displays the topmost layer's
+	// hints, so modal overlays (picker/form) can show their own keys
+	// even though the mainLayer is the one doing the drawing.
+	Hints(a *app) string
 }
 
 func (a *app) pushLayer(l Layer) {

@@ -81,6 +81,13 @@ func (c *sqlConn) Ping(ctx context.Context) error {
 	return c.db.PingContext(ctx)
 }
 
+func (c *sqlConn) Exec(ctx context.Context, query string, args ...any) error {
+	if _, err := c.db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("exec: %w", err)
+	}
+	return nil
+}
+
 func (c *sqlConn) Query(ctx context.Context, query string) (*Result, error) {
 	rows, err := c.db.QueryContext(ctx, query)
 	if err != nil {

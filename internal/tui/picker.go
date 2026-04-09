@@ -102,20 +102,17 @@ func (p *picker) draw(s *cellbuf, termW, termH int) {
 		}
 	}
 
-	// Status line (above hint) and hint line (bottom-inside).
-	hintRow := r.row + r.h - 2
+	// Transient status line inside the box (e.g. "connecting...",
+	// "save failed"). Key hints live in the bottom footer via Hints().
 	if p.status != "" {
 		s.setFg(colorBorderFocused)
 		status := p.status
 		if len(status) > boxW-4 {
 			status = status[:boxW-4]
 		}
-		s.writeAt(hintRow-1, innerCol, status)
+		s.writeAt(r.row+r.h-2, innerCol, status)
 		s.resetStyle()
 	}
-	s.setFg(colorStatusBar)
-	s.writeAt(hintRow, innerCol, "Enter=connect  a=add  e=edit  x=delete  Esc=back")
-	s.resetStyle()
 }
 
 func formatConn(c config.Connection) string {
@@ -199,3 +196,19 @@ func (pl *pickerLayer) deleteSelected(a *app) {
 // setStatus lets the app poke feedback (e.g. "connecting...") at the
 // picker without reaching into its internals.
 func (pl *pickerLayer) setStatus(s string) { pl.p.status = s }
+
+// Hints builds the footer hint line for the picker. Keys that wouldn't do
+// anything in the current state (edit/delete with an empty list, Esc when
+// not yet connected) are omitted so the footer reflects only what works.
+func (pl *pickerLayer) Hints(a *app) string {
+	hasList := len(pl.p.conns) > 0
+	return joinHints(
+		"Ctrl+Q=quit",
+		hintIf(hasList, "\u2191\u2193=move"),
+		hintIf(hasList, "\u21b5=connect"),
+		"a=add",
+		hintIf(hasList, "e=edit"),
+		hintIf(hasList, "x=delete"),
+		hintIf(a.conn != nil, "\u238b=back"),
+	)
+}

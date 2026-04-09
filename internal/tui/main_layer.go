@@ -23,34 +23,19 @@ func (f FocusTarget) String() string {
 	return "?"
 }
 
-// Mode is the modal editing state of the Query panel.
-type Mode int
-
-const (
-	ModeNormal Mode = iota
-	ModeInsert
-)
-
-func (m Mode) String() string {
-	switch m {
-	case ModeNormal:
-		return "NORMAL"
-	case ModeInsert:
-		return "INSERT"
-	}
-	return "?"
-}
-
 // mainLayer is the three-panel Explorer/Query/Results view. It is always
-// layers[0] and is never popped. Its state (editor, table, focus, mode,
-// status) is the main-view state of the app.
+// layers[0] and is never popped. Its state (editor, table, focus, status)
+// is the main-view state of the app.
+//
+// There is no NORMAL/INSERT mode — the Query panel is always a live text
+// editor. Panel focus switches are bound to Alt+1/2/3 so every printable
+// key stays available to the editor.
 type mainLayer struct {
 	editor       *editor
 	table        *table
 	explorer     *explorer
 	focus        FocusTarget
-	mode         Mode
-	status       string
+	status       string // transient query feedback ("running...", "3 row(s) in 12ms"); never replaces the hint line
 	pendingSpace bool
 }
 
@@ -60,7 +45,6 @@ func newMainLayer() *mainLayer {
 		table:    newTable(),
 		explorer: newExplorer(),
 		focus:    FocusQuery,
-		mode:     ModeNormal,
 	}
 	for _, r := range "SELECT @@VERSION AS version;" {
 		m.editor.buf.Insert(r)
@@ -71,18 +55,20 @@ func newMainLayer() *mainLayer {
 func (m *mainLayer) Draw(a *app, c *cellbuf) {
 	p := computeLayout(a.term.width, a.term.height)
 	drawFrame(c, p.explorer, "Explorer", m.focus == FocusExplorer)
-	drawFrame(c, p.query, m.queryTitle(), m.focus == FocusQuery)
+	drawFrame(c, p.query, "Query", m.focus == FocusQuery)
 	drawFrame(c, p.results, m.resultsTitle(), m.focus == FocusResults)
 
-	// Place the editor cursor unconditionally when in insert mode. If an
+	// Show the editor cursor whenever the Query panel is focused. If an
 	// overlay is stacked on top of us, its cell buffer will be the topmost
 	// one during compositing and the main layer's cursor request gets
 	// discarded automatically.
-	editorCursorVisible := m.focus == FocusQuery && m.mode == ModeInsert
 	m.explorer.draw(c, p.explorer, m.focus == FocusExplorer)
-	m.editor.draw(c, p.query, editorCursorVisible)
+	m.editor.draw(c, p.query, m.focus == FocusQuery)
 	m.table.draw(c, p.results)
 
+	// Bottom status bar reflects the topmost layer's hints, so modal
+	// overlays can show their own keys here without touching the main
+	// view's hint logic.
 	c.setFg(colorStatusBar)
 	c.writeAt(p.status.row, p.status.col, m.statusText(a, p.status.w))
 	c.resetStyle()
@@ -117,37 +103,36 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		}
 	}
 
-	// Pending space-menu dispatch. The prefix is only recognized in NORMAL
-	// mode (in INSERT, space is a literal character).
+	// Pending space-menu dispatch. Only reachable from Explorer/Results
+	// focus (space is a literal character in the Query editor).
 	if m.pendingSpace {
 		m.pendingSpace = false
 		m.handleSpace(a, k)
 		return
 	}
 
-	// INSERT mode in the Query panel routes everything to the editor.
-	if m.mode == ModeInsert && m.focus == FocusQuery {
-		if k.Kind == KeyEsc {
-			m.mode = ModeNormal
+	// Query panel is non-modal: every keystroke goes straight to the
+	// editor. The editor ignores Ctrl+<rune> combos so global shortcuts
+	// like Ctrl+L (clear) can still be handled below if needed.
+	if m.focus == FocusQuery {
+		if k.Ctrl && k.Rune == 'l' {
+			m.editor.buf.Clear()
 			return
 		}
 		m.editor.handleInsert(k)
 		return
 	}
 
-	// NORMAL-mode space-menu prefix. Panel switching has moved to Alt+N
-	// so letters stay free for mnemonic commands inside each panel.
+	// Explorer/Results focus: space opens the command menu. The footer
+	// hint line flips to spaceMenuHints() automatically via Hints().
 	if k.Kind == KeyRune && !k.Ctrl && !k.Alt && k.Rune == ' ' {
 		m.pendingSpace = true
-		m.status = "-- SPACE --"
 		return
 	}
 
 	switch m.focus {
 	case FocusExplorer:
 		m.handleExplorerKey(a, k)
-	case FocusQuery:
-		m.handleQueryNormalKey(a, k)
 	case FocusResults:
 		m.handleResultsKey(a, k)
 	}
@@ -191,22 +176,10 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 	}
 }
 
-// handleQueryNormalKey processes keys when the Query panel is focused in
-// NORMAL mode. INSERT-mode keys are handled before this runs.
-func (m *mainLayer) handleQueryNormalKey(a *app, k Key) {
-	_ = a
-	if k.Kind == KeyRune && !k.Ctrl {
-		switch k.Rune {
-		case 'i':
-			m.mode = ModeInsert
-		case 'd':
-			m.editor.buf.Clear()
-		}
-	}
-}
-
-// handleResultsKey processes keys when the Results panel is focused. Scroll
-// keys move the viewport; 'w' toggles between truncate and wrap rendering.
+// handleResultsKey processes keys when the Results panel is focused. Up/Dn
+// and PgUp/PgDn scroll vertically; Left/Right scroll horizontally so wide
+// rows that overflow the panel can be read in non-wrap mode. 'w' toggles
+// between truncate and wrap rendering.
 func (m *mainLayer) handleResultsKey(a *app, k Key) {
 	_ = a
 	switch k.Kind {
@@ -221,6 +194,12 @@ func (m *mainLayer) handleResultsKey(a *app, k Key) {
 		return
 	case KeyPgDn:
 		m.table.ScrollBy(10)
+		return
+	case KeyLeft:
+		m.table.ScrollColBy(-8)
+		return
+	case KeyRight:
+		m.table.ScrollColBy(8)
 		return
 	case KeyHome:
 		m.table.ScrollBy(-1 << 30)
@@ -248,38 +227,21 @@ func (m *mainLayer) prefillSelectFromExplorer(a *app) {
 	}
 	m.editor.buf.SetText(BuildSelect(driverName, t, 100))
 	m.focus = FocusQuery
-	m.mode = ModeNormal
 }
 
 // handleSpace dispatches the second key of the space-menu prefix.
 func (m *mainLayer) handleSpace(a *app, k Key) {
-	if k.Kind == KeyEsc {
-		m.status = ""
-		return
-	}
 	if k.Kind != KeyRune {
-		m.status = ""
 		return
 	}
 	switch k.Rune {
 	case 'c':
 		a.pushLayer(newPickerLayer(a.confFile.Connections))
-		m.status = ""
 	case 'x':
 		a.disconnect()
-		m.status = "disconnected"
 	case 'q':
 		a.quit = true
-	default:
-		m.status = ""
 	}
-}
-
-func (m *mainLayer) queryTitle() string {
-	if m.focus == FocusQuery {
-		return "Query  " + m.mode.String()
-	}
-	return "Query"
 }
 
 func (m *mainLayer) resultsTitle() string {
@@ -289,37 +251,128 @@ func (m *mainLayer) resultsTitle() string {
 	return "Results"
 }
 
+// statusText builds the footer line. Layout:
+//
+//	 [focus]  connection  |  <hints from topmost layer>    (<transient status>)
+//
+// Hints come first so critical keys (Ctrl+Q=quit, Alt+1/2/3=focus) survive
+// right-edge truncation on narrow terminals. The parenthesized status is
+// query feedback like "running..." or "3 row(s) in 12ms" and is allowed to
+// be clipped because the Results panel itself shows the real outcome.
 func (m *mainLayer) statusText(a *app, width int) string {
 	conn := "(not connected)"
 	if a.activeConn != nil {
 		conn = a.activeConn.Name
 	}
-	msg := m.status
-	if msg == "" {
-		msg = m.focusHints()
+	hints := a.topLayer().Hints(a)
+	s := fmt.Sprintf(" [%s]  %s  |  %s", m.focus, conn, hints)
+	if m.status != "" {
+		s += "    (" + m.status + ")"
 	}
-	s := fmt.Sprintf(" [%s %s]  %s  |  %s", m.mode, m.focus, conn, msg)
 	if len(s) > width {
 		s = s[:width]
 	}
 	return s
 }
 
-// focusHints returns the keybind hint line for the currently focused panel.
-// Global prefixes (Alt+N panel switch, <space> menu, Ctrl+Q) are shown
-// everywhere; the rest is panel-specific so the hint line stays short.
-func (m *mainLayer) focusHints() string {
-	global := "Alt+1/2/3=focus <space>=menu Ctrl+Q=quit"
+// Hints is the Layer interface entry point for mainLayer. It dispatches on
+// the pendingSpace prefix and the focused panel, letting each branch build
+// a context-aware line that hides keys that wouldn't currently do anything.
+func (m *mainLayer) Hints(a *app) string {
+	if m.pendingSpace {
+		return m.spaceMenuHints(a)
+	}
 	switch m.focus {
 	case FocusExplorer:
-		return "Enter/s=SELECT R=refresh " + global
+		return m.explorerHints(a)
 	case FocusQuery:
-		if m.mode == ModeInsert {
-			return "Esc=normal F5=run Ctrl+C=cancel Alt+1/2/3=focus"
-		}
-		return "i=insert d=clear F5=run " + global
+		return m.queryHints(a)
 	case FocusResults:
-		return "Up/Dn/PgUp/PgDn=scroll Home/End w=wrap " + global
+		return m.resultsHints(a)
 	}
-	return global
+	return joinHints("Ctrl+Q=quit", hintAlwaysFocus())
+}
+
+// hintAlwaysFocus is the universal panel-switch hint shown on every line.
+func hintAlwaysFocus() string { return "Alt+1/2/3=focus" }
+
+// joinHints concatenates non-empty pieces with two spaces between them.
+// Empty strings are dropped so callers can write `hint(cond, "...")`
+// helpers and pass their results straight in.
+func joinHints(parts ...string) string {
+	out := ""
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		if out == "" {
+			out = p
+		} else {
+			out += "  " + p
+		}
+	}
+	return out
+}
+
+// hintIf returns h when cond is true, "" otherwise. Keeps the branches in
+// Hints builders readable.
+func hintIf(cond bool, h string) string {
+	if cond {
+		return h
+	}
+	return ""
+}
+
+func (m *mainLayer) explorerHints(a *app) string {
+	connected := a.conn != nil
+	selectHint := ""
+	switch m.explorer.SelectedKind() {
+	case itemTable, itemView:
+		selectHint = "\u21b5/s=SELECT" // U+21B5 = carriage return arrow
+	case itemSchema, itemSubgroup:
+		selectHint = "\u21b5=expand"
+	}
+	return joinHints(
+		"Ctrl+Q=quit",
+		hintAlwaysFocus(),
+		hintIf(len(m.explorer.items) > 0, "\u2191\u2193/PgUp/PgDn=move"),
+		selectHint,
+		hintIf(connected, "R=refresh"),
+		"\u2423=menu", // U+2423 = open box (space symbol)
+	)
+}
+
+func (m *mainLayer) queryHints(a *app) string {
+	connected := a.conn != nil
+	running := a.running
+	hasText := m.editor.buf.LineCount() > 1 || len(m.editor.buf.Line(0)) > 0
+	return joinHints(
+		"Ctrl+Q=quit",
+		hintAlwaysFocus(),
+		hintIf(connected && !running, "F5=run"),
+		hintIf(running, "Ctrl+C=cancel"),
+		hintIf(hasText, "Ctrl+L=clear"),
+	)
+}
+
+func (m *mainLayer) resultsHints(a *app) string {
+	_ = a
+	hasRows := m.table.Result() != nil && len(m.table.Result().Rows) > 0
+	return joinHints(
+		"Ctrl+Q=quit",
+		hintAlwaysFocus(),
+		hintIf(hasRows, "\u2191\u2193/PgUp/PgDn=scroll"),
+		hintIf(hasRows, "\u2190\u2192=hscroll"),
+		hintIf(m.table.Result() != nil, "w=wrap"),
+		"\u2423=menu",
+	)
+}
+
+func (m *mainLayer) spaceMenuHints(a *app) string {
+	return joinHints(
+		"c=connect",
+		hintIf(a.conn != nil, "x=disconnect"),
+		"q=quit",
+		"\u238b=cancel", // U+238B = escape symbol
+	)
 }
