@@ -112,6 +112,94 @@ func TestHistoryRingIsPerConnection(t *testing.T) {
 	}
 }
 
+func TestDeleteHistory(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		e := sampleHistoryEntry("local", fmt.Sprintf("SELECT %d", i), int64(i))
+		e.ExecutedAt = time.Now().UTC().Add(time.Duration(i) * time.Second)
+		if err := s.RecordHistory(ctx, e); err != nil {
+			t.Fatalf("record: %v", err)
+		}
+	}
+	before, err := s.ListRecentHistory(ctx, "local", 100)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(before) != 3 {
+		t.Fatalf("setup len = %d, want 3", len(before))
+	}
+	// Delete the middle entry.
+	target := before[1].ID
+	if err := s.DeleteHistory(ctx, target); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	after, err := s.ListRecentHistory(ctx, "local", 100)
+	if err != nil {
+		t.Fatalf("list after: %v", err)
+	}
+	if len(after) != 2 {
+		t.Errorf("after delete len = %d, want 2", len(after))
+	}
+	for _, e := range after {
+		if e.ID == target {
+			t.Errorf("deleted id %d still present", target)
+		}
+	}
+	// Deleting a missing id should surface an error.
+	if err := s.DeleteHistory(ctx, 999999); err == nil {
+		t.Errorf("delete missing: got nil, want error")
+	}
+}
+
+func TestClearHistoryScoped(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	base := time.Now().UTC()
+	for i := 0; i < 3; i++ {
+		for _, conn := range []string{"a", "b"} {
+			e := sampleHistoryEntry(conn, fmt.Sprintf("SELECT %s%d", conn, i), int64(i))
+			e.ExecutedAt = base.Add(time.Duration(i) * time.Second)
+			if err := s.RecordHistory(ctx, e); err != nil {
+				t.Fatalf("record: %v", err)
+			}
+		}
+	}
+	// Per-connection clear leaves the other connection alone.
+	n, err := s.ClearHistory(ctx, "a")
+	if err != nil {
+		t.Fatalf("clear a: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("cleared a = %d, want 3", n)
+	}
+	aList, _ := s.ListRecentHistory(ctx, "a", 100)
+	bList, _ := s.ListRecentHistory(ctx, "b", 100)
+	if len(aList) != 0 {
+		t.Errorf("after clear a: len = %d, want 0", len(aList))
+	}
+	if len(bList) != 3 {
+		t.Errorf("after clear a: b len = %d, want 3", len(bList))
+	}
+
+	// Global clear wipes everything.
+	n, err = s.ClearHistory(ctx, "")
+	if err != nil {
+		t.Fatalf("clear all: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("cleared all = %d, want 3", n)
+	}
+	bList, _ = s.ListRecentHistory(ctx, "b", 100)
+	if len(bList) != 0 {
+		t.Errorf("after clear all: b len = %d, want 0", len(bList))
+	}
+}
+
 func TestSearchHistoryFTS(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)

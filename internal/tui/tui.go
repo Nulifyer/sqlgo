@@ -214,6 +214,45 @@ func (a *app) deleteConnection(ctx context.Context, name string) error {
 	return nil
 }
 
+// unlinkSecret removes the keyring entries for a connection without
+// deleting the store row. Callers that don't want to lose the rest
+// of the connection config (host/port/options/etc) but do want the
+// password gone -- e.g. because the keyring is going stale and they
+// plan to re-enter the password on next connect -- use this path.
+// Store rows whose password was the placeholder get their password
+// field cleared so the next connectTo doesn't try to resolve a
+// secret that no longer exists.
+func (a *app) unlinkSecret(ctx context.Context, name string) error {
+	if a.secrets == nil {
+		return fmt.Errorf("no secret store available")
+	}
+	// Best-effort delete -- neither entry necessarily exists.
+	_ = a.secrets.Delete(name)
+	_ = a.secrets.Delete(sshKeyringAccount(name))
+
+	// Clear any placeholder in the store row so the connection
+	// doesn't end up pointing at a secret that was just deleted.
+	c, err := a.store.GetConnection(ctx, name)
+	if err != nil {
+		return err
+	}
+	changed := false
+	if c.Password == secret.Placeholder {
+		c.Password = ""
+		changed = true
+	}
+	if c.SSH.Password == secret.Placeholder {
+		c.SSH.Password = ""
+		changed = true
+	}
+	if changed {
+		if err := a.store.SaveConnection(ctx, "", c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Run takes over the terminal and runs until the user quits (Ctrl+Q) or an
 // error occurs. The terminal is always restored before return.
 func Run() error {

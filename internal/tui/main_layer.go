@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"time"
@@ -167,7 +168,7 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 			// Alt+F reformats the query buffer using the sqltok
 			// heuristic formatter. Only meaningful when the editor
 			// has content; silently ignored otherwise. The buffer's
-			// own undo stack covers Ctrl+Z for "that looks worse,
+			// own undo stack covers Alt+Z for "that looks worse,
 			// give me my original back".
 			if m.editor.buf.LineCount() > 1 || len(m.editor.buf.Line(0)) > 0 {
 				m.formatQuery()
@@ -287,7 +288,16 @@ func (m *mainLayer) handleResultsKey(a *app, k Key) {
 		}
 		return
 	}
-	if k.Kind != KeyRune || k.Ctrl {
+	// Alt+A copies the entire visible (filtered + sorted) result set
+	// as TSV -- sibling of the cell-level 'y' and row-level 'Y'
+	// yanks. Alt-prefixed rather than Ctrl because Ctrl+Y is VDSUSP
+	// on BSD/macOS and can be swallowed by shell job control before
+	// reaching the raw tty.
+	if k.Alt && k.Kind == KeyRune && (k.Rune == 'a' || k.Rune == 'A') {
+		m.copyAllResults(a)
+		return
+	}
+	if k.Kind != KeyRune || k.Ctrl || k.Alt {
 		return
 	}
 	switch k.Rune {
@@ -332,6 +342,29 @@ func (m *mainLayer) handleResultsKey(a *app, k Key) {
 			m.status = fmt.Sprintf("copied row (%d cells)", len(row))
 		}
 	}
+}
+
+// copyAllResults serializes the entire visible result buffer (after
+// filter + sort) as TSV and places it on the system clipboard. Sibling
+// of the cell-level 'y' and row-level 'Y' yanks; uses the shared
+// writeExport writer so the clipboard payload matches what the TSV
+// export-to-file path would produce.
+func (m *mainLayer) copyAllResults(a *app) {
+	if !m.table.HasColumns() {
+		m.status = "nothing to copy"
+		return
+	}
+	cols, rows := m.table.Snapshot()
+	var buf bytes.Buffer
+	if err := writeExport(&buf, cols, rows, ExportTSV); err != nil {
+		m.status = "copy all: " + err.Error()
+		return
+	}
+	if err := a.clipboard.Copy(buf.String()); err != nil {
+		m.status = "copy all: " + err.Error()
+		return
+	}
+	m.status = fmt.Sprintf("copied %d row(s) as TSV", len(rows))
 }
 
 // formatQuery reformats the editor's current buffer using the
@@ -532,7 +565,7 @@ func (m *mainLayer) queryHints(a *app) string {
 		hintIf(running, "Ctrl+C=cancel"),
 		hintIf(hasSel, "Ctrl+C/X=copy/cut"),
 		hintIf(!hasSel, "Ctrl+V=paste"),
-		"Ctrl+Z/Y=undo/redo",
+		"Alt+Z/Y=undo/redo",
 		hintIf(hasText, "Alt+F=format"),
 		"F11=fullscreen",
 		hintIf(hasText, "Ctrl+L=clear"),
@@ -548,7 +581,7 @@ func (m *mainLayer) resultsHints(a *app) string {
 		hintAlwaysFocus(),
 		hintIf(hasRows, "Up/Dn/Lt/Rt=cell"),
 		hintIf(hasRows, "Enter=inspect"),
-		hintIf(hasRows, "y=cell Y=row"),
+		hintIf(hasRows, "y=cell Y=row Alt+A=all"),
 		hintIf(hasRows, "s=sort"),
 		hintIf(hasCols, "/=filter"),
 		hintIf(hasCols, "w=wrap"),

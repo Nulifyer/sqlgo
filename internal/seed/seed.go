@@ -106,6 +106,10 @@ func Run(ctx context.Context, conn db.Conn, opts Options) error {
 	if err := insertRows(ctx, conn, d, tables[7], data.orderItemRows()); err != nil {
 		return err
 	}
+	logf("inserting test_notes: %d", len(data.testNotes))
+	if err := insertRows(ctx, conn, d, tables[8], data.testNoteRows()); err != nil {
+		return err
+	}
 
 	logf("done")
 	return nil
@@ -120,6 +124,7 @@ const (
 	colInt colType = iota
 	colBigInt
 	colText     // variable-length string; size in colDef.size
+	colLongText // large text; TEXT / NVARCHAR(MAX). Used by test_notes.
 	colDecimal  // fixed precision; size=precision, scale=colDef.scale
 	colBool     // 0/1 semantics
 	colDate     // date only
@@ -232,6 +237,22 @@ var tables = []tableDef{
 			{name: "line_total", typ: colDecimal, size: 12, scale: 2},
 		},
 	},
+	// test_notes holds curated edge-case text rows used to exercise
+	// the TUI's rendering: escape-char display, wrap mode, cell
+	// inspector, export escaping, unicode width, filter/search on
+	// trap characters. Rows are deterministic (not RNG-driven) so
+	// the same set shows up across every seeded run. content is
+	// LONGTEXT so arbitrarily long payloads don't need a size cap.
+	{
+		name: "test_notes",
+		cols: []colDef{
+			{name: "id", typ: colInt, pk: true},
+			{name: "label", typ: colText, size: 80},
+			{name: "category", typ: colText, size: 40},
+			{name: "content", typ: colLongText},
+			{name: "note", typ: colText, size: 200},
+		},
+	},
 }
 
 // --- dialects ---------------------------------------------------------------
@@ -272,6 +293,8 @@ var mssqlDialect = &dialect{
 			return "BIGINT"
 		case colText:
 			return fmt.Sprintf("NVARCHAR(%d)", c.size)
+		case colLongText:
+			return "NVARCHAR(MAX)"
 		case colDecimal:
 			return fmt.Sprintf("DECIMAL(%d,%d)", c.size, c.scale)
 		case colBool:
@@ -301,6 +324,8 @@ var postgresDialect = &dialect{
 			return "BIGINT"
 		case colText:
 			return fmt.Sprintf("VARCHAR(%d)", c.size)
+		case colLongText:
+			return "TEXT"
 		case colDecimal:
 			return fmt.Sprintf("NUMERIC(%d,%d)", c.size, c.scale)
 		case colBool:
@@ -328,6 +353,8 @@ var mysqlDialect = &dialect{
 			return "BIGINT"
 		case colText:
 			return fmt.Sprintf("VARCHAR(%d)", c.size)
+		case colLongText:
+			return "TEXT"
 		case colDecimal:
 			return fmt.Sprintf("DECIMAL(%d,%d)", c.size, c.scale)
 		case colBool:
@@ -351,7 +378,7 @@ var sqliteDialect = &dialect{
 		switch c.typ {
 		case colInt, colBigInt, colBool:
 			return "INTEGER"
-		case colText, colDate, colDateTime:
+		case colText, colLongText, colDate, colDateTime:
 			return "TEXT"
 		case colDecimal:
 			return "NUMERIC"
@@ -455,6 +482,7 @@ type dataset struct {
 	users       []user
 	orders      []purchaseOrder
 	orderItems  []purchaseOrderItem
+	testNotes   []testNote
 }
 
 type department struct {
@@ -528,6 +556,17 @@ type purchaseOrderItem struct {
 	quantity   int
 	priceCents int64
 	lineCents  int64
+}
+
+// testNote is a curated edge-case text row. The table is there so the
+// TUI team can stress-test rendering without having to hand-craft a
+// query to produce quirky values: just `SELECT * FROM test_notes`.
+type testNote struct {
+	id       int
+	label    string
+	category string
+	content  string
+	note     string
 }
 
 // generate produces the full in-memory dataset. Row counts scale linearly
@@ -681,7 +720,162 @@ func generate(r *rand.Rand, scale int) *dataset {
 		ds.orders = append(ds.orders, order)
 	}
 
+	ds.testNotes = buildTestNotes()
+
 	return ds
+}
+
+// buildTestNotes returns the curated edge-case row set for test_notes.
+// Each row exercises a specific rendering concern in the TUI:
+//
+//   - escape: preserves \n \r \t so the draw path can dim them
+//   - unicode: CJK / RTL / emoji / combining marks / zero-width
+//   - whitespace: leading/trailing/all-blank cells
+//   - long: wrap-mode stress + cell inspector scroll
+//   - trap: quotes / pipes / commas / backslashes that break naive
+//     export escaping
+//   - markup: html/xml/json/url shapes that occur in real payloads
+//
+// The slice is intentionally hand-written (not RNG-driven) so the
+// same ids stay on the same rows across seeded runs. Anyone eyeballing
+// the TUI can reproduce a specific case by `WHERE id = 13`.
+func buildTestNotes() []testNote {
+	// loremLine is a single sentence repeated to build long runs
+	// without committing a 2 KB string literal to source.
+	loremLine := "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt. "
+
+	longSingleLine := strings.Repeat(loremLine, 40) // ~3600 chars, one row
+	longMultiLine := func() string {
+		var b strings.Builder
+		for i := 1; i <= 40; i++ {
+			fmt.Fprintf(&b, "line %02d of forty -- %s\n", i, loremLine)
+		}
+		return strings.TrimRight(b.String(), "\n")
+	}()
+	veryLongWord := strings.Repeat("supercalifragilistic", 10) // 200 unbroken chars
+
+	notes := []testNote{
+		// --- baseline ASCII ----------------------------------------
+		{label: "simple ascii", category: "text",
+			content: "hello world",
+			note:    "sanity check; nothing interesting"},
+		{label: "empty string", category: "text",
+			content: "",
+			note:    "should render as blank cell, not NULL"},
+		{label: "single char", category: "text",
+			content: "a",
+			note:    "column width floor"},
+
+		// --- whitespace edge cases ---------------------------------
+		{label: "leading spaces", category: "whitespace",
+			content: "    four leading spaces",
+			note:    "check that leading space isn't trimmed in display"},
+		{label: "trailing spaces", category: "whitespace",
+			content: "trailing four spaces    ",
+			note:    "check that trailing space survives through stringify"},
+		{label: "only whitespace", category: "whitespace",
+			content: "        ",
+			note:    "all spaces; should still count as non-empty"},
+		{label: "tab indented", category: "whitespace",
+			content: "\tindented with a tab",
+			note:    "leading tab becomes dim \\t in the table view"},
+
+		// --- escape chars ------------------------------------------
+		{label: "single newline", category: "escape",
+			content: "before the newline\nafter the newline",
+			note:    "\\n should render dim between segments"},
+		{label: "many newlines", category: "escape",
+			content: "one\ntwo\nthree\nfour\nfive\nsix\nseven",
+			note:    "stresses wrap mode vs in-line escape display"},
+		{label: "crlf windows", category: "escape",
+			content: "windows\r\nstyle\r\nline\r\nendings",
+			note:    "both \\r and \\n should dim"},
+		{label: "tab separated", category: "escape",
+			content: "col1\tcol2\tcol3\tcol4",
+			note:    "looks like TSV; every tab dims"},
+		{label: "mixed escapes", category: "escape",
+			content: "tab\there\nnewline\rcarriage return",
+			note:    "all three escape kinds in one cell"},
+		{label: "carriage return only", category: "escape",
+			content: "before\rafter",
+			note:    "bare \\r is historically display-destructive"},
+
+		// --- unicode -----------------------------------------------
+		{label: "cjk", category: "unicode",
+			content: "你好世界 こんにちは 안녕하세요",
+			note:    "wide glyphs; check column width math"},
+		{label: "rtl hebrew arabic", category: "unicode",
+			content: "مرحبا بالعالم עברית",
+			note:    "RTL script; bidi handling is probably naive"},
+		{label: "emoji mix", category: "unicode",
+			content: "Hello 👋 World 🌍 with emoji 🎉🎊🎁",
+			note:    "surrogate pairs / variation selectors"},
+		{label: "accented latin", category: "unicode",
+			content: "café, naïve, résumé, piñata, Zürich, São Paulo",
+			note:    "precomposed accents"},
+		{label: "combining marks", category: "unicode",
+			content: "cafe\u0301 vs café (combining vs precomposed)",
+			note:    "same glyph, different byte length"},
+		{label: "zero width", category: "unicode",
+			content: "a\u200bb\u200cc\u200dd (zero-width space/joiner)",
+			note:    "invisible cells break column-width heuristics"},
+		{label: "box drawing", category: "unicode",
+			content: "┌─┬─┐ │a│b│ ├─┼─┤ │c│d│ └─┴─┘",
+			note:    "terminal graphics in data, not in our own UI"},
+
+		// --- trap characters for CSV/JSON/markdown exporters -------
+		{label: "single quotes", category: "trap",
+			content: "O'Brien said 'hello' and left",
+			note:    "sql-ish quote chaos"},
+		{label: "double quotes", category: "trap",
+			content: `she said "hello" with "emphasis"`,
+			note:    "csv export must escape"},
+		{label: "embedded comma", category: "trap",
+			content: "first, second, third, fourth",
+			note:    "csv export must quote the cell"},
+		{label: "pipes", category: "trap",
+			content: "col1 | col2 | col3 | pipe table trap",
+			note:    "markdown export must backslash-escape"},
+		{label: "backslash path", category: "trap",
+			content: `C:\Users\Admin\AppData\Roaming\sqlgo`,
+			note:    "raw backslashes; no escape interpretation"},
+		{label: "quoted comma newline", category: "trap",
+			content: "row with \"quotes\", commas, and\na newline",
+			note:    "every csv trap in one cell"},
+
+		// --- markup / structured payloads --------------------------
+		{label: "json inline", category: "markup",
+			content: `{"user":"alice","tags":["x","y"],"meta":{"n":42}}`,
+			note:    "json in a cell; syntax highlighting? no. readable? check"},
+		{label: "xml inline", category: "markup",
+			content: `<root attr="val"><child>text with &amp; entity</child></root>`,
+			note:    "xml entities; angle brackets"},
+		{label: "html tags", category: "markup",
+			content: `<script>alert('xss')</script> <b>bold</b>`,
+			note:    "never html-escape on display"},
+		{label: "url with query", category: "markup",
+			content: "https://example.com/path/to/thing?q=hello+world&lang=en&other=%20value#fragment",
+			note:    "long horizontal; scrolls past panel edge"},
+
+		// --- long content ------------------------------------------
+		{label: "long single line", category: "long",
+			content: longSingleLine,
+			note:    fmt.Sprintf("%d chars on one logical line; exercises h-scroll + wrap", len(longSingleLine))},
+		{label: "long multi line", category: "long",
+			content: longMultiLine,
+			note:    "40 lines; cell inspector should scroll, main view clips"},
+		{label: "very long word", category: "long",
+			content: veryLongWord,
+			note:    "no spaces; wrap mode must hard-chop"},
+		{label: "paragraph", category: "long",
+			content: strings.Repeat(loremLine, 3),
+			note:    "mid-length; fits cell inspector without scroll"},
+	}
+
+	for i := range notes {
+		notes[i].id = i + 1
+	}
+	return notes
 }
 
 // --- row materialization ----------------------------------------------------
@@ -760,6 +954,14 @@ func (d *dataset) orderItemRows() [][]any {
 	out := make([][]any, len(d.orderItems))
 	for i, x := range d.orderItems {
 		out[i] = []any{x.id, x.orderID, x.productID, x.quantity, money(x.priceCents), money(x.lineCents)}
+	}
+	return out
+}
+
+func (d *dataset) testNoteRows() [][]any {
+	out := make([][]any, len(d.testNotes))
+	for i, x := range d.testNotes {
+		out[i] = []any{x.id, x.label, x.category, x.content, x.note}
 	}
 	return out
 }

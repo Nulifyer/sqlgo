@@ -20,6 +20,49 @@ type HistoryEntry struct {
 	Error          string // empty on success
 }
 
+// DeleteHistory removes a single history row by id. Used by the
+// history browser's 'd' key binding. Returns ErrConnectionNotFound
+// style semantics via rowsAffected -- a missing id is an error so
+// the caller can surface "already gone" feedback.
+func (s *Store) DeleteHistory(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM history WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete history: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete history rows: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("history id %d not found", id)
+	}
+	return nil
+}
+
+// ClearHistory removes every history row. When connectionName is
+// non-empty, only rows for that connection are wiped; pass "" to
+// nuke everything. Returns the number of rows deleted so the UI can
+// report "cleared N entries".
+func (s *Store) ClearHistory(ctx context.Context, connectionName string) (int64, error) {
+	var (
+		res interface {
+			RowsAffected() (int64, error)
+		}
+		err error
+	)
+	if connectionName == "" {
+		r, e := s.db.ExecContext(ctx, `DELETE FROM history`)
+		res, err = r, e
+	} else {
+		r, e := s.db.ExecContext(ctx, `DELETE FROM history WHERE connection_name = ?`, connectionName)
+		res, err = r, e
+	}
+	if err != nil {
+		return 0, fmt.Errorf("clear history: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // RecordHistory inserts a history row and lazily trims the per-connection
 // ring to the current cap. The trim runs in the same transaction as the
 // insert so observers never see a stale above-cap view.

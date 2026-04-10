@@ -178,6 +178,172 @@ func TestScreenFlushEmitsBGTransition(t *testing.T) {
 	}
 }
 
+// TestIsWideRune spot-checks the wide-rune classification sourced
+// from go-runewidth. Covers every glyph kind the test_notes table
+// exercises plus a combining accent (width 0).
+func TestIsWideRune(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		r         rune
+		wantWide  bool
+		wantWidth int
+	}{
+		{"ascii-lower", 'a', false, 1},
+		{"ascii-digit", '5', false, 1},
+		{"ascii-sym", '$', false, 1},
+		{"latin1-accent", 'é', false, 1},
+		{"cjk-hani", '你', true, 2},
+		{"cjk-hani2", '好', true, 2},
+		{"hiragana", 'あ', true, 2},
+		{"katakana", 'カ', true, 2},
+		{"hangul", '안', true, 2},
+		{"fullwidth-A", 'Ａ', true, 2},
+		{"emoji-earth", '🌍', true, 2},
+		{"emoji-party", '🎉', true, 2},
+		{"combining-acute", '\u0301', false, 0},
+	}
+	for _, tc := range cases {
+		if got := isWideRune(tc.r); got != tc.wantWide {
+			t.Errorf("isWideRune(%q /*U+%04X*/) = %v, want %v",
+				tc.r, tc.r, got, tc.wantWide)
+		}
+		if got := runeDisplayWidth(tc.r); got != tc.wantWidth {
+			t.Errorf("runeDisplayWidth(%q /*U+%04X*/) = %d, want %d",
+				tc.r, tc.r, got, tc.wantWidth)
+		}
+	}
+}
+
+// TestWriteStyledWideRunePopulatesContinuation pins the invariant
+// that writing a wide rune also marks the next cell as wideCont.
+// Every drawing path relies on this to keep the grid in sync with
+// the terminal.
+func TestWriteStyledWideRunePopulatesContinuation(t *testing.T) {
+	t.Parallel()
+	c := newCellbuf(4, 1)
+	c.writeAt(1, 1, "你好")
+	// Expected layout: col1 head '你', col2 cont, col3 head '好', col4 cont.
+	if p := c.at(1, 1); p.r != '你' || p.wideCont || !p.touched {
+		t.Errorf("(1,1) = %+v, want head 你", p)
+	}
+	if p := c.at(1, 2); p.r != 0 || !p.wideCont || !p.touched {
+		t.Errorf("(1,2) = %+v, want wideCont", p)
+	}
+	if p := c.at(1, 3); p.r != '好' || p.wideCont || !p.touched {
+		t.Errorf("(1,3) = %+v, want head 好", p)
+	}
+	if p := c.at(1, 4); p.r != 0 || !p.wideCont || !p.touched {
+		t.Errorf("(1,4) = %+v, want wideCont", p)
+	}
+}
+
+// TestWriteStyledCombiningMarkDropped documents the v1 compromise:
+// zero-width runes (combining marks, ZWJs) are dropped so the
+// buffer grid stays in sync with the terminal. A future revision
+// that attaches combining marks to the base cell would render
+// "cafe\u0301" as "café"; today it renders as "cafe".
+func TestWriteStyledCombiningMarkDropped(t *testing.T) {
+	t.Parallel()
+	c := newCellbuf(6, 1)
+	c.writeAt(1, 1, "cafe\u0301")
+	expect := "cafe"
+	for i, r := range expect {
+		if p := c.at(1, 1+i); p.r != r {
+			t.Errorf("(1,%d) = %+v, want %q", 1+i, p, r)
+		}
+	}
+	if p := c.at(1, 5); p.touched {
+		t.Errorf("(1,5) unexpectedly touched (combining mark leaked): %+v", p)
+	}
+}
+
+// TestScreenFlushClobbersStaleWideRightHalf pins the "ghost UTF-8
+// cell" fix: when frame N has a wide rune at (1,1) and frame N+1
+// replaces it with a narrow rune, the flush diff must also emit the
+// cell at (1,2) so the terminal's stale right-half gets overwritten.
+// Pre-fix, col 2's model value looked unchanged to the diff so the
+// stale second half lingered.
+//
+// Setup note: writeStyled("你") populates col 1 (head) AND col 2
+// (wideCont) in a single call. Callers must NOT also call
+// writeStyled on col 2 -- that would stomp the continuation. The
+// other cells (3, 4) are left untouched and composite() fills them
+// with blank spaces.
+func TestScreenFlushClobbersStaleWideRightHalf(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	s := newScreen(&out, 4, 1)
+
+	// Frame 1: a wide CJK rune at col 1. writeStyled handles the
+	// continuation slot at col 2 automatically. Cols 3/4 fall
+	// through to composite's blank fill.
+	b1 := newCellbuf(4, 1)
+	b1.writeAt(1, 1, "你")
+	s.composite([]*cellbuf{b1})
+	if err := s.flush(); err != nil {
+		t.Fatal(err)
+	}
+	// Sanity-check the prev buffer (what's now committed) has the
+	// expected shape: head + wideCont.
+	if p := s.prev.at(1, 1); p.r != '你' || p.wideCont {
+		t.Fatalf("frame 1 col 1 = %+v, want head rune '你'", p)
+	}
+	if p := s.prev.at(1, 2); !p.wideCont {
+		t.Fatalf("frame 1 col 2 = %+v, want wideCont", p)
+	}
+	out.Reset()
+
+	// Frame 2: a narrow 'X' at col 1. No explicit write at col 2 --
+	// composite fills col 2 with a blank. The diff must emit that
+	// blank so the terminal's stale right-half of 你 disappears.
+	b2 := newCellbuf(4, 1)
+	b2.writeAt(1, 1, "X")
+	s.composite([]*cellbuf{b2})
+	if err := s.flush(); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !bytes.Contains([]byte(got), []byte("X")) {
+		t.Errorf("flush missing new X rune: %q", got)
+	}
+	// The critical assertion: col 2 must have been touched. Strip
+	// ANSI escape sequences and look for "X " (X immediately
+	// followed by a space) in the plain-text residue. The flush
+	// may emit style resets between the two runes, so a naive
+	// bytes.Contains on the raw output would give a false
+	// negative.
+	plain := stripANSI(got)
+	if !bytes.Contains([]byte(plain), []byte("X ")) {
+		t.Errorf("flush did not clobber stale wide right-half: raw=%q plain=%q", got, plain)
+	}
+}
+
+// stripANSI returns s with every CSI escape sequence removed. Used
+// by flush-output tests that want to assert on the visible
+// characters in rendering order without being confused by the SGR
+// resets that appear between style transitions.
+func stripANSI(s string) string {
+	var b bytes.Buffer
+	i := 0
+	for i < len(s) {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			i += 2
+			for i < len(s) {
+				c := s[i]
+				i++
+				if c >= 0x40 && c <= 0x7e {
+					break
+				}
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
 // Flush emits nothing for the second identical frame -- verifies the diff.
 func TestScreenFlushDiffingSkipsUnchanged(t *testing.T) {
 	t.Parallel()

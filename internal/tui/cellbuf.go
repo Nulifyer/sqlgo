@@ -1,5 +1,9 @@
 package tui
 
+import (
+	"github.com/mattn/go-runewidth"
+)
+
 // Style bundles a cell's visual attributes. Zero value is the terminal
 // default on every axis. Kept as a plain struct so layers can build and
 // pass around styled runs without fiddling with the pen each time.
@@ -7,6 +11,31 @@ type Style struct {
 	FG    int       // ANSI SGR foreground code; ansiDefault = terminal default
 	BG    int       // ANSI SGR background code; ansiDefaultBG = terminal default
 	Attrs cellAttrs // bold/italic/underline bitmask
+}
+
+// runeDisplayWidth returns the number of terminal columns a rune
+// occupies: 0 for combining marks and zero-width joiners, 1 for
+// ordinary printable chars, 2 for East Asian Wide / Fullwidth / most
+// emoji. Backed by github.com/mattn/go-runewidth, which keeps its
+// Unicode table up to date. Control characters (< 0x20, 0x7f) should
+// be filtered out by the caller before this is consulted -- they
+// return 0 here but that's a side-effect of runewidth's default
+// table, not a contract.
+func runeDisplayWidth(r rune) int {
+	return runewidth.RuneWidth(r)
+}
+
+// stringDisplayWidth is the string analog of runeDisplayWidth.
+// Respects the same conventions (combining marks contribute 0).
+func stringDisplayWidth(s string) int {
+	return runewidth.StringWidth(s)
+}
+
+// isWideRune reports whether r draws as 2 terminal columns. Kept as a
+// convenience over runeDisplayWidth so call sites that only care
+// about the wide/narrow split stay readable.
+func isWideRune(r rune) bool {
+	return runewidth.RuneWidth(r) == 2
 }
 
 // defaultStyle returns a Style that resets to terminal defaults on every
@@ -28,14 +57,22 @@ const (
 // cell is a single terminal cell. During compositing, touched=false means
 // "this layer has nothing here" and the cell from the layer beneath shows
 // through. In the final (post-composite) buffer every cell is touched.
+//
+// Wide-rune model: a wide rune (CJK, emoji, fullwidth) occupies two
+// terminal columns. The head cell holds the rune and has wideCont=false;
+// the cell immediately to its right is a continuation slot with r=0,
+// wideCont=true, same style. Writes that target the continuation slot
+// directly replace it with a narrow rune; the flush diff clobbers the
+// stale glyph half automatically because the wideCont flag changed.
 type cell struct {
 	r     rune
 	style Style
 	// legacy alias: the screen flush diff path previously read p.fg, and
 	// a handful of tests compare it directly. Keep it in sync with
 	// style.FG so the old accessors don't have to change.
-	fg      int
-	touched bool
+	fg       int
+	touched  bool
+	wideCont bool // right half of a wide glyph placed by the cell to the left
 }
 
 // cellbuf is a rectangular grid of cells. Layers draw into one each frame
@@ -110,12 +147,49 @@ func (c *cellbuf) writeAt(row, col int, s string) {
 // syntax highlighters and tokenized editor rendering: a single draw pass
 // can emit runs with different styles back-to-back without saving and
 // restoring a pen each time.
+//
+// Width awareness: each rune's terminal column width is resolved via
+// go-runewidth.
+//
+//   - width 0 (combining marks, zero-width joiners): dropped. A proper
+//     implementation would attach the mark to the previous cell as a
+//     combining rune list; for now we accept the visual loss so the
+//     grid stays in sync with the terminal cursor.
+//   - width 1: writes one cell, advances col by 1.
+//   - width 2: writes the head rune at col and a wideCont placeholder
+//     at col+1 (same style, r=0), advances col by 2. A subsequent
+//     write at col+1 would cleanly replace the continuation.
+//
+// Writes that would extend past the right edge of the buffer get
+// silently clipped, including the head of a wide rune that only has
+// room for one of its two columns -- the caller is responsible for
+// choosing not to land a wide rune on the last column.
 func (c *cellbuf) writeStyled(row, col int, s string, st Style) {
 	for _, r := range s {
-		if p := c.at(row, col); p != nil {
-			*p = cell{r: r, style: st, fg: st.FG, touched: true}
+		w := runeDisplayWidth(r)
+		switch w {
+		case 0:
+			// Combining mark or zero-width glyph; drop it for now.
+			continue
+		case 2:
+			// Head cell with the rune.
+			if p := c.at(row, col); p != nil {
+				*p = cell{r: r, style: st, fg: st.FG, touched: true}
+			}
+			// Continuation cell; no rune, just marks the column as
+			// occupied by the wide glyph so later writes don't try
+			// to reuse it and the flush diff can detect stale
+			// right-halves.
+			if p := c.at(row, col+1); p != nil {
+				*p = cell{style: st, fg: st.FG, touched: true, wideCont: true}
+			}
+			col += 2
+		default:
+			if p := c.at(row, col); p != nil {
+				*p = cell{r: r, style: st, fg: st.FG, touched: true}
+			}
+			col++
 		}
-		col++
 	}
 }
 

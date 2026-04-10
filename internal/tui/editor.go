@@ -83,7 +83,11 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		}
 	}
 
-	// Ctrl+<letter> clipboard + undo shortcuts.
+	// Ctrl+<letter> clipboard shortcuts. Undo/redo live on Alt instead
+	// of Ctrl because Ctrl+Z is intercepted by the shell's job
+	// control (SIGTSTP) in several common environments before the
+	// raw terminal can deliver the byte, and Ctrl+Y is VDSUSP on
+	// BSD/macOS which has the same failure mode.
 	if k.Ctrl && k.Kind == KeyRune {
 		switch k.Rune {
 		case 'c':
@@ -107,13 +111,22 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		case 'a':
 			e.buf.SelectAll()
 			return true
-		case 'z':
-			e.buf.Undo()
-			return true
-		case 'y':
-			e.buf.Redo()
-			return true
 		}
+	}
+
+	// Alt+<letter> shortcuts. Alt keys arrive as ESC-prefixed byte
+	// sequences and aren't eligible for shell signal interception,
+	// so they're safe homes for undo/redo. Any other Alt combo is
+	// swallowed here so the raw letter doesn't end up inserted into
+	// the buffer on a miss.
+	if k.Alt && k.Kind == KeyRune {
+		switch k.Rune {
+		case 'z', 'Z':
+			e.buf.Undo()
+		case 'y', 'Y':
+			e.buf.Redo()
+		}
+		return true
 	}
 
 	switch k.Kind {
@@ -200,38 +213,54 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			break
 		}
 		line := e.buf.Line(lineIdx)
-		start := e.scrollCol
-		if start > len(line) {
-			start = len(line)
-		}
-		end := start + innerW
-		if end > len(line) {
-			end = len(line)
-		}
 
-		// Tokenize the visible slice's underlying line so the token
-		// col offsets align with the buffer. StartCol/EndCol in the
-		// returned tokens index into `line`, so the viewport math
-		// below just compares rune columns directly.
+		// Tokenize the full line once; StartCol/EndCol index into
+		// `line` by rune so the styleForCol lookups below can reuse
+		// the rune index without a second conversion.
 		tokens := sqltok.TokenizeLine(line)
 
-		for vc := start; vc < end; vc++ {
+		// Walk the line's runes, skipping anything before scrollCol
+		// (scrollCol is a rune offset, not a visual column -- the
+		// buffer's cursor is rune-indexed and we don't want to
+		// complicate that for the editor's sake). The first rune at
+		// or after scrollCol lands at colOut=0; each subsequent
+		// rune advances colOut by its runewidth so wide glyphs take
+		// 2 columns on screen.
+		colOut := 0
+		for vc := e.scrollCol; vc < len(line); vc++ {
+			r := line[vc]
+			rw := runeDisplayWidth(r)
+			if rw == 0 {
+				continue
+			}
+			if colOut >= innerW {
+				break
+			}
 			st := styleForCol(tokens, vc)
 			if hasSel && inSelection(lineIdx, vc, selR1, selC1, selR2, selC2) {
 				st = selStyle
 			}
-			s.writeStyled(innerRow+i, innerCol+(vc-start), string(line[vc]), st)
+			// If the wide rune would spill past the right edge,
+			// paint a space instead so no half-glyph leaks.
+			if rw == 2 && colOut+2 > innerW {
+				s.writeStyled(innerRow+i, innerCol+colOut, " ", st)
+				colOut++
+				break
+			}
+			s.writeStyled(innerRow+i, innerCol+colOut, string(r), st)
+			colOut += rw
 		}
 
 		// Extend the selection highlight across trailing empty space
 		// on wrapped or short lines so a multi-line block selection
 		// looks continuous.
 		if hasSel && lineIdx >= selR1 && lineIdx < selR2 {
-			for vc := len(line); vc < start+innerW; vc++ {
-				if vc < start {
-					continue
-				}
-				s.writeStyled(innerRow+i, innerCol+(vc-start), " ", selStyle)
+			if colOut < 0 {
+				colOut = 0
+			}
+			for colOut < innerW {
+				s.writeStyled(innerRow+i, innerCol+colOut, " ", selStyle)
+				colOut++
 			}
 		}
 	}

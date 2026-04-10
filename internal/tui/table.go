@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -44,8 +45,16 @@ type table struct {
 	// of rendered is used. Filter and sort produce a non-nil view.
 	view []int
 
-	filter   string // case-insensitive substring; empty means no filter
-	sortCol  int    // column index; -1 means no sort
+	// filter is the raw filter string as the user typed it; kept so
+	// the filter overlay can re-seed its input field. The compiled
+	// matcher lives in filterMatch and is rebuilt whenever filter
+	// changes. filterNote carries any parse warning (e.g. "bad
+	// regex, using substring") for the filter overlay to show.
+	filter      string
+	filterMatch func(row []string) bool
+	filterNote  string
+
+	sortCol  int // column index; -1 means no sort
 	sortDesc bool
 
 	// Cell cursor position within the current view. cellRow is an index
@@ -79,6 +88,8 @@ func (t *table) Clear() {
 	t.rendered = nil
 	t.view = nil
 	t.filter = ""
+	t.filterMatch = nil
+	t.filterNote = ""
 	t.sortCol = -1
 	t.sortDesc = false
 	t.cellRow = 0
@@ -105,6 +116,8 @@ func (t *table) Init(cols []db.Column) {
 	t.rendered = nil
 	t.view = nil
 	t.filter = ""
+	t.filterMatch = nil
+	t.filterNote = ""
 	t.sortCol = -1
 	t.sortDesc = false
 	t.cellRow = 0
@@ -362,24 +375,132 @@ func (t *table) cursorSourceIndexLocked() (int, bool) {
 
 // --- filter / sort ---------------------------------------------------------
 
-// SetFilter replaces the current filter substring (case-insensitive) and
-// rebuilds the view. An empty string clears the filter. The cursor stays
-// at row 0 so the user lands on the first match after a filter edit.
+// SetFilter replaces the current filter expression and rebuilds the
+// view. Three flavors are recognized:
+//
+//   - empty string: clears the filter.
+//   - "/pattern/"  : pattern is compiled as a Go regexp (case
+//     insensitive). A bad regex falls back to substring match and
+//     the filterNote carries a warning the overlay can surface.
+//   - "col:text"   : match only the column whose header (case
+//     insensitive) equals "col". Unknown column falls back to a
+//     row-wide substring match with a note.
+//   - anything else: case-insensitive substring match across every
+//     cell in a row, the original v1 behavior.
+//
+// The cursor stays at row 0 so the user lands on the first match
+// after a filter edit.
 func (t *table) SetFilter(s string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.filter = s
+	t.filterMatch, t.filterNote = compileFilter(s, t.cols)
 	t.rebuildViewLocked()
 	t.cellRow = 0
 	t.scrollRow = 0
 	t.clampCursorLocked()
 }
 
-// Filter returns the current filter substring (empty when inactive).
+// Filter returns the current filter string (empty when inactive).
 func (t *table) Filter() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.filter
+}
+
+// FilterNote returns any parse warning from the last SetFilter call.
+// "" means the filter parsed cleanly. The overlay reads this to show
+// a hint like "bad regex, using substring".
+func (t *table) FilterNote() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.filterNote
+}
+
+// compileFilter parses a user-supplied filter string into a matcher
+// closure over the table's current columns. The returned note is a
+// human-readable warning for malformed input; empty means the filter
+// parsed exactly as typed. A nil matcher means "no filter".
+func compileFilter(s string, cols []db.Column) (func(row []string) bool, string) {
+	if s == "" {
+		return nil, ""
+	}
+	// Regex form: "/.../".
+	if len(s) >= 2 && s[0] == '/' && s[len(s)-1] == '/' {
+		pattern := s[1 : len(s)-1]
+		if pattern == "" {
+			return nil, "empty regex"
+		}
+		re, err := regexp.Compile("(?i)" + pattern)
+		if err != nil {
+			// Fall back to substring match on the literal text, with
+			// a note so the user knows their regex was ignored.
+			needle := strings.ToLower(pattern)
+			return func(row []string) bool {
+				for _, cell := range row {
+					if strings.Contains(strings.ToLower(cell), needle) {
+						return true
+					}
+				}
+				return false
+			}, "bad regex: " + err.Error()
+		}
+		return func(row []string) bool {
+			for _, cell := range row {
+				if re.MatchString(cell) {
+					return true
+				}
+			}
+			return false
+		}, ""
+	}
+	// Column scope: "col:text". We look for the first ':' and try to
+	// resolve its left side as a column header. If the column is
+	// unknown we fall back to the substring path with a note.
+	if idx := strings.Index(s, ":"); idx > 0 {
+		colName := strings.TrimSpace(s[:idx])
+		needle := strings.ToLower(s[idx+1:])
+		colIdx := findColumnIndex(cols, colName)
+		if colIdx >= 0 {
+			return func(row []string) bool {
+				if colIdx >= len(row) {
+					return false
+				}
+				return strings.Contains(strings.ToLower(row[colIdx]), needle)
+			}, ""
+		}
+		// Fall through to substring with a warning.
+		return substringMatcher(s), "unknown column: " + colName
+	}
+	return substringMatcher(s), ""
+}
+
+// substringMatcher is the default filter behavior: case-insensitive
+// substring against every cell in the row. Factored out so the
+// fallback paths in compileFilter can reuse it without duplicating
+// the loop.
+func substringMatcher(s string) func(row []string) bool {
+	needle := strings.ToLower(s)
+	return func(row []string) bool {
+		for _, cell := range row {
+			if strings.Contains(strings.ToLower(cell), needle) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// findColumnIndex returns the index of the first column whose header
+// matches name case-insensitively, or -1 if no column matches.
+func findColumnIndex(cols []db.Column, name string) int {
+	target := strings.ToLower(name)
+	for i, c := range cols {
+		if strings.ToLower(c.Name) == target {
+			return i
+		}
+	}
+	return -1
 }
 
 // CycleSortAtCursor rotates sort state on the column under the cell
@@ -417,14 +538,13 @@ func (t *table) SortState() (col int, desc bool) {
 // rebuildViewLocked recomputes the view index from rendered using the
 // current filter and sort. Caller must hold t.mu.
 func (t *table) rebuildViewLocked() {
-	if t.filter == "" && t.sortCol < 0 {
+	if t.filterMatch == nil && t.sortCol < 0 {
 		t.view = nil
 		return
 	}
-	needle := strings.ToLower(t.filter)
 	view := make([]int, 0, len(t.rendered))
 	for i, row := range t.rendered {
-		if needle != "" && !rowMatchesFilter(row, needle) {
+		if t.filterMatch != nil && !t.filterMatch(row) {
 			continue
 		}
 		view = append(view, i)
@@ -455,19 +575,17 @@ func cellAt(rendered [][]string, row, col int) string {
 	return r[col]
 }
 
-func rowMatchesFilter(row []string, needle string) bool {
-	for _, cell := range row {
-		if strings.Contains(strings.ToLower(cell), needle) {
-			return true
-		}
-	}
-	return false
-}
-
 // --- draw ------------------------------------------------------------------
 
 // ensureCellVisibleLocked slides scrollRow/scrollCol so the cell cursor
 // sits inside a viewport of the given inner size. Caller must hold t.mu.
+//
+// Horizontal scroll priority: when the cursor cell is wider than the
+// viewport, we snap to its LEFT edge so the beginning of a long value
+// is visible. The previous behavior was to snap the right edge into
+// view (via the standard "scroll until right < viewport right" rule),
+// which meant long cells always showed their tail, not their head --
+// surprising when tab-navigating across wide columns.
 func (t *table) ensureCellVisibleLocked(innerW, bodyH int) {
 	if bodyH > 0 {
 		if t.cellRow < t.scrollRow {
@@ -482,11 +600,20 @@ func (t *table) ensureCellVisibleLocked(innerW, bodyH int) {
 	}
 	if innerW > 0 && len(t.cols) > 0 {
 		left, right := t.cellSpanLocked(t.cellCol)
-		if left < t.scrollCol {
+		cellWidth := right - left + 1
+		if cellWidth >= innerW {
+			// Cell is at least as wide as the viewport; aligning
+			// its left edge is the most useful anchor.
 			t.scrollCol = left
-		}
-		if right > t.scrollCol+innerW-1 {
-			t.scrollCol = right - innerW + 1
+		} else {
+			// Cell fits: scroll the minimal amount to keep it
+			// visible, preferring the left edge when the cursor
+			// moved left and the right edge only when it had to.
+			if left < t.scrollCol {
+				t.scrollCol = left
+			} else if right > t.scrollCol+innerW-1 {
+				t.scrollCol = right - innerW + 1
+			}
 		}
 		if t.scrollCol < 0 {
 			t.scrollCol = 0
@@ -626,9 +753,21 @@ func drawDataRow(s *cellbuf, row, col, innerW int, cells []string, widths []int,
 // drawRunsWithHighlight paints one horizontal line of runeRun values
 // starting at (row, col), clipped to innerW. Runs flagged as escape
 // (expanded \n/\r/\t) are drawn in the dim style; runs whose full-row
-// rune offset falls inside [hi0, hi1) are drawn in the reverse-video
+// offset falls inside [hi0, hi1) are drawn in the reverse-video
 // cursor style. Used by both non-wrap and wrap modes so styling stays
 // consistent across both.
+//
+// Wide-rune handling: each runeRun slot is 1 visual column, so the
+// `written` counter advances by 1 per iteration regardless of the
+// slot's contents. A continuation slot (cont=true) is the right half
+// of a preceding wide glyph; we don't call writeStyled for it
+// because the head already marked col+1 as wideCont. Skipping the
+// continuation is correct AND necessary -- if we called writeStyled
+// with s="" it would no-op, but any non-empty replacement write
+// there would silently stomp the wide head's continuation slot.
+//
+// A wide head's right half that would spill past innerW gets
+// replaced with a space so the column boundary stays clean.
 func drawRunsWithHighlight(s *cellbuf, row, col, innerW int, runes []runeRun, scrollCol, hi0, hi1 int) {
 	normal := defaultStyle()
 	dim := Style{FG: ansiBrightBlack, BG: ansiDefaultBG}
@@ -640,6 +779,24 @@ func drawRunsWithHighlight(s *cellbuf, row, col, innerW int, runes []runeRun, sc
 			break
 		}
 		run := runes[i]
+		// Continuation slots are painted by the head. Just advance.
+		if run.cont {
+			written++
+			continue
+		}
+		// A wide head whose continuation would fall outside the
+		// viewport must be replaced with a space, otherwise the
+		// terminal would draw half a glyph and leak the right side
+		// past the panel edge.
+		if run.wide && written+2 > innerW {
+			st := normal
+			if i >= hi0 && i < hi1 {
+				st = selected
+			}
+			s.writeStyled(row, col+written, " ", st)
+			written++
+			continue
+		}
 		st := normal
 		if run.escape {
 			st = dim
@@ -647,8 +804,8 @@ func drawRunsWithHighlight(s *cellbuf, row, col, innerW int, runes []runeRun, sc
 		if i >= hi0 && i < hi1 {
 			st = selected
 			if run.escape {
-				// Selected AND escape: keep reverse + underline so it
-				// stays visible on dark themes.
+				// Selected AND escape: keep reverse + underline so
+				// it stays visible on dark themes.
 				st.Attrs |= attrUnderline
 			}
 		}
@@ -671,11 +828,22 @@ func highlightSpan(widths []int, col int) (int, int) {
 	return lo, lo + widths[col]
 }
 
-// runeRun is a single visible cell to paint: exactly one terminal cell
-// wide, either a plain rune or one half of an expanded escape sequence.
+// runeRun is a single visible slot in a rendered row: exactly one
+// terminal cell wide. The invariant "one entry = one visual column"
+// is what lets the draw loop use plain index arithmetic for
+// scrollCol and cursor-highlight spans.
+//
+// For ordinary and escape-expanded runes, runeRun{s: "a"} or
+// runeRun{s: "n", escape: true}. For a wide rune ('你', '🎉', etc)
+// we emit two consecutive slots: a head (s = "你", wide = true) and
+// a continuation (s = "", cont = true). Both slots occupy their own
+// visual column but only the head carries the rune; the continuation
+// is skipped in writes because the head's wide glyph covers it.
 type runeRun struct {
 	s      string
 	escape bool
+	wide   bool // head of a 2-cell wide glyph
+	cont   bool // continuation slot (right half of a wide glyph)
 }
 
 // rowRuneRuns produces the exact sequence of one-cell-wide runs that
@@ -735,10 +903,11 @@ func wrapRowRuns(cells []string, widths []int) [][]runeRun {
 }
 
 // chopCellRuns splits a single cell into runeRun slices, each exactly
-// `width` cells wide. Handles the same escape expansions as
-// appendCellRuns and pads the trailing slice with blanks so every
-// returned slice has identical length. An empty string yields a single
-// all-blank slice so callers always see at least one visual line.
+// `width` visual cells wide. Handles the same escape expansion and
+// wide-rune head/continuation emission as appendCellRuns and pads the
+// trailing slice with blanks so every returned slice has identical
+// length. An empty string yields a single all-blank slice so callers
+// always see at least one visual line.
 func chopCellRuns(cell string, width int) [][]runeRun {
 	if width <= 0 {
 		return [][]runeRun{{}}
@@ -777,11 +946,23 @@ func chopCellRuns(cell string, width int) [][]runeRun {
 			if r < 0x20 || r == 0x7f {
 				continue
 			}
-			if written >= width {
+			w := runeDisplayWidth(r)
+			if w == 0 {
+				continue
+			}
+			if written+w > width {
 				flush()
 			}
-			cur = append(cur, runeRun{s: string(r)})
-			written++
+			if w == 2 {
+				cur = append(cur,
+					runeRun{s: string(r), wide: true},
+					runeRun{cont: true},
+				)
+				written += 2
+			} else {
+				cur = append(cur, runeRun{s: string(r)})
+				written++
+			}
 		}
 	}
 	if written > 0 || len(out) == 0 {
@@ -790,59 +971,72 @@ func chopCellRuns(cell string, width int) [][]runeRun {
 	return out
 }
 
-// appendCellRuns writes cell's runes to out, expanding escapes, and then
-// pads with spaces so the total cell span equals widthN.
+// appendCellRuns writes cell's runes to out, expanding escapes,
+// emitting wide runes as head+continuation slot pairs, and padding
+// with spaces so the total cell span equals widthN visual columns.
+//
+// Invariant: the number of slots appended for this cell is exactly
+// widthN (or fewer if widthN was zero). One slot == one visual
+// terminal column.
 func appendCellRuns(out []runeRun, cell string, widthN int) []runeRun {
 	written := 0
+	// padSpaces fills the remainder of the cell with blank slots.
+	padSpaces := func() []runeRun {
+		for written < widthN {
+			out = append(out, runeRun{s: " "})
+			written++
+		}
+		return out
+	}
 	for _, r := range cell {
 		if written >= widthN {
 			break
 		}
 		switch r {
-		case '\n':
+		case '\n', '\r', '\t':
 			if written+2 > widthN {
-				for written < widthN {
-					out = append(out, runeRun{s: " "})
-					written++
-				}
-				return out
+				return padSpaces()
 			}
-			out = append(out, runeRun{s: "\\", escape: true}, runeRun{s: "n", escape: true})
-			written += 2
-		case '\r':
-			if written+2 > widthN {
-				for written < widthN {
-					out = append(out, runeRun{s: " "})
-					written++
-				}
-				return out
+			ch := "n"
+			if r == '\r' {
+				ch = "r"
+			} else if r == '\t' {
+				ch = "t"
 			}
-			out = append(out, runeRun{s: "\\", escape: true}, runeRun{s: "r", escape: true})
-			written += 2
-		case '\t':
-			if written+2 > widthN {
-				for written < widthN {
-					out = append(out, runeRun{s: " "})
-					written++
-				}
-				return out
-			}
-			out = append(out, runeRun{s: "\\", escape: true}, runeRun{s: "t", escape: true})
+			out = append(out,
+				runeRun{s: "\\", escape: true},
+				runeRun{s: ch, escape: true},
+			)
 			written += 2
 		default:
 			if r < 0x20 || r == 0x7f {
-				// Drop other control chars; they'd wreck the grid.
+				// Drop control chars; they'd wreck the grid.
 				continue
 			}
-			out = append(out, runeRun{s: string(r)})
-			written++
+			w := runeDisplayWidth(r)
+			if w == 0 {
+				// Combining marks / zero-width joiners: dropped in
+				// v1 so the grid stays in sync with the terminal.
+				continue
+			}
+			if written+w > widthN {
+				// Not enough room for a wide rune's second half.
+				// Pad with a space so the column still aligns.
+				return padSpaces()
+			}
+			if w == 2 {
+				out = append(out,
+					runeRun{s: string(r), wide: true},
+					runeRun{cont: true},
+				)
+				written += 2
+			} else {
+				out = append(out, runeRun{s: string(r)})
+				written++
+			}
 		}
 	}
-	for written < widthN {
-		out = append(out, runeRun{s: " "})
-		written++
-	}
-	return out
+	return padSpaces()
 }
 
 // renderHeaderRow formats the column headers including an ASCII sort
@@ -894,78 +1088,113 @@ func renderSeparator(widths []int) string {
 	return b.String()
 }
 
-// sliceRunes returns up to width runes of s starting at offset. Out-of-
-// range offsets yield an empty string rather than panicking.
+// sliceRunes returns the slice of s occupying visual columns
+// [offset, offset+width). Wide runes are treated atomically: if a
+// wide glyph straddles either edge it's replaced with a space so the
+// visible content stays aligned. Out-of-range offsets yield an empty
+// string rather than panicking.
 func sliceRunes(s string, offset, width int) string {
 	if width <= 0 || offset < 0 {
 		return ""
 	}
-	rs := []rune(s)
-	if offset >= len(rs) {
-		return ""
+	var b strings.Builder
+	col := 0
+	written := 0
+	for _, r := range s {
+		rw := runeDisplayWidth(r)
+		if rw == 0 {
+			continue
+		}
+		start := col
+		end := col + rw
+		col = end
+		// Entirely before the window.
+		if end <= offset {
+			continue
+		}
+		// Entirely after the window.
+		if start >= offset+width {
+			break
+		}
+		// Partially clipped on the left (wide rune straddles the
+		// offset): replace with spaces for the visible half.
+		if start < offset {
+			for i := start; i < offset; i++ {
+				// nothing; left half not included
+			}
+			for i := offset; i < end && written < width; i++ {
+				b.WriteByte(' ')
+				written++
+			}
+			continue
+		}
+		// Partially clipped on the right.
+		if end > offset+width {
+			for i := start; i < offset+width; i++ {
+				b.WriteByte(' ')
+				written++
+			}
+			break
+		}
+		// Fully inside the window.
+		b.WriteRune(r)
+		written += rw
 	}
-	end := offset + width
-	if end > len(rs) {
-		end = len(rs)
-	}
-	return string(rs[offset:end])
+	return b.String()
 }
 
-// padCellTo writes a cell's contents using expanded escapes (so \n -> `\n`)
-// and pads to w display cells.
+// padCellTo writes a cell's contents using expanded escapes (so \n ->
+// `\n`) and pads to w visual cells. Wide runes count as 2 columns.
 func padCellTo(b *strings.Builder, s string, w int) {
 	written := 0
+	padTail := func() {
+		for written < w {
+			b.WriteByte(' ')
+			written++
+		}
+	}
 	for _, r := range s {
 		if written >= w {
 			break
 		}
 		switch r {
-		case '\n':
+		case '\n', '\r', '\t':
 			if written+2 > w {
-				for written < w {
-					b.WriteByte(' ')
-					written++
-				}
+				padTail()
 				return
 			}
-			b.WriteString(`\n`)
-			written += 2
-		case '\r':
-			if written+2 > w {
-				for written < w {
-					b.WriteByte(' ')
-					written++
-				}
-				return
+			switch r {
+			case '\n':
+				b.WriteString(`\n`)
+			case '\r':
+				b.WriteString(`\r`)
+			case '\t':
+				b.WriteString(`\t`)
 			}
-			b.WriteString(`\r`)
-			written += 2
-		case '\t':
-			if written+2 > w {
-				for written < w {
-					b.WriteByte(' ')
-					written++
-				}
-				return
-			}
-			b.WriteString(`\t`)
 			written += 2
 		default:
 			if r < 0x20 || r == 0x7f {
 				continue
 			}
+			rw := runeDisplayWidth(r)
+			if rw == 0 {
+				// Combining mark / ZWJ: drop for grid alignment.
+				continue
+			}
+			if written+rw > w {
+				padTail()
+				return
+			}
 			b.WriteRune(r)
-			written++
+			written += rw
 		}
 	}
-	for written < w {
-		b.WriteByte(' ')
-		written++
-	}
+	padTail()
 }
 
 // displayWidth counts the number of terminal cells a string occupies
 // when drawn with the escape-expansion rules used by padCellTo.
+// Wide runes (CJK, fullwidth, emoji) count as 2 via runewidth.
 func displayWidth(s string) int {
 	n := 0
 	for _, r := range s {
@@ -976,7 +1205,7 @@ func displayWidth(s string) int {
 			if r < 0x20 || r == 0x7f {
 				continue
 			}
-			n++
+			n += runeDisplayWidth(r)
 		}
 	}
 	return n
@@ -1046,16 +1275,44 @@ func padRight(b *strings.Builder, s string, w int) {
 	}
 }
 
+// truncate clips s to at most w visual columns, appending "..." when
+// the input exceeds the width. Counts wide runes as 2 columns via
+// runewidth so CJK / emoji content doesn't visually overflow when it
+// measures under the raw rune count limit.
 func truncate(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	if runeLen(s) <= w {
+	if stringDisplayWidth(s) <= w {
 		return s
 	}
-	rs := []rune(s)
 	if w <= 3 {
-		return string(rs[:w])
+		// Too narrow for an ellipsis; just clip by visual width.
+		return clipToWidth(s, w)
 	}
-	return string(rs[:w-3]) + "..."
+	return clipToWidth(s, w-3) + "..."
+}
+
+// clipToWidth returns the longest prefix of s whose visual width is
+// at most w. Wide runes are treated atomically -- if the next rune
+// would push past w, it's omitted entirely rather than leaving a
+// half-glyph.
+func clipToWidth(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	written := 0
+	var b strings.Builder
+	for _, r := range s {
+		rw := runeDisplayWidth(r)
+		if rw == 0 {
+			continue
+		}
+		if written+rw > w {
+			break
+		}
+		b.WriteRune(r)
+		written += rw
+	}
+	return b.String()
 }

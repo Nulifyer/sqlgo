@@ -105,6 +105,12 @@ func TestGenerateScaling(t *testing.T) {
 	if len(a.products) != len(b.products) {
 		t.Errorf("products should be fixed: %d vs %d", len(a.products), len(b.products))
 	}
+	if len(a.testNotes) != len(b.testNotes) {
+		t.Errorf("testNotes should be fixed: %d vs %d", len(a.testNotes), len(b.testNotes))
+	}
+	if len(a.testNotes) == 0 {
+		t.Errorf("testNotes should not be empty")
+	}
 	if len(b.employees) != 5*len(a.employees) {
 		t.Errorf("employees should scale 5x: %d vs %d", len(b.employees), len(a.employees))
 	}
@@ -113,6 +119,93 @@ func TestGenerateScaling(t *testing.T) {
 	}
 	if len(b.orders) != 5*len(a.orders) {
 		t.Errorf("orders should scale 5x: %d vs %d", len(b.orders), len(a.orders))
+	}
+}
+
+// TestTestNotesCoversEveryCategory pins that buildTestNotes includes
+// at least one row in each rendering-concern bucket. A regression
+// here means the TUI team lost coverage of a render path -- e.g.
+// someone removed the only "escape" row and now nothing exercises
+// the dim \n / \r / \t painter.
+func TestTestNotesCoversEveryCategory(t *testing.T) {
+	t.Parallel()
+	notes := buildTestNotes()
+	wantCategories := []string{
+		"text", "whitespace", "escape", "unicode", "trap", "markup", "long",
+	}
+	seen := map[string]int{}
+	for _, n := range notes {
+		seen[n.category]++
+	}
+	for _, cat := range wantCategories {
+		if seen[cat] == 0 {
+			t.Errorf("category %q has no test rows", cat)
+		}
+	}
+	// IDs should be 1..N with no gaps so consumers can WHERE id = N.
+	for i, n := range notes {
+		if n.id != i+1 {
+			t.Errorf("notes[%d].id = %d, want %d", i, n.id, i+1)
+		}
+	}
+	// Every row should have a non-empty label for the TUI list view.
+	for _, n := range notes {
+		if n.label == "" {
+			t.Errorf("note id %d has empty label", n.id)
+		}
+	}
+}
+
+// TestTestNotesLongRowsAreActuallyLong guards against a careless
+// edit that replaces the long-content rows with short placeholders.
+// The long category is the only one that exercises wrap mode and
+// the cell inspector's scroll path; losing it silently would make
+// those code paths untested.
+func TestTestNotesLongRowsAreActuallyLong(t *testing.T) {
+	t.Parallel()
+	notes := buildTestNotes()
+	foundLong := false
+	for _, n := range notes {
+		if n.category != "long" {
+			continue
+		}
+		if len(n.content) >= 500 {
+			foundLong = true
+			break
+		}
+	}
+	if !foundLong {
+		t.Errorf("no 'long' test note with content >=500 chars")
+	}
+}
+
+// TestTestNotesPreserveEscapeChars ensures \n \r \t round-trip through
+// buildTestNotes into the row payloads. The TUI's dim-escape rendering
+// depends on these bytes actually making it into the DB.
+func TestTestNotesPreserveEscapeChars(t *testing.T) {
+	t.Parallel()
+	notes := buildTestNotes()
+	var sawN, sawR, sawT bool
+	for _, n := range notes {
+		for _, r := range n.content {
+			switch r {
+			case '\n':
+				sawN = true
+			case '\r':
+				sawR = true
+			case '\t':
+				sawT = true
+			}
+		}
+	}
+	if !sawN {
+		t.Errorf("no test note contains a literal \\n")
+	}
+	if !sawR {
+		t.Errorf("no test note contains a literal \\r")
+	}
+	if !sawT {
+		t.Errorf("no test note contains a literal \\t")
 	}
 }
 

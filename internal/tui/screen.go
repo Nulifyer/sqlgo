@@ -118,6 +118,15 @@ func (s *screen) composite(bufs []*cellbuf) {
 // Attrs transitions go through a full resetStyle + rebuild because SGR
 // has no portable "turn off bold but keep underline" sequence. Pure
 // fg/bg changes emit just the new code and leave attrs intact.
+//
+// Wide-rune handling: a cell can be (a) a normal rune, (b) a wide
+// rune "head" (the terminal draws a 2-cell-wide glyph starting here),
+// or (c) a wideCont "tail" placed by the head in the cell to the
+// left. Tail cells are skipped in the emit loop because the head's
+// WriteRune covers their terminal column already. cellsEqual
+// compares the wideCont flag so a stale tail in prev vs a non-tail
+// in new (the glyph was overwritten by something narrow) emits a
+// clobber automatically -- no forceNext hack needed.
 func (s *screen) flush() error {
 	s.emit.Reset()
 	s.emit.WriteString(cursorHide)
@@ -135,6 +144,17 @@ func (s *screen) flush() error {
 			if cellsEqual(newC, oldC) {
 				continue
 			}
+			// Continuation cells are handled implicitly by the head
+			// at col-1: the terminal draws the wide glyph across
+			// this column already, so there's nothing to emit here.
+			// We still participate in the equality check above so a
+			// wideCont-to-not transition triggers emission on the
+			// following iteration (the old head has already been
+			// replaced; the tail slot now needs a space or new
+			// rune, which is the NON-wideCont branch below).
+			if newC.wideCont {
+				continue
+			}
 			if row != curRow || col != curCol {
 				moveTo(&s.emit, row, col)
 				curRow, curCol = row, col
@@ -146,7 +166,15 @@ func (s *screen) flush() error {
 				r = ' '
 			}
 			s.emit.WriteRune(r)
-			curCol++
+			if isWideRune(r) {
+				// Terminal advances the cursor by 2 columns for a
+				// wide glyph; keep our model in sync so the next
+				// non-skipped column's moveTo (or lack thereof)
+				// lines up.
+				curCol += 2
+			} else {
+				curCol++
+			}
 		}
 	}
 
@@ -166,9 +194,11 @@ func (s *screen) flush() error {
 }
 
 // cellsEqual reports whether two cells render identically. Factored out so
-// the diff check is explicit about which fields matter.
+// the diff check is explicit about which fields matter. wideCont is part
+// of the comparison so a stale continuation slot in prev gets caught
+// when new has a non-wideCont value (or vice versa).
 func cellsEqual(a, b *cell) bool {
-	return a.r == b.r && a.style == b.style
+	return a.r == b.r && a.style == b.style && a.wideCont == b.wideCont
 }
 
 // writeStyleTransition emits the SGR sequence to move the terminal pen

@@ -186,8 +186,37 @@ func (pl *pickerLayer) HandleKey(a *app, k Key) {
 				return
 			}
 			pl.deleteSelected(a)
+		case 'K':
+			if len(pl.p.conns) == 0 {
+				return
+			}
+			pl.unlinkKeyring(a)
 		}
 	}
+}
+
+// unlinkKeyring wipes the keyring entries for the selected connection
+// without touching its store row. Used when the keyring copy has
+// gotten out of sync (e.g. user changed passwords outside sqlgo) or
+// when they want to force re-entry on next connect.
+func (pl *pickerLayer) unlinkKeyring(a *app) {
+	i := pl.p.selected
+	if i < 0 || i >= len(pl.p.conns) {
+		return
+	}
+	name := pl.p.conns[i].Name
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.unlinkSecret(ctx, name); err != nil {
+		pl.p.status = "unlink: " + err.Error()
+		return
+	}
+	if err := a.refreshConnections(); err != nil {
+		pl.p.status = "refresh: " + err.Error()
+		return
+	}
+	pl.p.setConns(a.connCache)
+	pl.p.status = "keyring cleared for " + name
 }
 
 func (pl *pickerLayer) deleteSelected(a *app) {
@@ -230,6 +259,7 @@ func (pl *pickerLayer) Hints(a *app) string {
 		"a=add",
 		hintIf(hasList, "e=edit"),
 		hintIf(hasList, "x=delete"),
+		hintIf(hasList, "K=unlink-keyring"),
 		hintIf(a.conn != nil, "Esc=back"),
 	)
 }
