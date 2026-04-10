@@ -27,6 +27,27 @@ type editor struct {
 	// closes it rather than refining the filter, so the interaction
 	// stays predictable in v1.
 	complete *completionState
+
+	// searchNeedle is the active find/replace substring (empty when
+	// no search is live). When non-empty the draw path paints every
+	// match in `matches` with a dim background and the one at
+	// currentMatch with a stronger highlight so the user sees where
+	// they are in the result list. Ownership: findLayer writes these
+	// fields on open / type / next / prev and clears them on close.
+	searchNeedle string
+	matches      []matchRange
+	currentMatch int // index into matches, -1 when empty
+}
+
+// matchRange is one hit from the editor's find/replace search. Row
+// is a line index in the buffer; col is the rune offset on that
+// line; length is the rune length of the match. Matches never span
+// newlines in v1 -- a multi-line find would need the find input to
+// parse \n escapes, which is a v2 concern.
+type matchRange struct {
+	row    int
+	col    int
+	length int
 }
 
 func newEditor() *editor {
@@ -253,6 +274,15 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 		selR1, selC1, selR2, selC2 = e.buf.normalizedSelection()
 	}
 
+	// Find/replace highlights. matchBg paints every hit's background;
+	// currentMatchBg paints the active hit with a stronger accent so
+	// the user can tell which match Enter / replace will act on.
+	// Selection always wins over both so an active text selection
+	// stays legible on top of a match background.
+	matchBg := Style{FG: ansiDefault, BG: ansiBrightBlack}
+	currentMatchBg := Style{FG: ansiDefault, BG: ansiDefaultBG, Attrs: attrReverse | attrUnderline}
+	hasSearch := e.searchNeedle != "" && len(e.matches) > 0
+
 	for i := 0; i < innerH; i++ {
 		lineIdx := e.scrollRow + i
 		if lineIdx >= e.buf.LineCount() {
@@ -283,6 +313,15 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 				break
 			}
 			st := styleForCol(tokens, vc)
+			if hasSearch {
+				if isCurrent, inMatch := e.matchStyleAt(lineIdx, vc); inMatch {
+					if isCurrent {
+						st = currentMatchBg
+					} else {
+						st = matchBg
+					}
+				}
+			}
 			if hasSel && inSelection(lineIdx, vc, selR1, selC1, selR2, selC2) {
 				st = selStyle
 			}

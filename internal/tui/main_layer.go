@@ -193,6 +193,19 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 			m.editor.buf.Clear()
 			return
 		}
+		// Ctrl+F opens the find/replace overlay. Seed the Find
+		// field with the current selection (if any) so the common
+		// "select text, press Ctrl+F to search for it" flow works
+		// in one gesture.
+		if k.Ctrl && k.Rune == 'f' {
+			seed := m.editor.buf.Selection()
+			fl := newFindLayer(seed)
+			if seed != "" {
+				m.editor.SetSearch(seed)
+			}
+			a.pushLayer(fl)
+			return
+		}
 		m.editor.handleInsert(a, k)
 		return
 	}
@@ -568,6 +581,7 @@ func (m *mainLayer) queryHints(a *app) string {
 		"Alt+Z/Y=undo/redo",
 		hintIf(hasText, "Alt+F=format"),
 		"Ctrl+Space=complete",
+		hintIf(hasText, "Ctrl+F=find"),
 		"F11=fullscreen",
 		hintIf(hasText, "Ctrl+L=clear"),
 	)

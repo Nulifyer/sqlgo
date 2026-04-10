@@ -466,6 +466,27 @@ func (a *app) connectTo(c config.Connection) {
 		}
 		t, err := sshtunnel.Open(tcfg)
 		if err != nil {
+			// Trust-on-first-use: an UnknownHostError means the
+			// bastion's public key isn't in ~/.ssh/known_hosts yet.
+			// Push the trust overlay and let the user accept or
+			// reject; on accept the layer calls connectTo again
+			// with the same target.
+			var unknown *sshtunnel.UnknownHostError
+			if errors.As(err, &unknown) {
+				a.pushLayer(newTrustLayer(c, unknown))
+				return
+			}
+			// Key mismatch is terminal -- we refuse to prompt so an
+			// operator can't whitewash a real MITM with a keystroke.
+			// The error message already says what's wrong; just
+			// surface it on the picker so the user sees it.
+			var mismatch *sshtunnel.HostKeyMismatchError
+			if errors.As(err, &mismatch) {
+				if pl != nil {
+					pl.setStatus(mismatch.Error())
+				}
+				return
+			}
 			if pl != nil {
 				pl.setStatus("ssh tunnel: " + err.Error())
 			}

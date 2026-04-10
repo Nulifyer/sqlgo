@@ -7,9 +7,14 @@
 // socket.
 //
 // Auth: key file takes precedence over password when both are set,
-// matching the form's contract. Host key verification is currently
-// disabled (ssh.InsecureIgnoreHostKey) -- matching the "same as sqlit"
-// baseline -- with a TODO to add known_hosts support later.
+// matching the form's contract.
+//
+// Host key verification is backed by ~/.ssh/known_hosts (see
+// knownhosts.go). Unknown hosts return *UnknownHostError so the
+// caller can prompt the user for trust-on-first-use and then
+// retry Open after AppendKnownHost. Key mismatches return
+// *HostKeyMismatchError which is NOT recoverable inside this
+// package -- the operator has to edit known_hosts by hand.
 package sshtunnel
 
 import (
@@ -76,14 +81,29 @@ func Open(cfg Config) (*Tunnel, error) {
 		return nil, fmt.Errorf("ssh tunnel auth: %w", err)
 	}
 
+	hostKeyCb, err := buildHostKeyCallback(cfg.SSHHost, cfg.SSHPort)
+	if err != nil {
+		return nil, fmt.Errorf("ssh tunnel host key: %w", err)
+	}
 	clientCfg := &ssh.ClientConfig{
 		User:            cfg.SSHUser,
 		Auth:            auth,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: known_hosts
+		HostKeyCallback: hostKeyCb,
 	}
 	sshAddr := net.JoinHostPort(cfg.SSHHost, strconv.Itoa(cfg.SSHPort))
 	client, err := ssh.Dial("tcp", sshAddr, clientCfg)
 	if err != nil {
+		// Unwrap so callers that type-check for *UnknownHostError or
+		// *HostKeyMismatchError see the sentinels directly instead of
+		// having to peel a wrapper off every dial error.
+		var unknown *UnknownHostError
+		if errors.As(err, &unknown) {
+			return nil, unknown
+		}
+		var mismatch *HostKeyMismatchError
+		if errors.As(err, &mismatch) {
+			return nil, mismatch
+		}
 		return nil, fmt.Errorf("ssh dial %s: %w", sshAddr, err)
 	}
 
