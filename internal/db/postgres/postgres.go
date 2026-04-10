@@ -54,6 +54,7 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		DriverName:   driverName,
 		Capabilities: capabilities,
 		SchemaQuery:  schemaQuery,
+		ColumnsQuery: columnsQuery,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: %w", err)
@@ -76,6 +77,19 @@ WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
   AND table_schema NOT LIKE 'pg_toast%'
   AND table_schema NOT LIKE 'pg_temp_%'
 ORDER BY table_schema, table_name;
+`
+
+// columnsQuery returns a single table's columns in ordinal order.
+// The ($1, $2) placeholder style is pgx's. The second column is
+// the engine-reported type string, which ends up in
+// db.Column.TypeName -- the editor's autocomplete only needs the
+// name, but the field is populated for consistency with Query()'s
+// column metadata.
+const columnsQuery = `
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_schema = $1 AND table_name = $2
+ORDER BY ordinal_position;
 `
 
 // buildDSN produces a postgres:// URL understood by pgx/stdlib. Options

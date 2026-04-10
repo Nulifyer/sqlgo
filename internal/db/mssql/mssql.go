@@ -49,6 +49,7 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		DriverName:   driverName,
 		Capabilities: capabilities,
 		SchemaQuery:  schemaQuery,
+		ColumnsQuery: columnsQuery,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mssql: %w", err)
@@ -67,6 +68,15 @@ SELECT
 FROM INFORMATION_SCHEMA.TABLES
 WHERE TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA')
 ORDER BY TABLE_SCHEMA, TABLE_NAME;
+`
+
+// columnsQuery returns a single table's columns in ordinal order.
+// go-mssqldb's sqlserver:// DSN uses @p1/@p2 named parameters.
+const columnsQuery = `
+SELECT COLUMN_NAME, DATA_TYPE
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2
+ORDER BY ORDINAL_POSITION;
 `
 
 // buildDSN produces a sqlserver:// URL understood by go-mssqldb.

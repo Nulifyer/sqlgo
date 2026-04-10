@@ -55,6 +55,7 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		DriverName:   driverName,
 		Capabilities: capabilities,
 		SchemaQuery:  schemaQuery,
+		ColumnsQuery: columnsQuery,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mysql: %w", err)
@@ -73,6 +74,15 @@ SELECT
 FROM information_schema.tables
 WHERE TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')
 ORDER BY TABLE_SCHEMA, TABLE_NAME;
+`
+
+// columnsQuery returns a single table's columns in ordinal order.
+// go-sql-driver/mysql uses positional ? placeholders.
+const columnsQuery = `
+SELECT COLUMN_NAME, DATA_TYPE
+FROM information_schema.columns
+WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+ORDER BY ORDINAL_POSITION;
 `
 
 // buildDSN produces a go-sql-driver/mysql DSN. We use the driver's own

@@ -16,10 +16,26 @@ import (
 // 1=view / 0=table flag (any non-zero int = view). Engines without a
 // native schema concept (SQLite) can pass a query that synthesizes a
 // fixed placeholder schema like "main".
+//
+// ColumnsQuery is the parameterized query the shared Columns method runs
+// to fetch one table's columns. Placeholder style varies by driver (@p1
+// for mssql, $1 for postgres, ? for mysql/sqlite), so each adapter
+// supplies its own. The query MUST accept (schema, table) as positional
+// arguments in that order and MUST return two columns: column name and
+// the engine's type-name string (nullable/empty is fine). Engines
+// without a native schema concept still receive the synthetic schema
+// name the adapter assigned in SchemaQuery (e.g. "main" for sqlite).
+//
+// ColumnsBuilder is an escape hatch for engines whose column lookup
+// can't be expressed with positional parameters (sqlite's PRAGMA is
+// the current example -- PRAGMA table_info doesn't take bind values).
+// When set it takes precedence over ColumnsQuery.
 type SQLOptions struct {
-	DriverName   string
-	Capabilities Capabilities
-	SchemaQuery  string
+	DriverName     string
+	Capabilities   Capabilities
+	SchemaQuery    string
+	ColumnsQuery   string
+	ColumnsBuilder func(t TableRef) (string, []any)
 }
 
 // OpenSQL wraps a stdlib *sql.DB as a db.Conn. Engine adapters build a DSN,
@@ -79,6 +95,46 @@ func (c *sqlConn) Schema(ctx context.Context) (*SchemaInfo, error) {
 		return out[i].Name < out[j].Name
 	})
 	return &SchemaInfo{Tables: out}, nil
+}
+
+// Columns runs the driver's ColumnsQuery (or ColumnsBuilder, when
+// set) against the live connection and returns the ordered column
+// list for the given table. Missing configuration returns an empty
+// slice rather than an error so a driver that hasn't been updated
+// yet still satisfies the interface without breaking autocomplete.
+func (c *sqlConn) Columns(ctx context.Context, t TableRef) ([]Column, error) {
+	var (
+		query string
+		args  []any
+	)
+	if c.opts.ColumnsBuilder != nil {
+		query, args = c.opts.ColumnsBuilder(t)
+	} else if c.opts.ColumnsQuery != "" {
+		query = c.opts.ColumnsQuery
+		args = []any{t.Schema, t.Name}
+	} else {
+		return nil, nil
+	}
+	rows, err := c.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("columns query %s.%s: %w", t.Schema, t.Name, err)
+	}
+	defer rows.Close()
+	var out []Column
+	for rows.Next() {
+		var (
+			name    string
+			typeSQL sql.NullString
+		)
+		if err := rows.Scan(&name, &typeSQL); err != nil {
+			return nil, fmt.Errorf("columns scan: %w", err)
+		}
+		out = append(out, Column{Name: name, TypeName: typeSQL.String})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("columns rows: %w", err)
+	}
+	return out, nil
 }
 
 func (c *sqlConn) Close() error {

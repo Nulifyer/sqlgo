@@ -36,7 +36,21 @@ type formField struct {
 	label string
 	in    *input
 	mask  bool
+	// values, when non-nil, constrains this field to a fixed set of
+	// choices. The form renders the field as a cycler (like the
+	// Driver row) and Left/Right step through values; typing is
+	// swallowed. An imported value that isn't in the list is
+	// treated as "unknown" and the cycler jumps to the list's
+	// first entry on the first Left/Right press so the user can
+	// recover into a valid state without retyping.
+	values []string
 }
+
+// isCycler reports whether this field is constrained to a fixed
+// value set (Driver row, plus any engineOption that declares
+// values). Drives the handle/draw branching that treats cyclers as
+// non-editable.
+func (ff *formField) isCycler() bool { return len(ff.values) > 0 }
 
 // fixed core field indices. Kept as constants so the toConnection
 // reader doesn't hard-code magic numbers.
@@ -93,7 +107,9 @@ func newConnForm(title string, c *config.Connection) *connForm {
 }
 
 // buildEngineFields turns the spec's declared options into formFields,
-// pre-filling each value from the provided options map.
+// pre-filling each value from the provided options map. The option's
+// values list is copied through so the form can render constrained
+// options as cyclers.
 func buildEngineFields(spec engineSpec, opts map[string]string) []formField {
 	out := make([]formField, 0, len(spec.fields))
 	for _, opt := range spec.fields {
@@ -103,7 +119,12 @@ func buildEngineFields(spec engineSpec, opts map[string]string) []formField {
 				in.SetString(v)
 			}
 		}
-		out = append(out, formField{label: opt.label, in: in, mask: opt.mask})
+		out = append(out, formField{
+			label:  opt.label,
+			in:     in,
+			mask:   opt.mask,
+			values: opt.values,
+		})
 	}
 	return out
 }
@@ -153,6 +174,58 @@ func (f *connForm) sshLen() int    { return len(f.ssh) }
 // engine and rebuild the engine-specific block).
 func (f *connForm) onDriverCycler() bool {
 	return f.active == coreDriver
+}
+
+// activeField returns a pointer to the active form field, or nil
+// when the index is out of range (shouldn't happen in practice but
+// keeps the cycler branch in handle() safe).
+func (f *connForm) activeField() *formField {
+	fields := f.allFields()
+	if f.active < 0 || f.active >= len(fields) {
+		return nil
+	}
+	return fields[f.active]
+}
+
+// onEngineCycler reports whether the active field is a constrained
+// engine option (sslmode, encrypt, tls, ...) rendered as a cycler.
+// The Driver row is treated separately by onDriverCycler because
+// it has its own cycleDriver path that also rebuilds the engine
+// field block.
+func (f *connForm) onEngineCycler() bool {
+	if f.onDriverCycler() {
+		return false
+	}
+	ff := f.activeField()
+	return ff != nil && ff.isCycler()
+}
+
+// cycleFieldValue advances a cycler field through its values list
+// by delta (typically +/-1). If the current value isn't in the
+// list (e.g. an imported JSON with a custom sslmode), the cycler
+// resets to the first list entry on the first press so the user
+// always has a recovery path.
+func cycleFieldValue(ff *formField, delta int) {
+	if !ff.isCycler() {
+		return
+	}
+	cur := ff.in.String()
+	idx := -1
+	for i, v := range ff.values {
+		if v == cur {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		// Unknown current value: drop into the list at index 0 so
+		// the next key keeps cycling from a known position.
+		ff.in.SetString(ff.values[0])
+		return
+	}
+	n := len(ff.values)
+	next := (idx + delta + n) % n
+	ff.in.SetString(ff.values[next])
 }
 
 // cycleDriver replaces the current engine spec with the one at idx,
@@ -300,9 +373,17 @@ func (f *connForm) handle(k Key) (config.Connection, bool) {
 			f.cycleDriver(-1)
 			return config.Connection{}, false
 		}
+		if f.onEngineCycler() {
+			cycleFieldValue(f.activeField(), -1)
+			return config.Connection{}, false
+		}
 	case KeyRight:
 		if f.onDriverCycler() {
 			f.cycleDriver(1)
+			return config.Connection{}, false
+		}
+		if f.onEngineCycler() {
+			cycleFieldValue(f.activeField(), 1)
 			return config.Connection{}, false
 		}
 	case KeyEnter:
@@ -321,9 +402,10 @@ func (f *connForm) handle(k Key) (config.Connection, bool) {
 		}
 		return c, true
 	}
-	// Driver cycler swallows printable chars so the user doesn't
-	// accidentally type into a non-editable row.
-	if f.onDriverCycler() {
+	// Cycler rows swallow printable chars so the user doesn't
+	// accidentally type into a non-editable row (Driver has its
+	// own cycler path, engine cyclers share the same swallow).
+	if f.onDriverCycler() || f.onEngineCycler() {
 		return config.Connection{}, false
 	}
 	fields := f.allFields()
@@ -398,10 +480,19 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 		if field.mask {
 			val = strings.Repeat("*", len([]rune(val)))
 		}
-		// Driver row renders as "< current >" with cycler hints
-		// instead of a plain editable field.
+		// Cycler rows render as "< current >" instead of a plain
+		// editable field. The Driver row uses the engineSpec label
+		// (so users see "MSSQL" not "mssql"); constrained engine
+		// options render the raw value, with empty shown as
+		// "(default)" so "unset" is visibly distinct from a typo.
 		if i == coreDriver {
 			val = "< " + engineSpecs[f.driverIdx].label + " >"
+		} else if field.isCycler() {
+			display := val
+			if display == "" {
+				display = "(default)"
+			}
+			val = "< " + display + " >"
 		}
 
 		vCol := innerCol + labelW + 2
@@ -415,7 +506,7 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 		}
 		s.writeAt(lineRow, vCol, string(rs))
 
-		if i == f.active && i != coreDriver {
+		if i == f.active && i != coreDriver && !field.isCycler() {
 			cursorCol := vCol + len(rs)
 			if cursorCol > vCol+maxVal {
 				cursorCol = vCol + maxVal
@@ -503,6 +594,8 @@ func (fl *formLayer) Hints(a *app) string {
 	cycler := ""
 	if fl.f.onDriverCycler() {
 		cycler = "Lt/Rt=engine"
+	} else if fl.f.onEngineCycler() {
+		cycler = "Lt/Rt=cycle"
 	}
 	return joinHints(
 		"Tab/Dn=next",

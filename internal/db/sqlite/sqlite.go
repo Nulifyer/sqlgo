@@ -19,6 +19,16 @@ import (
 	"github.com/Nulifyer/sqlgo/internal/db"
 )
 
+// quoteSQLiteLiteral wraps s in single quotes and doubles any
+// embedded single quotes, matching SQLite's string-literal escape
+// rule. Used by the PRAGMA table_info path because PRAGMA's
+// argument must be a literal, not a bind parameter. Table names
+// come from sqlite_master (which we loaded via schemaQuery), so
+// the injection surface is low, but we escape defensively anyway.
+func quoteSQLiteLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
 const (
 	driverName = "sqlite"
 	// syntheticSchema is the name used in the explorer tree for SQLite's
@@ -60,6 +70,14 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		DriverName:   driverName,
 		Capabilities: capabilities,
 		SchemaQuery:  schemaQuery,
+		// SQLite's pragma_table_info takes a string literal, not a
+		// bind value, so we build the query with an escaped literal
+		// table name. The schema part of the TableRef is always
+		// "main" (synthetic) and is ignored here.
+		ColumnsBuilder: func(t db.TableRef) (string, []any) {
+			q := "SELECT name, type FROM pragma_table_info(" + quoteSQLiteLiteral(t.Name) + ");"
+			return q, nil
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: %w", err)

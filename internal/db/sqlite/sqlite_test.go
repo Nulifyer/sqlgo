@@ -158,3 +158,90 @@ func TestSchemaFiltersInternalObjects(t *testing.T) {
 		t.Errorf("expected view 'v_thing', got %v", seen)
 	}
 }
+
+// TestColumnsReturnsSchemaForTable covers the PRAGMA-based column
+// lookup path the shared Columns method uses through the
+// ColumnsBuilder escape hatch. Runs against an in-memory sqlite so
+// it's hermetic.
+func TestColumnsReturnsSchemaForTable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	d, _ := db.Get(driverName)
+	conn, err := d.Open(ctx, db.Config{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.Exec(ctx, `CREATE TABLE widgets (id INTEGER PRIMARY KEY, sku TEXT NOT NULL, price REAL)`); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	cols, err := conn.Columns(ctx, db.TableRef{Schema: "main", Name: "widgets"})
+	if err != nil {
+		t.Fatalf("Columns: %v", err)
+	}
+	if len(cols) != 3 {
+		t.Fatalf("len(cols) = %d, want 3 (%+v)", len(cols), cols)
+	}
+	wantNames := []string{"id", "sku", "price"}
+	for i, w := range wantNames {
+		if cols[i].Name != w {
+			t.Errorf("cols[%d].Name = %q, want %q", i, cols[i].Name, w)
+		}
+	}
+	// Type strings come back as sqlite declared types (upper-case
+	// in CREATE TABLE). sqlite preserves them verbatim.
+	if cols[0].TypeName != "INTEGER" {
+		t.Errorf("cols[0].TypeName = %q, want INTEGER", cols[0].TypeName)
+	}
+	if cols[1].TypeName != "TEXT" {
+		t.Errorf("cols[1].TypeName = %q, want TEXT", cols[1].TypeName)
+	}
+}
+
+// TestColumnsRejectsUnknownTable verifies Columns returns an empty
+// slice (not an error) for a nonexistent table -- pragma_table_info
+// simply yields zero rows in that case, which matches how the
+// editor's autocomplete wants to see "no columns available" for a
+// freshly-referenced alias that isn't a real table.
+func TestColumnsRejectsUnknownTable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	d, _ := db.Get(driverName)
+	conn, err := d.Open(ctx, db.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	cols, err := conn.Columns(ctx, db.TableRef{Schema: "main", Name: "nope"})
+	if err != nil {
+		t.Fatalf("Columns: %v", err)
+	}
+	if len(cols) != 0 {
+		t.Errorf("len(cols) = %d, want 0 for unknown table (%+v)", len(cols), cols)
+	}
+}
+
+// TestColumnsEscapesLiteral guards the single-quote escape in
+// quoteSQLiteLiteral. A table name with an embedded quote would
+// break the PRAGMA invocation (and open an injection vector) if
+// we didn't double the quote.
+func TestColumnsEscapesLiteral(t *testing.T) {
+	t.Parallel()
+	// Unit-level check on the helper itself. An integration-level
+	// check would need a table with a quote in its name, which
+	// sqlite accepts via bracketed identifiers but which nothing
+	// else in sqlgo currently produces.
+	cases := []struct{ in, want string }{
+		{"widgets", `'widgets'`},
+		{"wid'gets", `'wid''gets'`},
+		{"a'b'c", `'a''b''c'`},
+		{"", `''`},
+	}
+	for _, tc := range cases {
+		if got := quoteSQLiteLiteral(tc.in); got != tc.want {
+			t.Errorf("quoteSQLiteLiteral(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

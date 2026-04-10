@@ -122,6 +122,12 @@ type Conn interface {
 	// schema, so the explorer can render a tree. Engines without schemas
 	// (sqlite) return everything under a single synthetic schema.
 	Schema(ctx context.Context) (*SchemaInfo, error)
+	// Columns returns the ordered column list for a single table or view.
+	// Used by the editor's autocomplete to surface column names under
+	// SELECT/WHERE contexts. Implementations should be cheap enough to
+	// call on every autocomplete trigger, but the caller is expected to
+	// cache results to avoid hammering the database.
+	Columns(ctx context.Context, t TableRef) ([]Column, error)
 	// Driver returns the engine name this connection was opened with.
 	Driver() string
 	// Capabilities returns the driver's capability set. Shortcut for

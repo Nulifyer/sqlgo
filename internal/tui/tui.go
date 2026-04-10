@@ -96,6 +96,12 @@ type app struct {
 	lastQuerySQL   string    // SQL of the most recently started query (for history)
 	lastQueryStart time.Time // wall-clock start of that query
 
+	// columnCache memoizes column lists fetched by the editor's
+	// autocomplete so a Ctrl+Space in SELECT/WHERE doesn't hit
+	// the database on every keystroke. Cleared on disconnect so
+	// reconnecting to a different database surfaces fresh schema.
+	columnCache *columnCache
+
 	quit bool
 }
 
@@ -529,6 +535,9 @@ func (a *app) connectTo(c config.Connection) {
 	if a.tunnel != nil {
 		_ = a.tunnel.Close()
 	}
+	if a.columnCache != nil {
+		a.columnCache.clear()
+	}
 	a.conn = conn
 	a.tunnel = tunnel
 	cc := c
@@ -564,6 +573,12 @@ func (a *app) disconnect() {
 		a.tunnel = nil
 	}
 	a.activeConn = nil
+	// Drop cached column lookups: they belonged to the old
+	// connection's schema and would surface stale names on the
+	// next connect.
+	if a.columnCache != nil {
+		a.columnCache.clear()
+	}
 	m := a.mainLayerPtr()
 	m.table.Clear()
 	m.explorer.SetSchema(nil, db.SchemaDepthSchemas)

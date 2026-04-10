@@ -20,12 +20,48 @@ type engineSpec struct {
 
 // engineOption describes one extra field rendered under the core
 // Name/Driver/Host/Port/User/Password/Database block.
+//
+// When values is non-empty the form renders the field as a cycler
+// (Left/Right steps through values, printable chars are swallowed)
+// instead of a free-form text input. This is how we constrain
+// `sslmode`, `encrypt`, `tls`, and other enum-valued options to the
+// set their driver actually accepts, turning a cryptic DSN error
+// into an impossible-to-type input. The first entry should be the
+// empty string when "driver default" is a legitimate choice, so
+// the user can still leave the option unset.
 type engineOption struct {
-	key   string // map key in Connection.Options
-	label string // UI label
-	mask  bool   // password-like field?
-	hint  string // one-line help text shown when focused (future)
+	key    string   // map key in Connection.Options
+	label  string   // UI label
+	mask   bool     // password-like field?
+	hint   string   // one-line help text shown when focused (future)
+	values []string // non-empty => render as a cycler constrained to these values
 }
+
+// Value lists for the constrained enum options. Kept as top-level
+// vars so tests can reference them without reaching into the
+// registry slice. The empty string is the first entry on every
+// cycler so "leave it unset and take the driver default" is still
+// the zero-keystroke choice.
+var (
+	// mssqlEncryptValues mirrors what go-mssqldb parses for the
+	// `encrypt` DSN option. "true" and "false" are the modern spelling;
+	// "disable" / "strict" match other common DSNs we've seen in the
+	// wild.
+	mssqlEncryptValues = []string{"", "true", "false", "disable", "strict"}
+
+	// mssqlBoolValues covers TrustServerCertificate and similar
+	// boolean-ish MSSQL knobs.
+	mssqlBoolValues = []string{"", "true", "false"}
+
+	// postgresSSLModeValues is the full set that libpq and pgx
+	// recognize.
+	postgresSSLModeValues = []string{"", "disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
+
+	// mysqlTLSValues mirrors go-sql-driver/mysql's `tls` parameter.
+	// Custom registered configs ("custom-name") aren't in scope here;
+	// users wanting those can still edit the JSON export by hand.
+	mysqlTLSValues = []string{"", "false", "skip-verify", "preferred", "true"}
+)
 
 // engineSpecs is the registry consulted by the connection form. Drivers
 // added here show up in the cycler; drivers not listed (e.g. a
@@ -37,8 +73,8 @@ var engineSpecs = []engineSpec{
 		defaultPort: 1433,
 		defaultUser: "sa",
 		fields: []engineOption{
-			{key: "encrypt", label: "Encrypt"},
-			{key: "TrustServerCertificate", label: "TrustServerCert"},
+			{key: "encrypt", label: "Encrypt", values: mssqlEncryptValues},
+			{key: "TrustServerCertificate", label: "TrustServerCert", values: mssqlBoolValues},
 			{key: "app name", label: "App name"},
 		},
 	},
@@ -48,7 +84,7 @@ var engineSpecs = []engineSpec{
 		defaultPort: 5432,
 		defaultUser: "postgres",
 		fields: []engineOption{
-			{key: "sslmode", label: "sslmode"},
+			{key: "sslmode", label: "sslmode", values: postgresSSLModeValues},
 			{key: "sslrootcert", label: "SSL root cert"},
 			{key: "application_name", label: "App name"},
 		},
@@ -59,7 +95,7 @@ var engineSpecs = []engineSpec{
 		defaultPort: 3306,
 		defaultUser: "root",
 		fields: []engineOption{
-			{key: "tls", label: "tls"},
+			{key: "tls", label: "tls", values: mysqlTLSValues},
 			{key: "charset", label: "Charset"},
 			{key: "collation", label: "Collation"},
 		},

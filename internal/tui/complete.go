@@ -3,14 +3,11 @@ package tui
 import (
 	"sort"
 	"strings"
-
-	"github.com/Nulifyer/sqlgo/internal/db"
-	"github.com/Nulifyer/sqlgo/internal/sqltok"
 )
 
 // completionKind tags a candidate for display (so the popup can show
-// a one-letter hint next to each entry) and for ranking (keywords
-// sort last when they tie with identifier matches).
+// a one-letter hint next to each entry) and for ranking (columns
+// and identifier kinds sort before keywords).
 type completionKind int
 
 const (
@@ -18,6 +15,8 @@ const (
 	completeSchema
 	completeTable
 	completeView
+	completeColumn
+	completeAlias
 )
 
 func (k completionKind) marker() string {
@@ -30,6 +29,10 @@ func (k completionKind) marker() string {
 		return "t"
 	case completeView:
 		return "v"
+	case completeColumn:
+		return "c"
+	case completeAlias:
+		return "a"
 	}
 	return " "
 }
@@ -84,24 +87,92 @@ func (c *completionState) current() (completionItem, bool) {
 }
 
 // openCompletion builds a new popup against the word under the
-// cursor. No-op when the popup would have zero candidates (empty
-// keyword list and no schema loaded is the only way that happens).
+// cursor. The steps are:
+//
+//  1. Figure out the identifier prefix under the cursor (word
+//     before cursor plus any leading schema/alias qualifier).
+//  2. Analyze where in the SQL statement the cursor is (SELECT
+//     list / FROM target / WHERE-ish / generic) and which tables
+//     are in scope via the FROM/JOIN clause.
+//  3. Gather candidates for that context from the app (keywords,
+//     schema names, table/view names, and columns fetched from
+//     the live connection + cached per table).
+//  4. Filter by the prefix (with qualifier handling) and drop the
+//     popup onto the editor.
+//
+// A cursor inside a string literal or comment suppresses the
+// popup entirely so typing Ctrl+Space inside `'abc'` doesn't turn
+// half the string into a keyword.
 func (e *editor) openCompletion(a *app) {
 	row, col := e.buf.Cursor()
 	line := e.buf.Line(row)
-	prefix, startCol := wordBeforeCursor(line, col)
+	word, startCol := wordBeforeCursor(line, col)
+
+	// Detect a leading "qualifier." so `u.name` is parsed as
+	// qualifier="u" + word="name" with the replacement span
+	// starting at the 'n'. startCol still points at the start of
+	// the identifier half, which is what accept() wants.
+	qualifier := qualifierBeforeCursor(line, startCol)
+
+	text := e.buf.Text()
+	cursorOffset := runeOffsetOf(e.buf, row, col)
+	ctx := analyzeCursorContext(text, cursorOffset)
+	ctx.qualifier = qualifier
+	ctx.prefix = word
+	ctx.startCol = startCol
+
+	if ctx.suppress {
+		return
+	}
+
 	var items []completionItem
 	if a != nil {
-		items = filterCompletions(a.gatherCompletions(), prefix)
+		items = a.gatherCompletionsCtx(ctx)
 	}
+	items = filterCompletions(items, word)
 	if len(items) == 0 {
 		return
 	}
 	e.complete = &completionState{
 		startCol: startCol,
-		prefix:   prefix,
+		prefix:   word,
 		items:    items,
 	}
+}
+
+// runeOffsetOf converts a (row, col) position in the buffer into a
+// rune offset from the start of the text. The editor stores lines
+// as []rune, and buffer.Text() joins them with "\n" bytes, so the
+// rune offset is sum(len(line[i])+1 for i<row) + col. Kept here
+// next to its only caller.
+func runeOffsetOf(b *buffer, row, col int) int {
+	off := 0
+	for i := 0; i < row && i < b.LineCount(); i++ {
+		off += len(b.Line(i)) + 1 // +1 for the newline
+	}
+	off += col
+	return off
+}
+
+// qualifierBeforeCursor returns the identifier immediately preceding
+// a '.' that sits at startCol-1. When the character at startCol-1
+// isn't a '.', returns the empty string. Used so `u.name|` yields
+// qualifier "u" and word "name", which the column-completion path
+// then uses to narrow to u's columns.
+func qualifierBeforeCursor(line []rune, startCol int) string {
+	if startCol <= 0 || startCol > len(line) {
+		return ""
+	}
+	if line[startCol-1] != '.' {
+		return ""
+	}
+	// Walk back over the identifier that owns the dot.
+	end := startCol - 1
+	start := end
+	for start > 0 && isIdentRune(line[start-1]) {
+		start--
+	}
+	return string(line[start:end])
 }
 
 // acceptCompletion replaces the prefix under the cursor with the
@@ -127,70 +198,6 @@ func (e *editor) acceptCompletion() {
 	}
 	e.buf.InsertText(item.text)
 	e.complete = nil
-}
-
-// gatherCompletions returns every candidate sqlgo knows about for the
-// current connection: SQL keywords, plus schema / table / view names
-// from the explorer's loaded schema info. Order within each group is
-// alphabetical; filterCompletions() is responsible for ranking.
-//
-// Live on *app rather than on the editor so the editor doesn't need
-// to poke through main_layer -> explorer. Tests can build a fake app
-// with only the fields they need (explorer + nothing else) or call
-// filterCompletions() directly against a static slice.
-func (a *app) gatherCompletions() []completionItem {
-	var items []completionItem
-	for _, kw := range sqltok.Keywords() {
-		items = append(items, completionItem{text: kw, kind: completeKeyword})
-	}
-
-	// Pull the schema tree from the main layer's explorer. When no
-	// connection is active (explorer.info == nil) we still return the
-	// keyword list so Ctrl+Space does something useful right out of
-	// the gate.
-	m := a.mainLayerPtr()
-	if m == nil || m.explorer == nil || m.explorer.info == nil {
-		return items
-	}
-	info := m.explorer.info
-
-	// Collect unique schema names and identifier-only table/view
-	// names. Qualified "schema.table" forms are also emitted so a
-	// user who already typed "dbo." sees matching qualified entries.
-	seenSchemas := map[string]struct{}{}
-	var schemas []string
-	for _, t := range info.Tables {
-		if t.Schema == "" {
-			continue
-		}
-		if _, ok := seenSchemas[t.Schema]; ok {
-			continue
-		}
-		seenSchemas[t.Schema] = struct{}{}
-		schemas = append(schemas, t.Schema)
-	}
-	sort.Strings(schemas)
-	for _, s := range schemas {
-		items = append(items, completionItem{text: s, kind: completeSchema})
-	}
-
-	// Tables/views: both bare and "schema.name" forms. The bare form
-	// is what a user typing inside a FROM clause usually wants; the
-	// qualified form is handy when schemas collide.
-	for _, t := range info.Tables {
-		kind := completeTable
-		if t.Kind == db.TableKindView {
-			kind = completeView
-		}
-		items = append(items, completionItem{text: t.Name, kind: kind})
-		if t.Schema != "" {
-			items = append(items, completionItem{
-				text: t.Schema + "." + t.Name,
-				kind: kind,
-			})
-		}
-	}
-	return items
 }
 
 // filterCompletions keeps items whose text starts with prefix
