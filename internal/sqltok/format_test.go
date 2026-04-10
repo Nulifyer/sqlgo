@@ -114,6 +114,73 @@ func TestFormatMajorClausesAtBaseIndent(t *testing.T) {
 	}
 }
 
+// TestFormatSelectDistinctTopInline pins the user's requested
+// layout: "SELECT DISTINCT TOP 100" stays on one line followed by
+// an indented "*", then "FROM" on its own line, then the table,
+// then a terminating ";" on its own line at column 0. This is the
+// exact shape the Feb 2026 user report requested.
+func TestFormatSelectDistinctTopInline(t *testing.T) {
+	t.Parallel()
+	src := `SELECT DISTINCT TOP 100 * FROM [dbo].[test_notes];`
+	want := "SELECT DISTINCT TOP 100\n    *\nFROM\n    [dbo].[test_notes]\n;"
+	got := Format(src)
+	if got != want {
+		t.Errorf("format mismatch\ngot:\n%s\n---\nwant:\n%s", got, want)
+	}
+}
+
+// TestFormatSelectModifiersStayOnSelectLine covers the DISTINCT-only
+// and TOP-only variants so a regression where only the combined form
+// works gets caught.
+func TestFormatSelectModifiersStayOnSelectLine(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		src  string
+		head string
+	}{
+		{"distinct only", "SELECT DISTINCT a FROM t", "SELECT DISTINCT"},
+		{"top only", "SELECT TOP 5 a FROM t", "SELECT TOP 5"},
+		{"all only", "SELECT ALL a FROM t", "SELECT ALL"},
+		{"distinct top", "SELECT DISTINCT TOP 10 a FROM t", "SELECT DISTINCT TOP 10"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := Format(tc.src)
+			lines := splitLines(got)
+			if len(lines) == 0 || lines[0] != tc.head {
+				t.Errorf("first line = %q, want %q\nfull output:\n%s",
+					firstLine(lines), tc.head, got)
+			}
+		})
+	}
+}
+
+func firstLine(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	return lines[0]
+}
+
+// TestFormatSemicolonOnOwnLine verifies that a trailing ; lands at
+// column 0 on its own line rather than hanging off the last content
+// row of the previous clause.
+func TestFormatSemicolonOnOwnLine(t *testing.T) {
+	t.Parallel()
+	got := Format("SELECT 1 FROM t;")
+	if !hasLineStartingWith(got, ";") {
+		t.Errorf("semicolon did not land at column 0:\n%s", got)
+	}
+	// The ; must also not share a line with the table reference.
+	for _, line := range splitLines(got) {
+		if contains(line, "t;") {
+			t.Errorf("; stayed inline with table ref: %q", line)
+		}
+	}
+}
+
 // TestFormatSecondClauseResetsIndent verifies the specific bug fixed
 // by the Feb 2026 rewrite: consecutive major clauses used to stack
 // each other's indents, so FROM landed inside SELECT's column-2 item

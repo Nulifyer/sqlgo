@@ -36,8 +36,12 @@ func Format(src string) string {
 		return src
 	}
 	f := &formatter{}
-	for i, t := range tokens {
-		f.writeToken(tokens, i, t)
+	// writeToken returns the next index to resume from; usually i+1
+	// but SELECT-modifier consumption can advance farther in one
+	// call. Keeping the step as the function's return value lets the
+	// lookahead stay local to the case that cares about it.
+	for i := 0; i < len(tokens); {
+		i = f.writeToken(tokens, i)
 	}
 	return tidy(f.buf.String())
 }
@@ -105,10 +109,16 @@ func (f *formatter) itemIndent() int {
 	return f.baseIndent + indentWidth
 }
 
-func (f *formatter) writeToken(tokens []Token, i int, t Token) {
+// writeToken emits tokens[i] to the formatter and returns the index
+// the caller should resume at. Most paths return i+1, but the SELECT
+// branch can look ahead and consume modifier tokens (DISTINCT, ALL,
+// TOP <n>) inline on the SELECT line, in which case it returns the
+// index past the last consumed modifier.
+func (f *formatter) writeToken(tokens []Token, i int) int {
+	t := tokens[i]
 	switch t.Kind {
 	case Whitespace:
-		return
+		return i + 1
 	case Comment:
 		f.writeRaw(t.Text)
 		if strings.HasSuffix(t.Text, "\n") {
@@ -116,19 +126,19 @@ func (f *formatter) writeToken(tokens []Token, i int, t Token) {
 		} else {
 			f.writeRaw(" ")
 		}
-		return
+		return i + 1
 	case String:
 		f.writeRaw(t.Text)
 		f.writeRaw(" ")
-		return
+		return i + 1
 	case Number:
 		f.writeRaw(t.Text)
 		f.writeRaw(" ")
-		return
+		return i + 1
 	case Ident:
 		f.writeRaw(t.Text)
 		f.writeRaw(" ")
-		return
+		return i + 1
 	case Keyword:
 		upper := strings.ToUpper(t.Text)
 
@@ -140,12 +150,26 @@ func (f *formatter) writeToken(tokens []Token, i int, t Token) {
 			f.writeRaw(upper + " BY")
 			f.newlineTo(f.itemIndent())
 			f.currentSplit = true
-			return
+			return i + 1
 		}
 		if upper == "BY" {
 			if prev := prevKeyword(tokens, i); prev == "GROUP" || prev == "ORDER" {
-				return
+				return i + 1
 			}
+		}
+
+		// SELECT: special-cased so its modifiers (DISTINCT, ALL, TOP
+		// <n>) stay on the same line as the keyword. Without this
+		// lookahead the generic major-clause branch would push
+		// everything after "SELECT" to the item indent line,
+		// producing weird layouts like "SELECT\n    DISTINCT TOP 100 *".
+		if upper == "SELECT" {
+			f.newlineTo(f.baseIndent)
+			f.writeRaw("SELECT")
+			next := f.consumeSelectModifiers(tokens, i+1)
+			f.newlineTo(f.itemIndent())
+			f.currentSplit = true
+			return next
 		}
 
 		// Major clause: reset to baseIndent, write the keyword, then
@@ -158,7 +182,7 @@ func (f *formatter) writeToken(tokens []Token, i int, t Token) {
 			f.writeRaw(upper)
 			f.newlineTo(f.itemIndent())
 			f.currentSplit = commaSplitters[upper]
-			return
+			return i + 1
 		}
 
 		// JOIN phrase: wraps to itemIndent so joined tables line up
@@ -169,7 +193,7 @@ func (f *formatter) writeToken(tokens []Token, i int, t Token) {
 			f.writeRaw(" ")
 			// JOINs don't split the surrounding clause on commas.
 			f.currentSplit = false
-			return
+			return i + 1
 		}
 
 		// AND / OR at top level (paren depth zero) wrap to the
@@ -178,12 +202,13 @@ func (f *formatter) writeToken(tokens []Token, i int, t Token) {
 			f.newlineTo(f.itemIndent())
 			f.writeRaw(upper)
 			f.writeRaw(" ")
-			return
+			return i + 1
 		}
 
 		// Default: inline uppercase with a trailing space.
 		f.writeRaw(upper)
 		f.writeRaw(" ")
+		return i + 1
 
 	case Punct:
 		switch t.Text {
@@ -237,7 +262,14 @@ func (f *formatter) writeToken(tokens []Token, i int, t Token) {
 			f.writeRaw(")")
 			f.writeRaw(" ")
 		case ";":
+			// Semicolons sit on their own line at the base indent so
+			// the statement terminator is visually distinct from the
+			// preceding FROM / WHERE / etc content. We trim any
+			// trailing space from the previous token first, drop to
+			// a fresh line at baseIndent, then emit the ; and drop
+			// to another line at baseIndent for whatever follows.
 			f.trimTrailingSpace()
+			f.newlineTo(f.baseIndent)
 			f.writeRaw(";")
 			f.newlineTo(f.baseIndent)
 		case ".":
@@ -246,11 +278,56 @@ func (f *formatter) writeToken(tokens []Token, i int, t Token) {
 		default:
 			f.writeRaw(t.Text)
 		}
+		return i + 1
 	case Operator:
 		f.writeRaw(t.Text)
 		f.writeRaw(" ")
+		return i + 1
 	default:
 		f.writeRaw(t.Text)
+		return i + 1
+	}
+}
+
+// consumeSelectModifiers emits any DISTINCT / ALL / TOP <n> tokens
+// immediately after SELECT on the same line and returns the index of
+// the first token that isn't a recognized modifier. Whitespace
+// tokens between modifiers are skipped. TOP is followed by a number
+// argument; a bare "TOP" with no number (unusual but syntactically
+// valid in some dialects) is still emitted.
+//
+// Only a small set of modifiers is recognized. More exotic cases
+// (TOP (expr), TOP n PERCENT, TOP n WITH TIES, DISTINCTROW) fall
+// through to the normal keyword path, which isn't as pretty but
+// doesn't produce invalid SQL.
+func (f *formatter) consumeSelectModifiers(tokens []Token, start int) int {
+	i := start
+	skipWS := func() {
+		for i < len(tokens) && tokens[i].Kind == Whitespace {
+			i++
+		}
+	}
+	for {
+		skipWS()
+		if i >= len(tokens) || tokens[i].Kind != Keyword {
+			return i
+		}
+		upper := strings.ToUpper(tokens[i].Text)
+		switch upper {
+		case "DISTINCT", "ALL":
+			f.writeRaw(" " + upper)
+			i++
+		case "TOP":
+			f.writeRaw(" TOP")
+			i++
+			skipWS()
+			if i < len(tokens) && tokens[i].Kind == Number {
+				f.writeRaw(" " + tokens[i].Text)
+				i++
+			}
+		default:
+			return i
+		}
 	}
 }
 
