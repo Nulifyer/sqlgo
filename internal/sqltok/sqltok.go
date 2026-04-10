@@ -8,8 +8,8 @@
 //     Block comments that cross line boundaries are flagged on the
 //     last token of the line so the caller can carry comment state
 //     across lines if it wants.
-//   - Whole-text tokenization via Tokenize for the formatter. Handles
-//     multi-line strings and block comments correctly.
+//   - Whole-text tokenization via TokenizeText for the formatter.
+//     Handles multi-line strings and block comments correctly.
 //
 // Keyword table is a small set of ANSI/common dialect keywords. Token
 // kind for an identifier that happens to match a keyword is Keyword;
@@ -17,6 +17,7 @@
 package sqltok
 
 import (
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -39,7 +40,7 @@ const (
 
 // Token is a single lexed span. StartCol / EndCol are rune offsets
 // into the original line (for TokenizeLine) or the flattened text
-// (for Tokenize). EndCol is exclusive.
+// (for TokenizeText). EndCol is exclusive.
 type Token struct {
 	Kind     Kind
 	StartCol int
@@ -70,6 +71,18 @@ func TokenizeText(text string) []Token {
 func IsKeyword(s string) bool {
 	_, ok := keywordSet[strings.ToUpper(s)]
 	return ok
+}
+
+// Keywords returns the full list of recognized SQL keywords, sorted
+// alphabetically and already uppercase. Exposed for the editor's
+// autocomplete provider so it doesn't have to reach into keywordSet.
+func Keywords() []string {
+	out := make([]string, 0, len(keywordSet))
+	for k := range keywordSet {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // keywordSet is the recognized-keyword lookup table. Deliberately

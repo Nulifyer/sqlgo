@@ -567,6 +567,7 @@ func (m *mainLayer) queryHints(a *app) string {
 		hintIf(!hasSel, "Ctrl+V=paste"),
 		"Alt+Z/Y=undo/redo",
 		hintIf(hasText, "Alt+F=format"),
+		"Ctrl+Space=complete",
 		"F11=fullscreen",
 		hintIf(hasText, "Ctrl+L=clear"),
 	)

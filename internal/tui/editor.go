@@ -11,13 +11,22 @@ import (
 //
 // Selection comes from Shift+Arrow / Shift+Home / Shift+End, which the
 // key decoder now reports as Key.Shift. Ctrl+C copies, Ctrl+X cuts,
-// Ctrl+V pastes, Ctrl+A selects all, Ctrl+Z undo, Ctrl+Y redo.
-// Ctrl+L clears the buffer and is still handled by main_layer so it
-// can also reset status text.
+// Ctrl+V pastes, Ctrl+A selects all, Alt+Z undo, Alt+Y redo (rebound
+// from Ctrl+Z/Y because shell job control and BSD VDSUSP can eat those
+// bytes before they reach the raw tty). Ctrl+L clears the buffer and
+// is still handled by main_layer so it can also reset status text.
 type editor struct {
 	buf       *buffer
 	scrollRow int // index of first visible line
 	scrollCol int // index of first visible column
+
+	// complete is the live autocomplete popup or nil when closed.
+	// Opened by Ctrl+Space, closed by Esc / Enter / Tab accept, or
+	// by any keystroke that isn't navigation / accept / cancel. The
+	// popup is a one-shot: typing more characters after opening it
+	// closes it rather than refining the filter, so the interaction
+	// stays predictable in v1.
+	complete *completionState
 }
 
 func newEditor() *editor {
@@ -29,6 +38,43 @@ func newEditor() *editor {
 // clipboard; a nil app still works (no copy/paste) so tests can feed
 // keys without wiring a full app.
 func (e *editor) handleInsert(a *app, k Key) bool {
+	// Ctrl+Space: open the autocomplete popup against the word
+	// under the cursor. Handled first so the shortcut isn't eaten
+	// by the Ctrl+<rune> clipboard block below. Opening against an
+	// empty prefix is allowed -- it shows the unfiltered candidate
+	// list, which is still a useful "what can I type here?" hint.
+	if k.Ctrl && k.Kind == KeyRune && k.Rune == ' ' {
+		e.openCompletion(a)
+		return true
+	}
+
+	// Popup-owned keys: when the completion popup is open, Up/Down
+	// move the selection, Tab/Enter accept, Esc cancels. Any other
+	// key closes the popup first and then falls through to the
+	// normal editor handling so the keystroke still does what the
+	// user expects (typing a letter inserts it, Backspace deletes,
+	// etc). Keeping the popup strictly one-shot avoids the "prefix
+	// drift" footgun where the buffer and filter disagree after an
+	// undo/selection interaction.
+	if e.complete != nil {
+		switch k.Kind {
+		case KeyUp:
+			e.complete.moveSelection(-1)
+			return true
+		case KeyDown:
+			e.complete.moveSelection(1)
+			return true
+		case KeyEnter, KeyTab:
+			e.acceptCompletion()
+			return true
+		case KeyEsc:
+			e.complete = nil
+			return true
+		}
+		// Any other key dismisses the popup and falls through.
+		e.complete = nil
+	}
+
 	// Shift+arrow: extend selection. Handled before the plain-arrow
 	// branch so selection is the default when Shift is held. Ctrl +
 	// Shift combos extend by a word at a time.
@@ -268,6 +314,15 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 	if cursorVisible {
 		row, col := e.buf.Cursor()
 		s.placeCursor(innerRow+(row-e.scrollRow), innerCol+(col-e.scrollCol))
+	}
+
+	// Autocomplete popup sits on top of whatever the editor just
+	// drew. Anchored one row below the cursor at the prefix's start
+	// column so the list visually grows out of the word being
+	// completed. Clipped to the editor's inner rect; when there
+	// isn't enough room below the cursor, flipped above instead.
+	if e.complete != nil {
+		e.drawComplete(s, innerRow, innerCol, innerW, innerH)
 	}
 }
 

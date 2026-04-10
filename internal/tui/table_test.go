@@ -458,3 +458,133 @@ func TestTruncate(t *testing.T) {
 		}
 	}
 }
+
+// TestChopCellRunsEscape verifies that escape characters inside a
+// wrapped cell carry the escape flag through to the per-line chunks
+// so the wrap draw path can dim them the same way the non-wrap path
+// does.
+func TestChopCellRunsEscape(t *testing.T) {
+	t.Parallel()
+	// Width 6, one line, plain \n in the middle: "a\nb" expands to
+	// "a\\n b   " -- 1 + 2 + 1 content, padded to 6.
+	lines := chopCellRuns("a\nb", 6)
+	if len(lines) != 1 {
+		t.Fatalf("len(lines) = %d, want 1", len(lines))
+	}
+	row := lines[0]
+	if len(row) != 6 {
+		t.Fatalf("len(row) = %d, want 6", len(row))
+	}
+	if row[0].s != "a" || row[0].escape {
+		t.Errorf("row[0] = %+v, want plain 'a'", row[0])
+	}
+	if row[1].s != "\\" || !row[1].escape {
+		t.Errorf("row[1] = %+v, want escape '\\\\'", row[1])
+	}
+	if row[2].s != "n" || !row[2].escape {
+		t.Errorf("row[2] = %+v, want escape 'n'", row[2])
+	}
+	if row[3].s != "b" || row[3].escape {
+		t.Errorf("row[3] = %+v, want plain 'b'", row[3])
+	}
+	for i := 4; i < 6; i++ {
+		if row[i].s != " " {
+			t.Errorf("row[%d] = %+v, want blank", i, row[i])
+		}
+	}
+}
+
+// TestChopCellRunsFlushesOnEscapeBoundary makes sure an escape pair
+// that doesn't fit on the current line wraps as a unit onto the next
+// line rather than splitting across the fold.
+func TestChopCellRunsFlushesOnEscapeBoundary(t *testing.T) {
+	t.Parallel()
+	// Width 3, content "aa\nb": "aa" fills line 1, then "\\n" needs
+	// 2 cells so it flushes line 1 to exactly width 3 (pad once) and
+	// starts a new line with the escape pair.
+	lines := chopCellRuns("aa\nb", 3)
+	if len(lines) != 2 {
+		t.Fatalf("len(lines) = %d, want 2", len(lines))
+	}
+	if lines[0][0].s != "a" || lines[0][1].s != "a" || lines[0][2].s != " " {
+		t.Errorf("line 0 = %+v, want a a <blank>", lines[0])
+	}
+	if !lines[1][0].escape || lines[1][0].s != "\\" {
+		t.Errorf("line 1 slot 0 = %+v, want escape head", lines[1][0])
+	}
+	if !lines[1][1].escape || lines[1][1].s != "n" {
+		t.Errorf("line 1 slot 1 = %+v, want escape tail", lines[1][1])
+	}
+	if lines[1][2].s != "b" {
+		t.Errorf("line 1 slot 2 = %+v, want plain 'b'", lines[1][2])
+	}
+}
+
+// TestWrapRowRunsColumnAlignment verifies that wrapRowRuns pads short
+// cells to their full column width on every wrapped line so the
+// separator columns line up and highlightSpan math from the non-wrap
+// path applies unchanged.
+func TestWrapRowRunsColumnAlignment(t *testing.T) {
+	t.Parallel()
+	// Two columns, widths 3 and 3. Row content: short cell "a" and a
+	// multi-line cell "xxxyyy" (chops to "xxx" + "yyy").
+	widths := []int{3, 3}
+	cells := []string{"a", "xxxyyy"}
+	block := wrapRowRuns(cells, widths)
+	if len(block) != 2 {
+		t.Fatalf("len(block) = %d, want 2", len(block))
+	}
+	// Expected layout per line: 3 cells for col 0, " ", "|", " ", 3
+	// cells for col 1 = 9 slots total.
+	for i, line := range block {
+		if len(line) != 9 {
+			t.Fatalf("line %d len = %d, want 9", i, len(line))
+		}
+		if line[3].s != " " || line[4].s != "|" || line[5].s != " " {
+			t.Errorf("line %d separator slots = %q %q %q, want ' ' '|' ' '",
+				i, line[3].s, line[4].s, line[5].s)
+		}
+	}
+	// Line 0: "a  " | "xxx"
+	if block[0][0].s != "a" || block[0][1].s != " " || block[0][2].s != " " {
+		t.Errorf("line 0 col 0 = %+v, want 'a' padded", block[0][:3])
+	}
+	if block[0][6].s != "x" || block[0][7].s != "x" || block[0][8].s != "x" {
+		t.Errorf("line 0 col 1 = %+v, want 'xxx'", block[0][6:])
+	}
+	// Line 1: "   " | "yyy" -- the short cell must pad with blanks so
+	// separators still line up on the continuation line.
+	for i := 0; i < 3; i++ {
+		if block[1][i].s != " " {
+			t.Errorf("line 1 col 0 slot %d = %+v, want blank pad", i, block[1][i])
+		}
+	}
+	if block[1][6].s != "y" || block[1][7].s != "y" || block[1][8].s != "y" {
+		t.Errorf("line 1 col 1 = %+v, want 'yyy'", block[1][6:])
+	}
+}
+
+// TestWrapHighlightSpanMatchesNonWrap confirms that the highlight
+// column range computed from widths is the same whether the row is
+// drawn wrapped or not -- this is the invariant that lets the wrap
+// path reuse drawRunsWithHighlight's cursor-cell painting unchanged.
+func TestWrapHighlightSpanMatchesNonWrap(t *testing.T) {
+	t.Parallel()
+	widths := []int{3, 3}
+	cells := []string{"a", "xxxyyy"}
+	lo, hi := highlightSpan(widths, 1)
+	// col 0 = 3 wide, separator = 3 wide, col 1 starts at 6.
+	if lo != 6 || hi != 9 {
+		t.Fatalf("highlightSpan = [%d,%d), want [6,9)", lo, hi)
+	}
+	block := wrapRowRuns(cells, widths)
+	// Every wrapped line must have slots 6..9 inside column 1 (so
+	// the cursor highlight paints over the continuation's 'yyy' too).
+	for i, line := range block {
+		for j := lo; j < hi; j++ {
+			if line[j].cont {
+				t.Errorf("line %d slot %d is a continuation -- highlight span would miss the head", i, j)
+			}
+		}
+	}
+}
