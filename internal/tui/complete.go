@@ -17,6 +17,7 @@ const (
 	completeView
 	completeColumn
 	completeAlias
+	completeFunction
 )
 
 func (k completionKind) marker() string {
@@ -33,6 +34,8 @@ func (k completionKind) marker() string {
 		return "c"
 	case completeAlias:
 		return "a"
+	case completeFunction:
+		return "f"
 	}
 	return " "
 }
@@ -228,19 +231,29 @@ func filterCompletions(items []completionItem, prefix string) []completionItem {
 }
 
 // kindRank maps a completion kind to its sort bucket. Lower ranks
-// sort higher (appear first) in the popup.
+// sort higher (appear first) in the popup. Columns and aliases
+// outrank everything else when the cursor is in a context where
+// they're likely the answer (SELECT/WHERE); functions come next
+// because they're narrower than keywords; bare table/schema names
+// sit above keywords so FROM-position matches float up.
 func kindRank(k completionKind) int {
 	switch k {
-	case completeSchema:
+	case completeColumn:
 		return 0
-	case completeTable:
+	case completeAlias:
 		return 1
-	case completeView:
+	case completeSchema:
 		return 2
-	case completeKeyword:
+	case completeTable:
 		return 3
+	case completeView:
+		return 4
+	case completeFunction:
+		return 5
+	case completeKeyword:
+		return 6
 	}
-	return 4
+	return 7
 }
 
 // wordBeforeCursor walks the current line to the left of the cursor

@@ -59,6 +59,20 @@ type tableScope struct {
 	alias  string // empty when no explicit alias
 }
 
+// cteDef is one Common Table Expression extracted from a WITH
+// clause. columns is populated only when the user spelled out
+// the CTE's column list explicitly (`WITH cte (a, b) AS ...`);
+// otherwise the column list is empty and the completion path
+// surfaces the CTE name in FROM position but cannot list
+// columns for it. A future pass could recurse into the body
+// token span to derive columns from the subquery's SELECT list,
+// but that's a significant parsing commitment and isn't needed
+// for the common "SELECT * FROM real_table" shape.
+type cteDef struct {
+	name    string
+	columns []string
+}
+
 // completionCtx is the result of analyzing the cursor position.
 // prefix / qualifier / startCol are filled in by openCompletion
 // after analyzeCursorContext returns (the analyzer doesn't know
@@ -67,6 +81,7 @@ type tableScope struct {
 type completionCtx struct {
 	clause    clauseKind
 	inScope   []tableScope
+	ctes      []cteDef
 	qualifier string // leading "schema_or_alias." when the prefix is dotted
 	prefix    string // identifier characters under the cursor (post-dot)
 	startCol  int    // rune column in the current line where the prefix starts
@@ -134,22 +149,30 @@ func analyzeCursorContext(text string, cursorOffset int) completionCtx {
 	stmtStart, stmtEnd := statementBounds(meaningful, cursorOffset)
 	stmt := meaningful[stmtStart:stmtEnd]
 
-	// Pass 2: classify the clause using tokens in the current
-	// statement that come strictly before the cursor.
-	var pre []sqltok.Token
-	for _, t := range stmt {
-		if t.EndCol > cursorOffset {
-			break
-		}
-		pre = append(pre, t)
-	}
+	// Pass 2: classify the clause using tokens that (a) come
+	// strictly before the cursor and (b) live at the same
+	// paren depth as the cursor. Condition (b) matters because
+	// the cursor may itself be inside a CTE body or subquery --
+	// in that case we want to classify within that inner
+	// context, not the outer one. An inner SELECT shouldn't be
+	// treated as "still in the outer SELECT list".
+	pre := cursorLocalPreTokens(stmt, cursorOffset)
 	ctx.clause = classifyClause(pre)
 
 	// Pass 3: extract the FROM/JOIN table list from the ENTIRE
 	// current statement. Using the whole statement is what lets
 	// SELECT-list completion know about tables that come after
-	// the cursor in source order.
+	// the cursor in source order. Only depth-0 tokens are
+	// considered so subquery / CTE-body FROMs don't leak into
+	// the outer scope.
 	ctx.inScope = extractFromScope(stmt)
+
+	// Pass 4: extract CTE definitions from a leading WITH
+	// clause. CTEs live at depth 0 and are scanned before the
+	// outer query so their names are available under the FROM
+	// target and so qualified prefixes can return declared
+	// column lists.
+	ctx.ctes = extractCTEs(stmt)
 	return ctx
 }
 
@@ -246,6 +269,196 @@ func classifyClause(pre []sqltok.Token) clauseKind {
 	return clauseGeneric
 }
 
+// cursorLocalPreTokens returns tokens strictly before cursorOffset
+// that live at the same paren depth as the cursor. This is the
+// "local" view a SQL parser would have at the cursor position:
+// when the cursor sits inside a CTE body `WITH x AS (SELECT |)`,
+// the returned slice contains only `SELECT`, not the outer WITH
+// machinery, so classifyClause correctly reports clauseSelectList
+// for the inner SELECT.
+//
+// Algorithm: walk forward tracking depth until we reach the
+// cursor. Remember the depth at that point. Then walk again and
+// keep only pre-cursor tokens whose depth equals the cursor's.
+// Paren tokens are never kept (they just drive the depth tracker).
+func cursorLocalPreTokens(stmt []sqltok.Token, cursorOffset int) []sqltok.Token {
+	cursorDepth := 0
+	depth := 0
+	for _, t := range stmt {
+		if t.EndCol > cursorOffset {
+			cursorDepth = depth
+			break
+		}
+		if t.Kind == sqltok.Punct && t.Text == "(" {
+			depth++
+		} else if t.Kind == sqltok.Punct && t.Text == ")" {
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	var out []sqltok.Token
+	depth = 0
+	for _, t := range stmt {
+		if t.EndCol > cursorOffset {
+			break
+		}
+		if t.Kind == sqltok.Punct && t.Text == "(" {
+			depth++
+			continue
+		}
+		if t.Kind == sqltok.Punct && t.Text == ")" {
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth == cursorDepth {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// extractCTEs walks stmt looking for a top-level WITH clause and
+// returns every CTE it defines. Shape handled:
+//
+//	WITH [RECURSIVE] name1 [(col, col...)] AS ( body1 )
+//	     [, name2 [(col, col...)] AS ( body2 )] ...
+//	<main query>
+//
+// Only the outermost WITH is recognized (depth 0). The CTE body
+// tokens are skipped via paren matching rather than parsed --
+// recursively analyzing the body to derive columns is a bigger
+// commitment and isn't needed for the common "SELECT * FROM cte"
+// shape, where the user will reference the CTE by name but
+// rarely needs column lookup through it. When the CTE declares
+// an explicit column list (`WITH x (a, b) AS ...`), those
+// columns are captured so `x.a` completion works.
+func extractCTEs(stmt []sqltok.Token) []cteDef {
+	// Find the leading WITH, if any. Comments/whitespace were
+	// already stripped by the caller; look for the first
+	// non-depth-tracking keyword.
+	if len(stmt) == 0 {
+		return nil
+	}
+	depth := 0
+	start := -1
+	for i, t := range stmt {
+		if t.Kind == sqltok.Punct && t.Text == "(" {
+			depth++
+			continue
+		}
+		if t.Kind == sqltok.Punct && t.Text == ")" {
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth != 0 {
+			continue
+		}
+		if t.Kind == sqltok.Keyword && strings.EqualFold(t.Text, "WITH") {
+			start = i + 1
+			break
+		}
+		// Any other top-level keyword before WITH means no CTE.
+		if t.Kind == sqltok.Keyword {
+			return nil
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+	// Skip optional RECURSIVE.
+	if start < len(stmt) && stmt[start].Kind == sqltok.Keyword && strings.EqualFold(stmt[start].Text, "RECURSIVE") {
+		start++
+	}
+
+	var out []cteDef
+	i := start
+	for i < len(stmt) {
+		// CTE name.
+		if stmt[i].Kind != sqltok.Ident {
+			break
+		}
+		def := cteDef{name: stmt[i].Text}
+		i++
+
+		// Optional (col, col, ...) column list.
+		if i < len(stmt) && stmt[i].Kind == sqltok.Punct && stmt[i].Text == "(" {
+			i++
+			for i < len(stmt) && !(stmt[i].Kind == sqltok.Punct && stmt[i].Text == ")") {
+				if stmt[i].Kind == sqltok.Ident {
+					def.columns = append(def.columns, stmt[i].Text)
+				}
+				i++
+			}
+			if i < len(stmt) {
+				i++ // consume the ')'
+			}
+		}
+
+		// AS keyword.
+		if i >= len(stmt) || !(stmt[i].Kind == sqltok.Keyword && strings.EqualFold(stmt[i].Text, "AS")) {
+			break
+		}
+		i++
+
+		// ( body ) -- skip balanced parens.
+		if i >= len(stmt) || !(stmt[i].Kind == sqltok.Punct && stmt[i].Text == "(") {
+			break
+		}
+		depth = 1
+		i++
+		for i < len(stmt) && depth > 0 {
+			if stmt[i].Kind == sqltok.Punct && stmt[i].Text == "(" {
+				depth++
+			} else if stmt[i].Kind == sqltok.Punct && stmt[i].Text == ")" {
+				depth--
+			}
+			i++
+		}
+
+		out = append(out, def)
+
+		// Optional "," for the next CTE.
+		if i < len(stmt) && stmt[i].Kind == sqltok.Punct && stmt[i].Text == "," {
+			i++
+			continue
+		}
+		break
+	}
+	return out
+}
+
+// depthZeroTokens returns only the tokens at paren depth 0 -- i.e.
+// tokens that are NOT inside any (sub)query or function-call
+// parentheses. Used by extractFromScope so a subquery or CTE
+// body's FROM clause doesn't leak into the outer statement's
+// scope, and by classifyClause so an inner SELECT doesn't
+// confuse the outer-clause detection.
+func depthZeroTokens(stmt []sqltok.Token) []sqltok.Token {
+	out := make([]sqltok.Token, 0, len(stmt))
+	depth := 0
+	for _, t := range stmt {
+		if t.Kind == sqltok.Punct && t.Text == "(" {
+			depth++
+			continue
+		}
+		if t.Kind == sqltok.Punct && t.Text == ")" {
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth == 0 {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // extractFromScope scans stmt (the full current statement with
 // whitespace/comments already stripped) and returns every table
 // reference that appears after a FROM or JOIN keyword. Aliases
@@ -253,16 +466,17 @@ func classifyClause(pre []sqltok.Token) clauseKind {
 //
 // The parser is deliberately loose -- it accepts comma-separated
 // FROM lists, dotted schema.table forms, and optional AS -- but
-// doesn't try to handle subqueries, CTEs, or lateral joins.
-// Those can always be added later; the point is to cover the
-// common `FROM users u JOIN orders o ON ...` shape so column
-// completion has something to look up.
+// doesn't try to handle lateral joins. Subqueries and CTE bodies
+// are skipped by filtering to depth-0 tokens before the walk,
+// which keeps this simple: "FROM (SELECT ... FROM inner) x" is
+// seen as "FROM x" by the outer scope because the inner FROM
+// sits at depth 1.
 //
 // Walks the whole statement (not just the pre-cursor half) so
 // SELECT-list completion can see tables that appear later in
 // source order.
 func extractFromScope(stmt []sqltok.Token) []tableScope {
-	cur := stmt
+	cur := depthZeroTokens(stmt)
 
 	var out []tableScope
 	seen := map[string]struct{}{}
@@ -449,9 +663,17 @@ func (a *app) gatherCompletionsCtx(ctx completionCtx) []completionItem {
 	case clauseFromTarget:
 		items = append(items, a.schemaCandidates()...)
 		items = append(items, a.tableCandidates()...)
+		// CTE names declared via a leading WITH clause are
+		// valid FROM targets too. A CTE that shadows a real
+		// table name is still fine -- the filter step will
+		// show both, and the user picks whichever they meant.
+		for _, c := range ctx.ctes {
+			items = append(items, completionItem{text: c.name, kind: completeTable})
+		}
 	case clauseSelectList:
 		items = append(items, a.inScopeColumnCandidates(ctx)...)
 		items = append(items, a.aliasCandidates(ctx)...)
+		items = append(items, a.functionCandidates()...)
 		// Surface "*" as a keyword-ish candidate so typing "*"
 		// still matches it (prefix of one literal char).
 		items = append(items, completionItem{text: "*", kind: completeKeyword})
@@ -461,10 +683,13 @@ func (a *app) gatherCompletionsCtx(ctx completionCtx) []completionItem {
 	case clauseWhereish:
 		items = append(items, a.inScopeColumnCandidates(ctx)...)
 		items = append(items, a.aliasCandidates(ctx)...)
+		items = append(items, a.functionCandidates()...)
 		items = append(items, a.keywordCandidates()...)
 	default:
-		// Generic: the old v1 list.
+		// Generic: the old v1 list plus functions so users can
+		// complete `SUM(...)` at the start of a REPL session.
 		items = append(items, a.keywordCandidates()...)
+		items = append(items, a.functionCandidates()...)
 		items = append(items, a.schemaCandidates()...)
 		items = append(items, a.tableCandidates()...)
 	}
@@ -474,10 +699,37 @@ func (a *app) gatherCompletionsCtx(ctx completionCtx) []completionItem {
 // gatherQualified handles "qualifier.prefix" cases. Returns nil
 // if the qualifier didn't match anything -- the caller treats nil
 // as "fall back to the unqualified list".
+//
+// Lookup order:
+//  1. CTE name -> declared columns (CTEs shadow real tables of
+//     the same name in SQL, so they're checked first).
+//  2. Alias or bare table name in the FROM scope -> columns.
+//  3. Schema name in the loaded schema info -> tables/views.
 func (a *app) gatherQualified(ctx completionCtx) []completionItem {
 	q := ctx.qualifier
 
-	// First: alias or table name in the current FROM scope -> columns.
+	// First: CTE name -> declared columns.
+	for _, c := range ctx.ctes {
+		if !strings.EqualFold(c.name, q) {
+			continue
+		}
+		if len(c.columns) == 0 {
+			// CTE exists but has no declared column list. Return
+			// an empty slice (not nil) so the caller doesn't
+			// fall through to the in-scope lookup -- falling
+			// through would surface columns from the CTE's
+			// underlying table, which is wrong because the CTE
+			// may have remapped or renamed them.
+			return []completionItem{}
+		}
+		out := make([]completionItem, 0, len(c.columns))
+		for _, col := range c.columns {
+			out = append(out, completionItem{text: col, kind: completeColumn})
+		}
+		return out
+	}
+
+	// Second: alias or table name in the current FROM scope.
 	for _, t := range ctx.inScope {
 		match := t.alias != "" && strings.EqualFold(t.alias, q)
 		if !match {
@@ -496,7 +748,7 @@ func (a *app) gatherQualified(ctx completionCtx) []completionItem {
 		}
 	}
 
-	// Second: schema name -> tables/views in that schema.
+	// Third: schema name -> tables/views in that schema.
 	m := a.mainLayerPtr()
 	if m == nil || m.explorer == nil || m.explorer.info == nil {
 		return nil
@@ -525,6 +777,44 @@ func (a *app) keywordCandidates() []completionItem {
 	out := make([]completionItem, 0, 128)
 	for _, kw := range sqltok.Keywords() {
 		out = append(out, completionItem{text: kw, kind: completeKeyword})
+	}
+	return out
+}
+
+// sqlFunctions is the dialect-agnostic core set of SQL functions
+// surfaced in SELECT / WHERE / expression contexts. Kept
+// deliberately small and ALL-CAPS so the list is useful across
+// MSSQL, Postgres, MySQL, and SQLite without steering users
+// toward engine-specific spellings. Functions live outside
+// sqltok.Keywords() because they're not keywords in the
+// tokenizer's sense -- they're callable names that users
+// usually pair with "(".
+var sqlFunctions = []string{
+	// Aggregate.
+	"AVG", "COUNT", "MAX", "MIN", "SUM",
+	// Null handling.
+	"COALESCE", "NULLIF",
+	// String.
+	"CONCAT", "LENGTH", "LOWER", "LTRIM", "REPLACE", "RTRIM",
+	"SUBSTRING", "TRIM", "UPPER",
+	// Numeric.
+	"ABS", "CEILING", "FLOOR", "MOD", "POWER", "ROUND", "SQRT",
+	// Date/time (the subset that exists in all four dialects,
+	// usually via slightly different names -- we pick the
+	// ANSI-ish forms and trust the user to know their engine).
+	"CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "EXTRACT",
+	// Conditional.
+	"CASE", // technically a keyword too; keep it discoverable as a function-shaped construct
+	"CAST",
+}
+
+// functionCandidates returns the sqlFunctions list as completion
+// items. Returned fresh each call because gatherCompletionsCtx
+// appends to its own slice.
+func (a *app) functionCandidates() []completionItem {
+	out := make([]completionItem, 0, len(sqlFunctions))
+	for _, f := range sqlFunctions {
+		out = append(out, completionItem{text: f, kind: completeFunction})
 	}
 	return out
 }
@@ -582,15 +872,40 @@ func (a *app) tableCandidates() []completionItem {
 // completion items. Duplicates across tables are kept because
 // the user may genuinely want to see which tables have the same
 // column name (e.g. a shared "id" primary key).
+//
+// CTEs get special treatment: if an in-scope name matches a CTE
+// name (the user wrote FROM cte_name), the CTE's declared
+// columns are used instead of trying to fetch from the database,
+// which would return nothing since the CTE isn't persisted.
 func (a *app) inScopeColumnCandidates(ctx completionCtx) []completionItem {
 	var out []completionItem
 	for _, t := range ctx.inScope {
+		if cteCols, ok := ctx.lookupCTEColumns(t.name); ok {
+			for _, col := range cteCols {
+				out = append(out, completionItem{text: col, kind: completeColumn})
+			}
+			continue
+		}
 		cols := a.fetchColumnsFor(t)
 		for _, c := range cols {
 			out = append(out, completionItem{text: c.Name, kind: completeColumn})
 		}
 	}
 	return out
+}
+
+// lookupCTEColumns returns the declared columns for a CTE by
+// name, case-insensitive. The bool signals whether a CTE by
+// that name exists at all (so the caller can distinguish
+// "CTE with no declared columns" from "not a CTE, go hit the
+// driver").
+func (c *completionCtx) lookupCTEColumns(name string) ([]string, bool) {
+	for _, cte := range c.ctes {
+		if strings.EqualFold(cte.name, name) {
+			return cte.columns, true
+		}
+	}
+	return nil, false
 }
 
 // aliasCandidates surfaces the aliases and bare table names from

@@ -336,6 +336,35 @@ func TestScenarioColumnsWithPartialPrefix(t *testing.T) {
 	}
 }
 
+// TestScenarioOnClauseQualifiedAlias covers the exact case
+// "SELECT * FROM users u JOIN orders o ON u.id = o.|" -- the
+// cursor after the second qualifier in an ON clause. ON is a
+// where-ish context and "o" is an alias in scope, so the popup
+// must resolve to orders' columns, not users'.
+func TestScenarioOnClauseQualifiedAlias(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)`,
+		`CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER, total REAL)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT * FROM users u JOIN orders o ON u.id = o.|")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open after 'o.' in ON clause")
+	}
+	got := completionTextSet(e.complete.items)
+	for _, want := range []string{"id", "user_id", "total"} {
+		if !got[want] {
+			t.Errorf("missing orders column %q: %+v", want, e.complete.items)
+		}
+	}
+	if got["email"] {
+		t.Errorf("users.email leaked into o. scope: %+v", e.complete.items)
+	}
+}
+
 // TestScenarioQualifiedAliasShowsOnlyThatTablesColumns covers
 // "u." → only users columns, not orders columns, even when the
 // statement references both tables.
@@ -528,6 +557,149 @@ func TestScenarioColumnCacheAvoidsRepeatedDriverCalls(t *testing.T) {
 		if _, ok := a.columnCache.get(tableScope{name: "users"}); !ok {
 			t.Errorf("column cache miss for users after first popup")
 		}
+	}
+}
+
+// TestScenarioCTENameAvailableInOuterFrom covers CTE references:
+// WITH x AS (...) SELECT ... FROM | should surface "x" as a
+// completable table name, even though x isn't in the database.
+func TestScenarioCTENameAvailableInOuterFrom(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "WITH active_users AS (SELECT * FROM users WHERE 1=1) SELECT * FROM |")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open in FROM after CTE")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["active_users"] {
+		t.Errorf("CTE name missing from FROM popup: %+v", e.complete.items)
+	}
+}
+
+// TestScenarioCTEColumnsAvailableViaExplicitList: when the CTE
+// declares its column list `WITH cte (col1, col2) AS (...)`, the
+// analyzer should treat those names as the CTE's columns and
+// surface them under a qualified prefix.
+func TestScenarioCTEColumnsAvailableViaExplicitList(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "WITH au (uid, mail) AS (SELECT id, email FROM users) SELECT au.| FROM au")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open after 'au.'")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["uid"] || !got["mail"] {
+		t.Errorf("declared CTE columns missing: %+v", e.complete.items)
+	}
+	// Underlying table's columns should NOT be visible under the
+	// CTE alias -- the CTE remapped them.
+	if got["id"] || got["email"] {
+		t.Errorf("underlying users columns leaked through CTE: %+v", e.complete.items)
+	}
+}
+
+// TestScenarioMultipleCTEsBothRegistered covers a chained CTE
+// sequence like "WITH a AS (...), b AS (SELECT ... FROM a) ...".
+// Both names should appear as candidates in the outer FROM.
+func TestScenarioMultipleCTEsBothRegistered(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "WITH a AS (SELECT * FROM users), b AS (SELECT * FROM a) SELECT * FROM |")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["a"] || !got["b"] {
+		t.Errorf("both CTEs should be present: %+v", e.complete.items)
+	}
+}
+
+// TestScenarioFunctionsAppearInSelect covers function
+// completion: `SELECT SU| FROM users` should surface SUBSTRING
+// and SUM, not just keywords.
+func TestScenarioFunctionsAppearInSelect(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, price REAL)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT SU| FROM users")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	got := completionTextSet(e.complete.items)
+	for _, want := range []string{"SUM", "SUBSTRING"} {
+		if !got[want] {
+			t.Errorf("function %q missing: %+v", want, e.complete.items)
+		}
+	}
+}
+
+// TestScenarioFunctionsAppearInWhere confirms functions also
+// show up in WHERE-ish contexts.
+func TestScenarioFunctionsAppearInWhere(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, name TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT * FROM users WHERE UP|")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["UPPER"] {
+		t.Errorf("UPPER missing from WHERE popup: %+v", e.complete.items)
+	}
+}
+
+// TestScenarioFunctionsNotInFromTarget: functions are not valid
+// FROM targets, so they should not appear in the FROM popup.
+func TestScenarioFunctionsNotInFromTarget(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT * FROM |")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	for _, it := range e.complete.items {
+		if it.kind == completeFunction {
+			t.Errorf("function %q leaked into FROM popup", it.text)
+		}
+	}
+}
+
+// TestScenarioFunctionKindHasMarker guards the display marker so
+// a future refactor that reshuffles completionKind constants
+// doesn't silently drop the function marker.
+func TestScenarioFunctionKindHasMarker(t *testing.T) {
+	t.Parallel()
+	if got := completeFunction.marker(); got != "f" {
+		t.Errorf("completeFunction.marker() = %q, want %q", got, "f")
 	}
 }
 

@@ -59,20 +59,39 @@ func (systemClipboard) Paste() (string, error) {
 	return s, nil
 }
 
-// mapErr translates atotto's raw exec errors (missing xclip/xsel/wl-copy
-// on Linux, unavailable pbcopy on macOS) into our typed ErrUnsupported
-// so callers don't need to string-match. atotto doesn't expose its own
-// sentinel error type -- only a package-level Unsupported bool we check
-// before calling -- so this is the fallback path for runtime failures.
+// mapErr translates atotto's raw errors into ErrUnsupported so
+// callers don't need to string-match. atotto doesn't expose its
+// own sentinel error type -- only a package-level Unsupported
+// bool we check before calling -- so this is the fallback path
+// for runtime failures.
+//
+// Mapped cases:
+//   - Linux: missing xclip/xsel/wl-copy -> ErrUnsupported.
+//   - Windows: OpenClipboard() failures are surfaced as raw
+//     Win32 errors. "Access is denied" in particular fires when
+//     the current process has no interactive desktop session
+//     (bash-in-terminal on a locked workstation, non-interactive
+//     CI runs, etc). We treat those as "no clipboard for you"
+//     rather than failing the Copy outright.
 func mapErr(err error) error {
 	if err == nil {
 		return nil
 	}
 	msg := err.Error()
+	// Linux: underlying exec() failures.
 	if strings.Contains(msg, "executable file not found") ||
 		strings.Contains(msg, "xsel") ||
 		strings.Contains(msg, "xclip") ||
 		strings.Contains(msg, "wl-copy") {
+		return ErrUnsupported
+	}
+	// Windows: Win32 OpenClipboard failure modes. Matched
+	// case-insensitively because syscall error formatting
+	// varies across Windows versions and atotto wraps the raw
+	// syscall error without normalizing capitalization.
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "access is denied") ||
+		strings.Contains(lower, "openclipboard") {
 		return ErrUnsupported
 	}
 	return err
