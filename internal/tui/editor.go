@@ -4,46 +4,31 @@ import (
 	"github.com/Nulifyer/sqlgo/internal/sqltok"
 )
 
-// editor is a text-input widget wrapping a buffer and a viewport. It
-// draws inside a rect (minus a 1-cell border the caller has already
-// drawn) and handles insert-mode keys with selection + clipboard +
-// undo support. Horizontal and vertical scrolling follow the cursor.
+// editor is a text-input widget: buffer + viewport + selection +
+// clipboard + undo. Scrolls to follow cursor.
 //
-// Selection comes from Shift+Arrow / Shift+Home / Shift+End, which the
-// key decoder now reports as Key.Shift. Ctrl+C copies, Ctrl+X cuts,
-// Ctrl+V pastes, Ctrl+A selects all, Alt+Z undo, Alt+Y redo (rebound
-// from Ctrl+Z/Y because shell job control and BSD VDSUSP can eat those
-// bytes before they reach the raw tty). Ctrl+L clears the buffer and
-// is still handled by main_layer so it can also reset status text.
+// Keys: Shift+arrows select, Ctrl+C/X/V clipboard, Ctrl+A all,
+// Alt+Z/Y undo/redo (Ctrl+Z/Y eaten by shell job control / BSD
+// VDSUSP), Ctrl+Space autocomplete, Ctrl+L clear (via main_layer).
 type editor struct {
 	buf       *buffer
-	scrollRow int // index of first visible line
-	scrollCol int // index of first visible column
+	scrollRow int
+	scrollCol int
 
-	// complete is the live autocomplete popup or nil when closed.
-	// Opened by Ctrl+Space, closed by Esc / Enter / Tab accept, or
-	// by any keystroke that isn't navigation / accept / cancel. The
-	// popup is a one-shot: typing more characters after opening it
-	// closes it rather than refining the filter, so the interaction
-	// stays predictable in v1.
+	// complete is the live autocomplete popup or nil. One-shot:
+	// typing after open dismisses (no prefix refinement).
 	complete *completionState
 
-	// searchNeedle is the active find/replace substring (empty when
-	// no search is live). When non-empty the draw path paints every
-	// match in `matches` with a dim background and the one at
-	// currentMatch with a stronger highlight so the user sees where
-	// they are in the result list. Ownership: findLayer writes these
-	// fields on open / type / next / prev and clears them on close.
+	// Find/replace state. findLayer writes these; empty needle =
+	// no search. Draw paints matches with a dim bg and the
+	// current one with a stronger accent.
 	searchNeedle string
 	matches      []matchRange
-	currentMatch int // index into matches, -1 when empty
+	currentMatch int // -1 when empty
 }
 
-// matchRange is one hit from the editor's find/replace search. Row
-// is a line index in the buffer; col is the rune offset on that
-// line; length is the rune length of the match. Matches never span
-// newlines in v1 -- a multi-line find would need the find input to
-// parse \n escapes, which is a v2 concern.
+// matchRange is one find/replace hit. row/col are rune indices;
+// length is in runes. v1 matches don't cross newlines.
 type matchRange struct {
 	row    int
 	col    int
@@ -54,29 +39,19 @@ func newEditor() *editor {
 	return &editor{buf: newBuffer()}
 }
 
-// handleInsert applies a keypress in INSERT mode. Returns true if the
-// key was consumed. The app parameter gives access to the shared
-// clipboard; a nil app still works (no copy/paste) so tests can feed
-// keys without wiring a full app.
+// handleInsert applies one keypress. Returns true if consumed.
+// nil app is fine (tests); clipboard calls become no-ops.
 func (e *editor) handleInsert(a *app, k Key) bool {
-	// Ctrl+Space: open the autocomplete popup against the word
-	// under the cursor. Handled first so the shortcut isn't eaten
-	// by the Ctrl+<rune> clipboard block below. Opening against an
-	// empty prefix is allowed -- it shows the unfiltered candidate
-	// list, which is still a useful "what can I type here?" hint.
+	// Ctrl+Space: open autocomplete. Handled before Ctrl+rune
+	// clipboard block below.
 	if k.Ctrl && k.Kind == KeyRune && k.Rune == ' ' {
 		e.openCompletion(a)
 		return true
 	}
 
-	// Popup-owned keys: when the completion popup is open, Up/Down
-	// move the selection, Tab/Enter accept, Esc cancels. Any other
-	// key closes the popup first and then falls through to the
-	// normal editor handling so the keystroke still does what the
-	// user expects (typing a letter inserts it, Backspace deletes,
-	// etc). Keeping the popup strictly one-shot avoids the "prefix
-	// drift" footgun where the buffer and filter disagree after an
-	// undo/selection interaction.
+	// Popup-owned keys when open: Up/Down navigate, Enter/Tab
+	// accept, Esc cancels. Any other key dismisses and falls
+	// through so the keystroke still does its normal thing.
 	if e.complete != nil {
 		switch k.Kind {
 		case KeyUp:
@@ -92,7 +67,6 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 			e.complete = nil
 			return true
 		}
-		// Any other key dismisses the popup and falls through.
 		e.complete = nil
 	}
 
@@ -274,11 +248,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 		selR1, selC1, selR2, selC2 = e.buf.normalizedSelection()
 	}
 
-	// Find/replace highlights. matchBg paints every hit's background;
-	// currentMatchBg paints the active hit with a stronger accent so
-	// the user can tell which match Enter / replace will act on.
-	// Selection always wins over both so an active text selection
-	// stays legible on top of a match background.
+	// Find highlights. Selection wins over matches.
 	matchBg := Style{FG: ansiDefault, BG: ansiBrightBlack}
 	currentMatchBg := Style{FG: ansiDefault, BG: ansiDefaultBG, Attrs: attrReverse | attrUnderline}
 	hasSearch := e.searchNeedle != "" && len(e.matches) > 0
@@ -290,18 +260,10 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 		}
 		line := e.buf.Line(lineIdx)
 
-		// Tokenize the full line once; StartCol/EndCol index into
-		// `line` by rune so the styleForCol lookups below can reuse
-		// the rune index without a second conversion.
 		tokens := sqltok.TokenizeLine(line)
 
-		// Walk the line's runes, skipping anything before scrollCol
-		// (scrollCol is a rune offset, not a visual column -- the
-		// buffer's cursor is rune-indexed and we don't want to
-		// complicate that for the editor's sake). The first rune at
-		// or after scrollCol lands at colOut=0; each subsequent
-		// rune advances colOut by its runewidth so wide glyphs take
-		// 2 columns on screen.
+		// Walk runes from scrollCol onward. colOut advances by
+		// runewidth so wide glyphs take 2 columns.
 		colOut := 0
 		for vc := e.scrollCol; vc < len(line); vc++ {
 			r := line[vc]
@@ -355,11 +317,6 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 		s.placeCursor(innerRow+(row-e.scrollRow), innerCol+(col-e.scrollCol))
 	}
 
-	// Autocomplete popup sits on top of whatever the editor just
-	// drew. Anchored one row below the cursor at the prefix's start
-	// column so the list visually grows out of the word being
-	// completed. Clipped to the editor's inner rect; when there
-	// isn't enough room below the cursor, flipped above instead.
 	if e.complete != nil {
 		e.drawComplete(s, innerRow, innerCol, innerW, innerH)
 	}

@@ -96,10 +96,8 @@ type app struct {
 	lastQuerySQL   string    // SQL of the most recently started query (for history)
 	lastQueryStart time.Time // wall-clock start of that query
 
-	// columnCache memoizes column lists fetched by the editor's
-	// autocomplete so a Ctrl+Space in SELECT/WHERE doesn't hit
-	// the database on every keystroke. Cleared on disconnect so
-	// reconnecting to a different database surfaces fresh schema.
+	// columnCache memoizes editor autocomplete lookups.
+	// Cleared on disconnect so fresh schema wins.
 	columnCache *columnCache
 
 	quit bool
@@ -472,20 +470,14 @@ func (a *app) connectTo(c config.Connection) {
 		}
 		t, err := sshtunnel.Open(tcfg)
 		if err != nil {
-			// Trust-on-first-use: an UnknownHostError means the
-			// bastion's public key isn't in ~/.ssh/known_hosts yet.
-			// Push the trust overlay and let the user accept or
-			// reject; on accept the layer calls connectTo again
-			// with the same target.
+			// TOFU: unknown host → push trust overlay; accept
+			// retries connectTo with the same target.
 			var unknown *sshtunnel.UnknownHostError
 			if errors.As(err, &unknown) {
 				a.pushLayer(newTrustLayer(c, unknown))
 				return
 			}
-			// Key mismatch is terminal -- we refuse to prompt so an
-			// operator can't whitewash a real MITM with a keystroke.
-			// The error message already says what's wrong; just
-			// surface it on the picker so the user sees it.
+			// Key mismatch is fatal -- no override path.
 			var mismatch *sshtunnel.HostKeyMismatchError
 			if errors.As(err, &mismatch) {
 				if pl != nil {
@@ -573,9 +565,7 @@ func (a *app) disconnect() {
 		a.tunnel = nil
 	}
 	a.activeConn = nil
-	// Drop cached column lookups: they belonged to the old
-	// connection's schema and would surface stale names on the
-	// next connect.
+	// Drop cached columns -- belonged to the old schema.
 	if a.columnCache != nil {
 		a.columnCache.clear()
 	}

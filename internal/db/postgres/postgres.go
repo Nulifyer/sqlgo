@@ -1,11 +1,4 @@
-// Package postgres registers the pure-Go Postgres driver with internal/db.
-// Import it for side effects:
-//
-//	import _ "github.com/Nulifyer/sqlgo/internal/db/postgres"
-//
-// The underlying driver is github.com/jackc/pgx/v5/stdlib, pgx's
-// database/sql wrapper. pgx is pure Go, honors context cancellation at
-// the network layer, and is the modern successor to lib/pq.
+// Package postgres registers pgx/v5/stdlib. Import for side effects.
 package postgres
 
 import (
@@ -30,10 +23,6 @@ type driver struct{}
 
 func (driver) Name() string { return driverName }
 
-// capabilities is the Postgres-specific capability set. Postgres groups
-// tables under schemas, uses ANSI double-quoted identifiers, LIMIT/OFFSET
-// for row caps, honors ctx cancellation via pgx's network layer, and
-// accepts TLS knobs through the DSN (sslmode=require, etc).
 var capabilities = db.Capabilities{
 	SchemaDepth:     db.SchemaDepthSchemas,
 	LimitSyntax:     db.LimitSyntaxLimit,
@@ -62,11 +51,8 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	return conn, nil
 }
 
-// schemaQuery lists user tables and views grouped under their schema.
-// pg_catalog and information_schema are excluded because they're not
-// something users want to browse in the explorer by default. The is_view
-// column is a 0/1 int to match the shared schema scanner's expected
-// three-column shape.
+// schemaQuery: user tables/views only. Excludes pg_catalog /
+// information_schema / pg_toast% / pg_temp_%.
 const schemaQuery = `
 SELECT
     table_schema AS schema_name,
@@ -79,12 +65,7 @@ WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
 ORDER BY table_schema, table_name;
 `
 
-// columnsQuery returns a single table's columns in ordinal order.
-// The ($1, $2) placeholder style is pgx's. The second column is
-// the engine-reported type string, which ends up in
-// db.Column.TypeName -- the editor's autocomplete only needs the
-// name, but the field is populated for consistency with Query()'s
-// column metadata.
+// columnsQuery uses $1/$2 (pgx bind placeholders).
 const columnsQuery = `
 SELECT column_name, data_type
 FROM information_schema.columns
@@ -92,10 +73,7 @@ WHERE table_schema = $1 AND table_name = $2
 ORDER BY ordinal_position;
 `
 
-// buildDSN produces a postgres:// URL understood by pgx/stdlib. Options
-// from cfg.Options are passed as query parameters, so callers can set
-// sslmode=disable, application_name=sqlgo, etc without this package
-// knowing about them.
+// buildDSN produces a postgres:// URL. cfg.Options → query params.
 func buildDSN(cfg db.Config) string {
 	host := cfg.Host
 	if host == "" {

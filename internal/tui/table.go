@@ -2,8 +2,10 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -73,9 +75,27 @@ type table struct {
 }
 
 const (
-	sampleRows      = 200
-	maxBufferedRows = 100_000
+	sampleRows             = 200
+	defaultMaxBufferedRows = 100_000
 )
+
+// maxBufferedRows is the live row cap, overridable via the
+// SQLGO_ROW_CAP env var at startup. Invalid values fall back to
+// the default. Evaluated once per process (package var, not a
+// const) so tests can poke it directly.
+var maxBufferedRows = loadRowCap()
+
+func loadRowCap() int {
+	v := strings.TrimSpace(os.Getenv("SQLGO_ROW_CAP"))
+	if v == "" {
+		return defaultMaxBufferedRows
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return defaultMaxBufferedRows
+	}
+	return n
+}
 
 func newTable() *table { return &table{sortCol: -1} }
 

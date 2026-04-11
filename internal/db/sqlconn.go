@@ -7,29 +7,18 @@ import (
 	"sort"
 )
 
-// SQLOptions holds engine-specific knobs for the shared sqlConn wrapper.
-// Engine adapters build one of these and hand it to OpenSQL alongside an
-// already-opened *sql.DB.
+// SQLOptions holds engine-specific knobs for the shared sqlConn
+// wrapper. Adapters build one and pass it to OpenSQL.
 //
-// SchemaQuery runs against the *sql.DB to populate the explorer. The query
-// MUST return three columns in this order: schema name, object name, and a
-// 1=view / 0=table flag (any non-zero int = view). Engines without a
-// native schema concept (SQLite) can pass a query that synthesizes a
-// fixed placeholder schema like "main".
+// SchemaQuery must return (schema, name, is_view int). Flat-schema
+// engines synthesize a placeholder schema like "main".
 //
-// ColumnsQuery is the parameterized query the shared Columns method runs
-// to fetch one table's columns. Placeholder style varies by driver (@p1
-// for mssql, $1 for postgres, ? for mysql/sqlite), so each adapter
-// supplies its own. The query MUST accept (schema, table) as positional
-// arguments in that order and MUST return two columns: column name and
-// the engine's type-name string (nullable/empty is fine). Engines
-// without a native schema concept still receive the synthetic schema
-// name the adapter assigned in SchemaQuery (e.g. "main" for sqlite).
+// ColumnsQuery takes (schema, table) positional args and returns
+// (col_name, type_name). Placeholder style varies per driver.
 //
-// ColumnsBuilder is an escape hatch for engines whose column lookup
-// can't be expressed with positional parameters (sqlite's PRAGMA is
-// the current example -- PRAGMA table_info doesn't take bind values).
-// When set it takes precedence over ColumnsQuery.
+// ColumnsBuilder is the escape hatch for engines that can't take
+// bind values for the column lookup (sqlite PRAGMA). Takes
+// precedence over ColumnsQuery.
 type SQLOptions struct {
 	DriverName     string
 	Capabilities   Capabilities
@@ -38,11 +27,7 @@ type SQLOptions struct {
 	ColumnsBuilder func(t TableRef) (string, []any)
 }
 
-// OpenSQL wraps a stdlib *sql.DB as a db.Conn. Engine adapters build a DSN,
-// call sql.Open with the registered database/sql driver name, and hand the
-// result to OpenSQL. This keeps every adapter to a handful of lines.
-//
-// The Conn takes ownership of the *sql.DB and closes it in Close().
+// OpenSQL wraps a *sql.DB as a db.Conn. Takes ownership of sqlDB.
 func OpenSQL(ctx context.Context, sqlDB *sql.DB, opts SQLOptions) (Conn, error) {
 	if err := sqlDB.PingContext(ctx); err != nil {
 		_ = sqlDB.Close()
@@ -97,11 +82,8 @@ func (c *sqlConn) Schema(ctx context.Context) (*SchemaInfo, error) {
 	return &SchemaInfo{Tables: out}, nil
 }
 
-// Columns runs the driver's ColumnsQuery (or ColumnsBuilder, when
-// set) against the live connection and returns the ordered column
-// list for the given table. Missing configuration returns an empty
-// slice rather than an error so a driver that hasn't been updated
-// yet still satisfies the interface without breaking autocomplete.
+// Columns runs ColumnsQuery or ColumnsBuilder. Returns nil when
+// neither is configured (no error).
 func (c *sqlConn) Columns(ctx context.Context, t TableRef) ([]Column, error) {
 	var (
 		query string
@@ -152,14 +134,9 @@ func (c *sqlConn) Exec(ctx context.Context, query string, args ...any) error {
 	return nil
 }
 
-// Query starts a query and returns a streaming Rows. The returned cursor
-// keeps the underlying *sql.Rows open until Close() is called; callers
-// MUST call Close() (typically in a defer or on cancel) or the statement
-// will hold the connection indefinitely.
-//
-// Column metadata is fetched up front so the table widget can render the
-// header before any rows stream in. If column discovery fails, the cursor
-// is torn down and Query returns the error.
+// Query returns a streaming Rows. Caller MUST Close() or the
+// statement holds the connection. Column metadata is fetched up
+// front so headers render before rows stream.
 func (c *sqlConn) Query(ctx context.Context, query string) (Rows, error) {
 	rows, err := c.db.QueryContext(ctx, query)
 	if err != nil {
@@ -180,11 +157,9 @@ func (c *sqlConn) Query(ctx context.Context, query string) (Rows, error) {
 	return &sqlRows{rows: rows, cols: cols}, nil
 }
 
-// sqlRows adapts *sql.Rows to the streaming db.Rows interface. Every Scan()
-// allocates a fresh []any so callers can retain rows in a buffer (the
-// stdlib's Scan reuses destinations, which makes buffering unsafe). []byte
-// values are converted to string here so the TUI never has to worry about
-// RawBytes-like lifetime hazards.
+// sqlRows adapts *sql.Rows to db.Rows. Each Scan allocates a
+// fresh []any so callers can buffer rows safely. []byte -> string
+// to avoid RawBytes lifetime traps.
 type sqlRows struct {
 	rows   *sql.Rows
 	cols   []Column
@@ -214,9 +189,7 @@ func (r *sqlRows) Scan() ([]any, error) {
 		r.err = fmt.Errorf("scan: %w", err)
 		return nil, r.err
 	}
-	// []byte -> string for display. Drivers hand back bytes for text types
-	// (varchar, text, etc); keeping them as bytes makes rendering awkward
-	// and hides values in the TUI.
+	// []byte -> string so text columns display cleanly.
 	for i, v := range dest {
 		if b, ok := v.([]byte); ok {
 			dest[i] = string(b)
@@ -235,9 +208,7 @@ func (r *sqlRows) Err() error {
 	return r.rows.Err()
 }
 
-// Close tears down the cursor. Safe to call multiple times and safe to call
-// before any Next(). The second call is a no-op so defer + explicit cancel
-// paths both work.
+// Close tears down the cursor. Idempotent.
 func (r *sqlRows) Close() error {
 	if r.closed {
 		return nil

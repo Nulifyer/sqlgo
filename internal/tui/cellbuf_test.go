@@ -238,12 +238,11 @@ func TestWriteStyledWideRunePopulatesContinuation(t *testing.T) {
 	}
 }
 
-// TestWriteStyledCombiningMarkDropped documents the v1 compromise:
-// zero-width runes (combining marks, ZWJs) are dropped so the
-// buffer grid stays in sync with the terminal. A future revision
-// that attaches combining marks to the base cell would render
-// "cafe\u0301" as "café"; today it renders as "cafe".
-func TestWriteStyledCombiningMarkDropped(t *testing.T) {
+// TestWriteStyledCombiningMarkAttached: zero-width runes anchor
+// on the previous cell's combining slice. "cafe\u0301" renders
+// the 'e' cell carrying U+0301 as a combining mark so terminals
+// compose it into 'é'.
+func TestWriteStyledCombiningMarkAttached(t *testing.T) {
 	t.Parallel()
 	c := newCellbuf(6, 1)
 	c.writeAt(1, 1, "cafe\u0301")
@@ -253,8 +252,12 @@ func TestWriteStyledCombiningMarkDropped(t *testing.T) {
 			t.Errorf("(1,%d) = %+v, want %q", 1+i, p, r)
 		}
 	}
+	e := c.at(1, 4)
+	if len(e.combining) != 1 || e.combining[0] != '\u0301' {
+		t.Errorf("(1,4) combining = %v, want [U+0301]", e.combining)
+	}
 	if p := c.at(1, 5); p.touched {
-		t.Errorf("(1,5) unexpectedly touched (combining mark leaked): %+v", p)
+		t.Errorf("(1,5) unexpectedly touched: %+v", p)
 	}
 }
 

@@ -1,10 +1,5 @@
-// Package sqlite registers the pure-Go SQLite driver with internal/db. Import
-// it for side effects:
-//
-//	import _ "github.com/Nulifyer/sqlgo/internal/db/sqlite"
-//
-// The underlying driver is modernc.org/sqlite, a pure-Go transpilation of
-// SQLite's C sources -- so sqlgo stays a single native binary with CGO off.
+// Package sqlite registers the modernc.org/sqlite driver (pure-Go,
+// CGO-free). Import for side effects.
 package sqlite
 
 import (
@@ -19,22 +14,16 @@ import (
 	"github.com/Nulifyer/sqlgo/internal/db"
 )
 
-// quoteSQLiteLiteral wraps s in single quotes and doubles any
-// embedded single quotes, matching SQLite's string-literal escape
-// rule. Used by the PRAGMA table_info path because PRAGMA's
-// argument must be a literal, not a bind parameter. Table names
-// come from sqlite_master (which we loaded via schemaQuery), so
-// the injection surface is low, but we escape defensively anyway.
+// quoteSQLiteLiteral escapes s for PRAGMA table_info, which takes
+// a literal not a bind value. Defensive: table names come from
+// sqlite_master, not user input.
 func quoteSQLiteLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 const (
-	driverName = "sqlite"
-	// syntheticSchema is the name used in the explorer tree for SQLite's
-	// (schema-less) objects. Matches the name sqlite uses internally for
-	// the main database attachment.
-	syntheticSchema = "main"
+	driverName      = "sqlite"
+	syntheticSchema = "main" // sqlite's implicit schema name
 )
 
 func init() {
@@ -45,11 +34,6 @@ type driver struct{}
 
 func (driver) Name() string { return driverName }
 
-// capabilities is the SQLite-specific capability set. SQLite has no schema
-// layer (everything sits in a single database), uses ANSI double quotes for
-// identifiers, supports LIMIT, and -- via modernc.org/sqlite -- honors ctx
-// cancellation by calling sqlite3_interrupt between statements. No TLS
-// knobs: it's a local file.
 var capabilities = db.Capabilities{
 	SchemaDepth:     db.SchemaDepthFlat,
 	LimitSyntax:     db.LimitSyntaxLimit,
@@ -70,10 +54,6 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		DriverName:   driverName,
 		Capabilities: capabilities,
 		SchemaQuery:  schemaQuery,
-		// SQLite's pragma_table_info takes a string literal, not a
-		// bind value, so we build the query with an escaped literal
-		// table name. The schema part of the TableRef is always
-		// "main" (synthetic) and is ignored here.
 		ColumnsBuilder: func(t db.TableRef) (string, []any) {
 			q := "SELECT name, type FROM pragma_table_info(" + quoteSQLiteLiteral(t.Name) + ");"
 			return q, nil
@@ -85,11 +65,8 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	return conn, nil
 }
 
-// schemaQuery lists user tables and views from sqlite_master under a
-// synthetic "main" schema so the shared Schema scanner produces the same
-// three-column shape as the other engines. sqlite_% objects (internal
-// metadata, FTS shadow tables) are filtered out so the explorer only shows
-// user objects.
+// schemaQuery lists user tables/views under the synthetic "main"
+// schema. sqlite_% (internal metadata, FTS shadow tables) filtered.
 const schemaQuery = `
 SELECT
     'main' AS schema_name,
@@ -101,16 +78,9 @@ WHERE type IN ('table','view')
 ORDER BY name;
 `
 
-// buildDSN produces a modernc.org/sqlite DSN from cfg. SQLite has no
-// host/port/user/password; cfg.Database is the file path (empty or ":memory:"
-// means an in-memory database). cfg.Options is passed through as URI query
-// parameters, so callers can set pragmas via the driver's _pragma knob:
-//
-//	Options["_pragma"] = "journal_mode(wal)"
-//
-// Multiple pragmas are supported by repeating the key in the caller's flow;
-// since Options is a map we can't round-trip repeats here, so pass a single
-// semicolon-separated _pragma value for now (modernc.org/sqlite accepts it).
+// buildDSN converts cfg into a sqlite DSN. cfg.Database is the
+// file path; empty or ":memory:" → in-memory. cfg.Options becomes
+// URI query params (e.g. _pragma=journal_mode(wal)).
 func buildDSN(cfg db.Config) string {
 	path := strings.TrimSpace(cfg.Database)
 	if path == "" || path == ":memory:" {
@@ -119,8 +89,6 @@ func buildDSN(cfg db.Config) string {
 	if len(cfg.Options) == 0 {
 		return path
 	}
-	// URI form lets us attach query params. Forward slashes are fine on
-	// Windows because sqlite accepts them.
 	q := url.Values{}
 	for k, v := range cfg.Options {
 		q.Set(k, v)

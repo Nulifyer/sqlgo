@@ -8,25 +8,14 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// trustLayer is the modal overlay shown when an SSH tunnel open
-// returns an *UnknownHostError. It displays the host address and
-// the SHA256 fingerprint of the presented key, and asks the user
-// to accept (writes the key to ~/.ssh/known_hosts and retries the
-// connection) or reject (pops the overlay and leaves the original
-// connection attempt failed).
-//
-// Trust-on-first-use is deliberately a two-keystroke action: Enter
-// + 'y' to accept, Esc to reject. A single Enter could be hit by
-// accident, and host-key trust isn't something we want to fall
-// into on a typo.
+// trustLayer is the TOFU overlay shown on *UnknownHostError.
+// Shows SHA256 fingerprint; accept writes to ~/.ssh/known_hosts
+// and retries the connection. Two-keystroke to accept (y or
+// double-Enter) so a typo doesn't commit trust.
 type trustLayer struct {
 	target config.Connection
 	err    *sshtunnel.UnknownHostError
-
-	// armed flips to true on the first Enter; a second Enter then
-	// commits the trust. 'y' / 'n' are the explicit shortcuts and
-	// work whether or not armed is set.
-	armed  bool
+	armed  bool // first Enter arms; second commits
 	status string
 }
 
@@ -90,7 +79,6 @@ func (tl *trustLayer) Draw(a *app, c *cellbuf) {
 }
 
 func (tl *trustLayer) HandleKey(a *app, k Key) {
-	// Esc / n / N always reject, regardless of armed state.
 	if k.Kind == KeyEsc {
 		tl.reject(a)
 		return
@@ -114,14 +102,10 @@ func (tl *trustLayer) HandleKey(a *app, k Key) {
 		tl.status = "press Enter again or 'y' to confirm"
 		return
 	}
-	// Any other key disarms so an accidental key doesn't get
-	// followed by an intended Enter.
+	// Any other key disarms.
 	tl.armed = false
 }
 
-// reject pops the overlay and surfaces a friendly message on the
-// underlying layer (picker status line if the picker is still up,
-// main-view status otherwise).
 func (tl *trustLayer) reject(a *app) {
 	a.popLayer()
 	msg := fmt.Sprintf("ssh trust rejected: %s:%d", tl.err.Host, tl.err.Port)
@@ -132,9 +116,6 @@ func (tl *trustLayer) reject(a *app) {
 	a.mainLayerPtr().status = msg
 }
 
-// accept writes the host key to ~/.ssh/known_hosts and immediately
-// retries the connection. On write failure we stay on the overlay
-// and surface the error so the user can decide what to do next.
 func (tl *trustLayer) accept(a *app) {
 	if err := sshtunnel.AppendKnownHost(tl.err.Host, tl.err.Port, tl.err.Key); err != nil {
 		tl.status = "write known_hosts failed: " + err.Error()
@@ -142,20 +123,14 @@ func (tl *trustLayer) accept(a *app) {
 		return
 	}
 	a.popLayer()
-	// Surface a transient success message on the layer we're
-	// returning to, then retry the dial that triggered this
-	// overlay.
 	if pl, ok := a.topLayer().(*pickerLayer); ok {
 		pl.setStatus("ssh host trusted; reconnecting...")
-		// Flush so the retry's blocking dial doesn't leave the UI
-		// visually stuck on the old status.
 		a.draw()
 		_ = a.scr.flush()
 	}
 	a.connectTo(tl.target)
 }
 
-// Hints is the status-bar hint line for the trust layer.
 func (tl *trustLayer) Hints(a *app) string {
 	_ = a
 	return joinHints("y=trust", "n/Esc=reject")

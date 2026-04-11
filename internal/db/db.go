@@ -103,45 +103,28 @@ const (
 	LimitSyntaxSelectTop
 )
 
-// Conn is a live connection to a database. It is NOT required to be safe
-// for concurrent use; the TUI serializes queries per connection.
+// Conn is a live database connection. NOT required to be
+// concurrent-safe; the TUI serializes per connection.
 type Conn interface {
 	io.Closer
-	// Ping verifies the connection is alive.
 	Ping(ctx context.Context) error
-	// Query starts a query and returns a streaming cursor over its rows.
-	// The query is still executing when Query returns; the caller pulls
-	// results via Rows.Next()/Scan() and must call Rows.Close() when done
-	// (deferred, or on cancel).
+	// Query returns a streaming cursor. Caller MUST Close().
 	Query(ctx context.Context, sql string) (Rows, error)
-	// Exec runs a statement that does not return rows (DDL, INSERT/UPDATE/
-	// DELETE). args are positional bind values using whatever placeholder
-	// syntax the driver expects. The seed package is the primary consumer.
+	// Exec runs a non-row statement. Placeholder style is
+	// driver-specific.
 	Exec(ctx context.Context, sql string, args ...any) error
-	// Schema returns the list of user-visible tables and views, grouped by
-	// schema, so the explorer can render a tree. Engines without schemas
-	// (sqlite) return everything under a single synthetic schema.
+	// Schema returns user-visible tables/views. Flat engines
+	// return everything under a synthetic schema.
 	Schema(ctx context.Context) (*SchemaInfo, error)
-	// Columns returns the ordered column list for a single table or view.
-	// Used by the editor's autocomplete to surface column names under
-	// SELECT/WHERE contexts. Implementations should be cheap enough to
-	// call on every autocomplete trigger, but the caller is expected to
-	// cache results to avoid hammering the database.
+	// Columns returns ordered columns for one table. Callers
+	// should cache -- the editor hits this on every trigger.
 	Columns(ctx context.Context, t TableRef) ([]Column, error)
-	// Driver returns the engine name this connection was opened with.
 	Driver() string
-	// Capabilities returns the driver's capability set. Shortcut for
-	// looking up the Driver from the registry and calling its
-	// Capabilities() — kept on Conn so widgets with a Conn don't need a
-	// registry lookup.
 	Capabilities() Capabilities
 }
 
-// Rows is a forward-only cursor over a running query. The driver only
-// pulls from the network when Next() is called, so an 8M-row SELECT never
-// materializes in memory unless the caller keeps draining. Close() aborts
-// the in-flight query (via the caller's context and the underlying
-// driver's row cursor) and is idempotent.
+// Rows is a forward-only query cursor. Rows are pulled lazily
+// on Next(); Close() is idempotent and aborts the query.
 type Rows interface {
 	// Columns returns the column descriptors. Available as soon as Query
 	// returns without error; does not block on row delivery.

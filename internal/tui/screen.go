@@ -166,6 +166,9 @@ func (s *screen) flush() error {
 				r = ' '
 			}
 			s.emit.WriteRune(r)
+			for _, cm := range newC.combining {
+				s.emit.WriteRune(cm)
+			}
 			if isWideRune(r) {
 				// Terminal advances the cursor by 2 columns for a
 				// wide glyph; keep our model in sync so the next
@@ -198,7 +201,18 @@ func (s *screen) flush() error {
 // of the comparison so a stale continuation slot in prev gets caught
 // when new has a non-wideCont value (or vice versa).
 func cellsEqual(a, b *cell) bool {
-	return a.r == b.r && a.style == b.style && a.wideCont == b.wideCont
+	if a.r != b.r || a.style != b.style || a.wideCont != b.wideCont {
+		return false
+	}
+	if len(a.combining) != len(b.combining) {
+		return false
+	}
+	for i, r := range a.combining {
+		if b.combining[i] != r {
+			return false
+		}
+	}
+	return true
 }
 
 // writeStyleTransition emits the SGR sequence to move the terminal pen

@@ -1,20 +1,12 @@
-// Package sshtunnel opens an SSH jump connection and runs a loopback
-// TCP listener that forwards every accepted connection to a target
-// address reachable from the SSH host. This lets sqlgo talk to a
-// database behind a bastion without every engine adapter growing its
-// own SSH wiring: the tunnel rewrites the target address to
-// 127.0.0.1:<local-port>, and the driver's DSN sees a plain local
-// socket.
+// Package sshtunnel opens an SSH jump connection and forwards a
+// loopback listener to a target reachable from the SSH host. The
+// driver's DSN sees a plain local socket; every engine adapter
+// gets SSH support for free.
 //
-// Auth: key file takes precedence over password when both are set,
-// matching the form's contract.
-//
-// Host key verification is backed by ~/.ssh/known_hosts (see
-// knownhosts.go). Unknown hosts return *UnknownHostError so the
-// caller can prompt the user for trust-on-first-use and then
-// retry Open after AppendKnownHost. Key mismatches return
-// *HostKeyMismatchError which is NOT recoverable inside this
-// package -- the operator has to edit known_hosts by hand.
+// Auth: key file > password. Host keys verified against
+// ~/.ssh/known_hosts (see knownhosts.go). Unknown hosts return
+// *UnknownHostError (caller prompts + retries). Mismatches return
+// *HostKeyMismatchError (fatal, no override).
 package sshtunnel
 
 import (
@@ -29,9 +21,8 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Config describes what to tunnel. TargetHost/TargetPort are the
-// database host and port as reachable *from the SSH host*, not from
-// the local machine. SSH auth is password or key file (key wins).
+// Config describes a tunnel. TargetHost/TargetPort are reachable
+// from the SSH host, not from the local machine.
 type Config struct {
 	SSHHost     string
 	SSHPort     int
@@ -43,10 +34,8 @@ type Config struct {
 	TargetPort int
 }
 
-// Tunnel is an active jump connection. LocalHost/LocalPort give the
-// loopback address the caller should dial instead of the real target;
-// Close tears down the listener, the accept loop, and the underlying
-// SSH client.
+// Tunnel is an active jump connection. Dial LocalHost:LocalPort
+// instead of the real target. Close tears down everything.
 type Tunnel struct {
 	LocalHost string
 	LocalPort int
@@ -58,10 +47,9 @@ type Tunnel struct {
 	closed   bool
 }
 
-// Open establishes the SSH client, starts the local listener, and
-// returns once the tunnel is ready to accept connections. Any error
-// tears down whatever was already set up so the caller never sees a
-// half-open tunnel.
+// Open dials the SSH server, starts the local listener, and
+// returns a Tunnel ready to forward. Errors tear down any
+// partial state.
 func Open(cfg Config) (*Tunnel, error) {
 	if cfg.SSHHost == "" {
 		return nil, errors.New("ssh tunnel: empty ssh host")
@@ -93,9 +81,8 @@ func Open(cfg Config) (*Tunnel, error) {
 	sshAddr := net.JoinHostPort(cfg.SSHHost, strconv.Itoa(cfg.SSHPort))
 	client, err := ssh.Dial("tcp", sshAddr, clientCfg)
 	if err != nil {
-		// Unwrap so callers that type-check for *UnknownHostError or
-		// *HostKeyMismatchError see the sentinels directly instead of
-		// having to peel a wrapper off every dial error.
+		// Surface the known-host sentinels unwrapped so callers
+		// can type-check without peeling an fmt.Errorf wrapper.
 		var unknown *UnknownHostError
 		if errors.As(err, &unknown) {
 			return nil, unknown
@@ -107,8 +94,7 @@ func Open(cfg Config) (*Tunnel, error) {
 		return nil, fmt.Errorf("ssh dial %s: %w", sshAddr, err)
 	}
 
-	// Listen on an ephemeral loopback port. 127.0.0.1 specifically so
-	// the forwarded port isn't exposed on the LAN.
+	// Loopback-only so the forwarded port isn't exposed on the LAN.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		_ = client.Close()
@@ -127,8 +113,7 @@ func Open(cfg Config) (*Tunnel, error) {
 	return t, nil
 }
 
-// Close shuts down the listener and SSH client. Safe to call multiple
-// times. Returns the first underlying error, if any.
+// Close tears down the listener and SSH client. Idempotent.
 func (t *Tunnel) Close() error {
 	t.mu.Lock()
 	if t.closed {
@@ -149,18 +134,15 @@ func (t *Tunnel) Close() error {
 	return firstErr
 }
 
-// acceptLoop accepts local connections and hands each one to a pair
-// of io.Copy goroutines that shuffle bytes between the local socket
-// and the SSH-forwarded remote socket.
+// acceptLoop shuffles bytes between each accepted local socket
+// and an SSH-forwarded remote socket.
 func (t *Tunnel) acceptLoop(targetHost string, targetPort int) {
 	defer t.wg.Done()
 	targetAddr := net.JoinHostPort(targetHost, strconv.Itoa(targetPort))
 	for {
 		local, err := t.listener.Accept()
 		if err != nil {
-			// Listener closed (via Close) or the OS killed it. Either
-			// way, exit the loop cleanly -- there's nothing to log.
-			return
+			return // listener closed
 		}
 		t.wg.Add(1)
 		go t.handleConn(local, targetAddr)
@@ -188,11 +170,8 @@ func (t *Tunnel) handleConn(local net.Conn, targetAddr string) {
 	<-done
 }
 
-// buildAuth constructs the ssh.AuthMethod slice from the config. Key
-// file takes precedence over password when both are set. An empty
-// auth set is an error -- we won't fall back to ssh-agent silently
-// because that would be surprising when neither the form nor the
-// config mention it.
+// buildAuth returns ssh.AuthMethod from cfg. Key > password.
+// Empty auth is an error (no silent ssh-agent fallback).
 func buildAuth(cfg Config) ([]ssh.AuthMethod, error) {
 	var auth []ssh.AuthMethod
 	if cfg.SSHKeyPath != "" {

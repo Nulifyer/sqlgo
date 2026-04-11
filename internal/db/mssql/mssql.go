@@ -1,7 +1,5 @@
-// Package mssql registers the MSSQL driver with internal/db. Import it for
-// side effects:
-//
-//	import _ "github.com/Nulifyer/sqlgo/internal/db/mssql"
+// Package mssql registers the go-mssqldb driver. Import for
+// side effects.
 package mssql
 
 import (
@@ -26,9 +24,6 @@ type driver struct{}
 
 func (driver) Name() string { return driverName }
 
-// capabilities is the MSSQL-specific capability set. MSSQL uses T-SQL's
-// SELECT TOP N, bracket-quoted identifiers, and go-mssqldb honors context
-// cancellation at the network layer (pure-Go, no cgo).
 var capabilities = db.Capabilities{
 	SchemaDepth:     db.SchemaDepthSchemas,
 	LimitSyntax:     db.LimitSyntaxSelectTop,
@@ -57,9 +52,7 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	return conn, nil
 }
 
-// schemaQuery lists tables and views from INFORMATION_SCHEMA, filtering out
-// the built-in system schemas so the explorer only shows user objects. The
-// third column is a 0/1 flag (1 = view) to match the shared schema scanner.
+// schemaQuery: user tables/views only. Excludes sys/INFORMATION_SCHEMA.
 const schemaQuery = `
 SELECT
 	TABLE_SCHEMA AS [schema],
@@ -70,8 +63,7 @@ WHERE TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA')
 ORDER BY TABLE_SCHEMA, TABLE_NAME;
 `
 
-// columnsQuery returns a single table's columns in ordinal order.
-// go-mssqldb's sqlserver:// DSN uses @p1/@p2 named parameters.
+// columnsQuery uses @p1/@p2 (go-mssqldb named placeholders).
 const columnsQuery = `
 SELECT COLUMN_NAME, DATA_TYPE
 FROM INFORMATION_SCHEMA.COLUMNS
@@ -79,10 +71,7 @@ WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2
 ORDER BY ORDINAL_POSITION;
 `
 
-// buildDSN produces a sqlserver:// URL understood by go-mssqldb.
-// Connection options from cfg.Options are passed as query parameters, so
-// callers can set e.g. "encrypt=disable" or "TrustServerCertificate=true"
-// without this package knowing about them.
+// buildDSN produces a sqlserver:// URL. cfg.Options → query params.
 func buildDSN(cfg db.Config) string {
 	host := cfg.Host
 	if host == "" {

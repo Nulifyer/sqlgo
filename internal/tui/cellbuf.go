@@ -67,12 +67,13 @@ const (
 type cell struct {
 	r     rune
 	style Style
-	// legacy alias: the screen flush diff path previously read p.fg, and
-	// a handful of tests compare it directly. Keep it in sync with
-	// style.FG so the old accessors don't have to change.
-	fg       int
-	touched  bool
-	wideCont bool // right half of a wide glyph placed by the cell to the left
+	fg    int
+	// combining holds zero-width runes (combining marks, ZWJ) that
+	// attach to r. Emitted after r during flush so "cafe" + U+0301
+	// renders as "café". nil for the common case.
+	combining []rune
+	touched   bool
+	wideCont  bool
 }
 
 // cellbuf is a rectangular grid of cells. Layers draw into one each frame
@@ -169,7 +170,18 @@ func (c *cellbuf) writeStyled(row, col int, s string, st Style) {
 		w := runeDisplayWidth(r)
 		switch w {
 		case 0:
-			// Combining mark or zero-width glyph; drop it for now.
+			// Combining mark / ZWJ: attach to the previous cell
+			// (the last narrow rune written, or the head of a
+			// wide glyph). If no base cell exists yet the mark
+			// is dropped -- leading combining marks have no
+			// anchor.
+			if p := c.at(row, col-1); p != nil && p.r != 0 && !p.wideCont {
+				p.combining = append(p.combining, r)
+			} else if p := c.at(row, col-2); p != nil && p.r != 0 {
+				// Wide glyph case: combining mark anchors on
+				// the head two cells back.
+				p.combining = append(p.combining, r)
+			}
 			continue
 		case 2:
 			// Head cell with the rune.

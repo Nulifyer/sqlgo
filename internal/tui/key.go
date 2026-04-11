@@ -81,12 +81,8 @@ func (kr *keyReader) Read() (Key, error) {
 	case b == 0x7f || b == 0x08:
 		return Key{Kind: KeyBackspace}, nil
 	case b == 0x00:
-		// 0x00 is historically both Ctrl+@ and Ctrl+Space on ASCII
-		// terminals. Every modern terminal emulator I care about
-		// emits it for Ctrl+Space, and Space is vastly more useful
-		// as an editor shortcut (autocomplete), so we decode it as
-		// Ctrl+Space. Callers that wanted Ctrl+@ lose nothing they
-		// were using.
+		// 0x00 is historically both Ctrl+@ and Ctrl+Space. Decode
+		// as Ctrl+Space -- far more useful as an editor shortcut.
 		return Key{Kind: KeyRune, Rune: ' ', Ctrl: true}, nil
 	case b < 0x20:
 		// Ctrl+<letter>: 0x01..0x1a maps to a..z

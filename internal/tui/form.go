@@ -9,26 +9,19 @@ import (
 	"github.com/Nulifyer/sqlgo/internal/config"
 )
 
-// connForm is the add/edit form for a single Connection. Fields are
-// laid out one per row inside a centered box; Tab / Shift+Tab / Up /
-// Down move between fields, Enter on the last field (or Ctrl+S
-// anywhere) saves.
-//
-// Field layout is composed at runtime: the fixed core fields
-// (Name/Driver/Host/Port/User/Password/Database) sit on top, followed
-// by engine-specific options (from engineSpecs), followed by the SSH
-// tunnel block. Changing the Driver cycler rebuilds the engine-specific
-// section while preserving the values of any matching keys.
+// connForm is the add/edit form. Layout: fixed core fields, then
+// engine-specific options, then SSH block. Tab/Up/Down to move,
+// Enter/Ctrl+S to save. Driver cycle rebuilds the engine block.
 type connForm struct {
 	title        string
-	originalName string // non-empty on edit; passed to SaveConnection as oldName
+	originalName string // edit target; passed to SaveConnection as oldName
 
-	fixed     []formField // Name..Database core fields
-	driverIdx int         // index into engineSpecs for the current driver
-	engine    []formField // engine-specific options (one per engineSpec.fields entry)
-	ssh       []formField // SSH tunnel fields
+	fixed     []formField
+	driverIdx int
+	engine    []formField
+	ssh       []formField
 
-	active int // index across the flattened field list (fixedLen + engineLen + sshLen)
+	active int
 	status string
 }
 
@@ -36,24 +29,15 @@ type formField struct {
 	label string
 	in    *input
 	mask  bool
-	// values, when non-nil, constrains this field to a fixed set of
-	// choices. The form renders the field as a cycler (like the
-	// Driver row) and Left/Right step through values; typing is
-	// swallowed. An imported value that isn't in the list is
-	// treated as "unknown" and the cycler jumps to the list's
-	// first entry on the first Left/Right press so the user can
-	// recover into a valid state without retyping.
+	// values, when non-nil, constrains the field to a fixed set.
+	// Renders as a cycler; Left/Right steps; typing is swallowed.
+	// Imported out-of-set values jump to values[0] on first press.
 	values []string
 }
 
-// isCycler reports whether this field is constrained to a fixed
-// value set (Driver row, plus any engineOption that declares
-// values). Drives the handle/draw branching that treats cyclers as
-// non-editable.
 func (ff *formField) isCycler() bool { return len(ff.values) > 0 }
 
-// fixed core field indices. Kept as constants so the toConnection
-// reader doesn't hard-code magic numbers.
+// Fixed field indices.
 const (
 	coreName = iota
 	coreDriver
@@ -66,9 +50,6 @@ const (
 )
 
 func newConnForm(title string, c *config.Connection) *connForm {
-	// Pick a starting spec from c (edit) or the first registered entry
-	// (add). This drives defaultPort / defaultUser and which
-	// engine-specific fields exist.
 	driver := "mssql"
 	if c != nil && c.Driver != "" {
 		driver = c.Driver
@@ -106,10 +87,8 @@ func newConnForm(title string, c *config.Connection) *connForm {
 	return f
 }
 
-// buildEngineFields turns the spec's declared options into formFields,
-// pre-filling each value from the provided options map. The option's
-// values list is copied through so the form can render constrained
-// options as cyclers.
+// buildEngineFields turns spec.fields into formFields pre-filled
+// from opts. Cycler values are copied through.
 func buildEngineFields(spec engineSpec, opts map[string]string) []formField {
 	out := make([]formField, 0, len(spec.fields))
 	for _, opt := range spec.fields {
@@ -129,9 +108,8 @@ func buildEngineFields(spec engineSpec, opts map[string]string) []formField {
 	return out
 }
 
-// buildSSHFields is the SSH tunnel block. Password and key path are
-// mutually exclusive at dial time (key wins) but the form surfaces both
-// so the user can store either.
+// buildSSHFields is the SSH block. Password/key both shown;
+// key wins at dial time if set.
 func buildSSHFields(t config.SSHTunnel) []formField {
 	port := ""
 	if t.Port != 0 {
@@ -146,9 +124,7 @@ func buildSSHFields(t config.SSHTunnel) []formField {
 	}
 }
 
-// allFields returns every field in rendering order: fixed core first,
-// then engine options, then SSH tunnel. Used by navigation and the
-// draw loop so the active index maps 1:1 to a single flat list.
+// allFields returns all fields flat: fixed, engine, ssh.
 func (f *connForm) allFields() []*formField {
 	out := make([]*formField, 0, len(f.fixed)+len(f.engine)+len(f.ssh))
 	for i := range f.fixed {
@@ -163,22 +139,16 @@ func (f *connForm) allFields() []*formField {
 	return out
 }
 
-// fixedLen / engineLen / sshLen give the sub-list sizes the navigation
-// code uses to decide whether the cursor is on the Driver cycler.
 func (f *connForm) fixedLen() int  { return len(f.fixed) }
 func (f *connForm) engineLen() int { return len(f.engine) }
 func (f *connForm) sshLen() int    { return len(f.ssh) }
 
-// onDriverCycler reports whether the active field is the Driver row,
-// which has special cycler behavior (Left/Right change the selected
-// engine and rebuild the engine-specific block).
+// onDriverCycler: active field is Driver row (Left/Right changes
+// engine + rebuilds).
 func (f *connForm) onDriverCycler() bool {
 	return f.active == coreDriver
 }
 
-// activeField returns a pointer to the active form field, or nil
-// when the index is out of range (shouldn't happen in practice but
-// keeps the cycler branch in handle() safe).
 func (f *connForm) activeField() *formField {
 	fields := f.allFields()
 	if f.active < 0 || f.active >= len(fields) {
@@ -187,11 +157,8 @@ func (f *connForm) activeField() *formField {
 	return fields[f.active]
 }
 
-// onEngineCycler reports whether the active field is a constrained
-// engine option (sslmode, encrypt, tls, ...) rendered as a cycler.
-// The Driver row is treated separately by onDriverCycler because
-// it has its own cycleDriver path that also rebuilds the engine
-// field block.
+// onEngineCycler: active field is a constrained engine option.
+// Driver row handled separately by onDriverCycler.
 func (f *connForm) onEngineCycler() bool {
 	if f.onDriverCycler() {
 		return false
@@ -200,11 +167,8 @@ func (f *connForm) onEngineCycler() bool {
 	return ff != nil && ff.isCycler()
 }
 
-// cycleFieldValue advances a cycler field through its values list
-// by delta (typically +/-1). If the current value isn't in the
-// list (e.g. an imported JSON with a custom sslmode), the cycler
-// resets to the first list entry on the first press so the user
-// always has a recovery path.
+// cycleFieldValue steps a cycler by delta with wrap-around.
+// Unknown current values drop to values[0] on first press.
 func cycleFieldValue(ff *formField, delta int) {
 	if !ff.isCycler() {
 		return
@@ -218,8 +182,6 @@ func cycleFieldValue(ff *formField, delta int) {
 		}
 	}
 	if idx < 0 {
-		// Unknown current value: drop into the list at index 0 so
-		// the next key keeps cycling from a known position.
 		ff.in.SetString(ff.values[0])
 		return
 	}
@@ -228,9 +190,9 @@ func cycleFieldValue(ff *formField, delta int) {
 	ff.in.SetString(ff.values[next])
 }
 
-// cycleDriver replaces the current engine spec with the one at idx,
-// rebuilds the engine-specific field block preserving any values that
-// share keys across engines, and updates the Driver input.
+// cycleDriver swaps the engine spec, rebuilds engine fields
+// preserving shared-key values, and resets port/user to the new
+// defaults only if they still match the prior defaults.
 func (f *connForm) cycleDriver(delta int) {
 	n := len(engineSpecs)
 	if n == 0 {
@@ -240,9 +202,6 @@ func (f *connForm) cycleDriver(delta int) {
 	if newIdx == f.driverIdx {
 		return
 	}
-	// Capture current option values into a map so any keys shared
-	// across engine specs (e.g. a hypothetical "charset" on two
-	// drivers) round-trip without the user retyping.
 	prior := map[string]string{}
 	priorSpec := engineSpecs[f.driverIdx]
 	for i, opt := range priorSpec.fields {
@@ -254,9 +213,6 @@ func (f *connForm) cycleDriver(delta int) {
 	newSpec := engineSpecs[newIdx]
 	f.engine = buildEngineFields(newSpec, prior)
 	f.fixed[coreDriver].in.SetString(newSpec.driver)
-	// Reset port/user to the new engine's defaults only if they still
-	// match the prior engine's defaults -- preserves any custom value
-	// the user typed.
 	priorPort := strconv.Itoa(priorSpec.defaultPort)
 	if f.fixed[corePort].in.String() == priorPort || f.fixed[corePort].in.String() == "" || f.fixed[corePort].in.String() == "0" {
 		f.fixed[corePort].in.SetString(strconv.Itoa(newSpec.defaultPort))
@@ -266,9 +222,7 @@ func (f *connForm) cycleDriver(delta int) {
 	}
 }
 
-// toConnection reads the form values into a config.Connection. Returns
-// an error with a human-readable reason if required fields are missing
-// or the port isn't a number.
+// toConnection validates the form into a config.Connection.
 func (f *connForm) toConnection() (config.Connection, error) {
 	name := strings.TrimSpace(f.fixed[coreName].in.String())
 	driver := strings.TrimSpace(f.fixed[coreDriver].in.String())
@@ -284,9 +238,8 @@ func (f *connForm) toConnection() (config.Connection, error) {
 	if driver == "" {
 		return config.Connection{}, errSimple("driver is required")
 	}
-	// sqlite uses a file path in Database and has no host/port, so we
-	// relax the host requirement when the current engine explicitly
-	// declares defaultPort == 0.
+	// sqlite uses cfg.Database as a file path; defaultPort==0 marks
+	// engines that don't need host.
 	spec := engineSpecFor(driver)
 	if host == "" && spec.defaultPort != 0 {
 		return config.Connection{}, errSimple("host is required")
@@ -358,8 +311,7 @@ func (f *connForm) prevField() {
 	f.active = (f.active - 1 + n) % n
 }
 
-// handle processes a key in the form. Returns (c, submit) where submit
-// is true when the caller should persist the connection.
+// handle returns (c, submit) where submit=true means persist c.
 func (f *connForm) handle(k Key) (config.Connection, bool) {
 	switch k.Kind {
 	case KeyTab, KeyDown:
@@ -402,9 +354,7 @@ func (f *connForm) handle(k Key) (config.Connection, bool) {
 		}
 		return c, true
 	}
-	// Cycler rows swallow printable chars so the user doesn't
-	// accidentally type into a non-editable row (Driver has its
-	// own cycler path, engine cyclers share the same swallow).
+	// Cycler rows swallow printable chars (non-editable).
 	if f.onDriverCycler() || f.onEngineCycler() {
 		return config.Connection{}, false
 	}
@@ -424,9 +374,7 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 	}
 
 	fields := f.allFields()
-	// Dynamic height: one row per field + title + SSH section header
-	// + status + padding.
-	boxH := len(fields) + 8
+	boxH := len(fields) + 8 // one row per field + chrome
 	if boxH > termH-2 {
 		boxH = termH - 2
 	}
@@ -447,8 +395,7 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 	innerW := boxW - 4
 	fieldTop := row + 2
 
-	// Scroll the visible window so the active field stays in view when
-	// the form is taller than the terminal.
+	// Scroll active field into view on short terminals.
 	bodyH := boxH - 4
 	scroll := 0
 	if f.active >= bodyH {
@@ -480,11 +427,7 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 		if field.mask {
 			val = strings.Repeat("*", len([]rune(val)))
 		}
-		// Cycler rows render as "< current >" instead of a plain
-		// editable field. The Driver row uses the engineSpec label
-		// (so users see "MSSQL" not "mssql"); constrained engine
-		// options render the raw value, with empty shown as
-		// "(default)" so "unset" is visibly distinct from a typo.
+		// Cycler rows render "< value >". Empty → "(default)".
 		if i == coreDriver {
 			val = "< " + engineSpecs[f.driverIdx].label + " >"
 		} else if field.isCycler() {
@@ -530,15 +473,15 @@ func padRightString(s string, w int) string {
 	return s
 }
 
-// errSimple is a tiny error type so we don't have to import "errors" or
-// "fmt.Errorf" for a single-string message.
+// simpleErr is a string-only error type. Avoids importing errors
+// or fmt.Errorf for the form's one-line messages.
 type simpleErr string
 
 func (e simpleErr) Error() string { return string(e) }
 
 func errSimple(s string) error { return simpleErr(s) }
 
-// formLayer adapts connForm to the Layer interface.
+// formLayer adapts connForm to Layer.
 type formLayer struct {
 	f *connForm
 }
@@ -560,8 +503,6 @@ func (fl *formLayer) HandleKey(a *app, k Key) {
 	if !submit {
 		return
 	}
-	// Persist via the app helper, which routes passwords through the
-	// OS keyring when available.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	usedKeyring, err := a.persistConnection(ctx, fl.f.originalName, c)
@@ -585,9 +526,7 @@ func (fl *formLayer) HandleKey(a *app, k Key) {
 	}
 }
 
-// Hints builds the footer hint line for the add/edit form. Save is
-// only shown when the fields actually parse; otherwise Enter wouldn't
-// advance.
+// Hints: Save only shown when toConnection parses.
 func (fl *formLayer) Hints(a *app) string {
 	_ = a
 	_, canSave := fl.f.toConnection()
