@@ -526,9 +526,10 @@ func TestScenarioNoConnectionStillGivesKeywords(t *testing.T) {
 	if e.complete == nil {
 		t.Fatal("popup should open with keywords-only list")
 	}
+	// Lowercase prefix → lowercase keyword.
 	got := completionTextSet(e.complete.items)
-	if !got["SELECT"] {
-		t.Errorf("SELECT missing from no-connection popup: %+v", e.complete.items)
+	if !got["select"] {
+		t.Errorf("select missing from no-connection popup: %+v", e.complete.items)
 	}
 }
 
@@ -626,6 +627,248 @@ func TestScenarioMultipleCTEsBothRegistered(t *testing.T) {
 	got := completionTextSet(e.complete.items)
 	if !got["a"] || !got["b"] {
 		t.Errorf("both CTEs should be present: %+v", e.complete.items)
+	}
+}
+
+// TestScenarioSubqueryFromAliasColumns: FROM (subquery) alias
+// should derive columns from the subquery's SELECT list so
+// `alias.col` completes.
+func TestScenarioSubqueryFromAliasColumns(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT x.| FROM (SELECT id, email FROM users) x")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open after 'x.'")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["id"] || !got["email"] {
+		t.Errorf("derived subquery cols missing: %+v", e.complete.items)
+	}
+}
+
+// TestScenarioSubqueryFromAliasWithAS covers "FROM (...) AS x"
+// form (explicit AS keyword).
+func TestScenarioSubqueryFromAliasWithAS(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT x.| FROM (SELECT id FROM users) AS x")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["id"] {
+		t.Errorf("subquery col missing: %+v", e.complete.items)
+	}
+}
+
+// TestScenarioSubqueryAliasColumnAlias derives the user's AS
+// alias in the inner SELECT, not the original column name.
+func TestScenarioSubqueryAliasColumnAlias(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT x.| FROM (SELECT id AS uid, email AS mail FROM users) x")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["uid"] || !got["mail"] {
+		t.Errorf("column aliases missing: %+v", e.complete.items)
+	}
+	if got["id"] || got["email"] {
+		t.Errorf("original column names leaked through alias: %+v", e.complete.items)
+	}
+}
+
+// TestScenarioCTEBodyColumnDerivation: WITH x AS (SELECT id,
+// email FROM users) has no explicit column list, so columns
+// should derive from the body SELECT.
+func TestScenarioCTEBodyColumnDerivation(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "WITH x AS (SELECT id, email FROM users) SELECT x.| FROM x")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["id"] || !got["email"] {
+		t.Errorf("derived CTE cols missing: %+v", e.complete.items)
+	}
+}
+
+// TestScenarioCTEExplicitListWinsOverBody: an explicit CTE
+// column list overrides whatever the body SELECT exposes.
+func TestScenarioCTEExplicitListWinsOverBody(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "WITH x (uid, mail) AS (SELECT id, email FROM users) SELECT x.| FROM x")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["uid"] || !got["mail"] {
+		t.Errorf("explicit list missing: %+v", e.complete.items)
+	}
+	if got["id"] || got["email"] {
+		t.Errorf("body cols should not leak: %+v", e.complete.items)
+	}
+}
+
+// TestScenarioLiveRefineNarrowsAsYouType: typing an ident
+// character with the popup open should insert the char AND
+// re-filter against the new longer prefix.
+func TestScenarioLiveRefineNarrowsAsYouType(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT, employee_id INTEGER)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT | FROM users")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	// Type "em" one char at a time with the popup open.
+	e.handleInsert(a, Key{Kind: KeyRune, Rune: 'e'})
+	e.handleInsert(a, Key{Kind: KeyRune, Rune: 'm'})
+	if e.complete == nil {
+		t.Fatal("popup should still be open after live refine")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["email"] {
+		t.Errorf("email missing after live refine 'em': %+v", e.complete.items)
+	}
+	if got["id"] {
+		t.Errorf("id should have been filtered out: %+v", e.complete.items)
+	}
+	// Prefix should have grown to "em".
+	if e.complete.prefix != "em" {
+		t.Errorf("prefix = %q, want em", e.complete.prefix)
+	}
+}
+
+// TestScenarioLiveRefineBackspaceWidens: Backspace with popup
+// open should delete a char and re-open against the shorter
+// prefix.
+func TestScenarioLiveRefineBackspaceWidens(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT emai| FROM users")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	e.handleInsert(a, Key{Kind: KeyBackspace})
+	e.handleInsert(a, Key{Kind: KeyBackspace})
+	if e.complete == nil {
+		t.Fatal("popup should still be open after backspace")
+	}
+	if e.complete.prefix != "em" {
+		t.Errorf("prefix = %q, want em", e.complete.prefix)
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["email"] {
+		t.Errorf("email missing after backspace refine: %+v", e.complete.items)
+	}
+}
+
+// TestScenarioLiveRefineNonIdentDismisses: typing a space
+// should dismiss the popup and still insert the space.
+func TestScenarioLiveRefineNonIdentDismisses(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT | FROM users")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	e.handleInsert(a, Key{Kind: KeyRune, Rune: ' '})
+	if e.complete != nil {
+		t.Errorf("popup should be dismissed after space: %+v", e.complete.items)
+	}
+}
+
+// TestScenarioCasePreservationLowercasePrefix: lowercase prefix
+// produces lowercase keywords/functions.
+func TestScenarioCasePreservationLowercasePrefix(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "select * fr|")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["from"] {
+		t.Errorf("lowercase 'from' missing: %+v", e.complete.items)
+	}
+	if got["FROM"] {
+		t.Errorf("uppercase FROM should have been lowered: %+v", e.complete.items)
+	}
+}
+
+// TestScenarioColumnTypeHintPopulated: column completion items
+// carry the type string from db.Column.TypeName.
+func TestScenarioColumnTypeHintPopulated(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE widgets (id INTEGER, label TEXT, price REAL)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT | FROM widgets")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	byName := map[string]string{}
+	for _, it := range e.complete.items {
+		if it.kind == completeColumn {
+			byName[it.text] = it.typeHint
+		}
+	}
+	if byName["id"] == "" {
+		t.Errorf("id should carry a type hint: %+v", e.complete.items)
+	}
+	if byName["label"] == "" {
+		t.Errorf("label should carry a type hint: %+v", e.complete.items)
 	}
 }
 

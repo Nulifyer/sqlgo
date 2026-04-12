@@ -76,6 +76,26 @@ func (b *buffer) Line(i int) []rune { return b.lines[i] }
 // Cursor returns the current cursor position.
 func (b *buffer) Cursor() (row, col int) { return b.row, b.col }
 
+// SetCursor clamps (row, col) to valid range and moves the
+// primary cursor there without touching selection. Used by the
+// multi-cursor apply loop to walk positions.
+func (b *buffer) SetCursor(row, col int) {
+	if row < 0 {
+		row = 0
+	}
+	if row >= len(b.lines) {
+		row = len(b.lines) - 1
+	}
+	if col < 0 {
+		col = 0
+	}
+	if col > len(b.lines[row]) {
+		col = len(b.lines[row])
+	}
+	b.row = row
+	b.col = col
+}
+
 // Clear resets the buffer to a single empty line and wipes undo/redo.
 func (b *buffer) Clear() {
 	b.snapshot()

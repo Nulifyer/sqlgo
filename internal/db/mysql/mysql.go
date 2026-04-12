@@ -30,6 +30,7 @@ var capabilities = db.Capabilities{
 	IdentifierQuote: '`',
 	SupportsCancel:  true,
 	SupportsTLS:     true,
+	ExplainFormat:   db.ExplainFormatMySQLJSON,
 }
 
 func (driver) Capabilities() db.Capabilities { return capabilities }

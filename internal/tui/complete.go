@@ -40,8 +40,9 @@ func (k completionKind) marker() string {
 
 // completionItem is one candidate shown in the popup.
 type completionItem struct {
-	text string
-	kind completionKind
+	text     string
+	kind     completionKind
+	typeHint string // column type, shown dim after text
 }
 
 // completionState is the live popup.
@@ -90,6 +91,10 @@ func (e *editor) openCompletion(a *app) {
 	ctx.qualifier = qualifier
 	ctx.prefix = word
 	ctx.startCol = startCol
+
+	// Clear any existing popup up front so a live-refine that
+	// narrows to zero items dismisses cleanly.
+	e.complete = nil
 
 	if ctx.suppress {
 		return
@@ -160,6 +165,10 @@ func (e *editor) acceptCompletion() {
 
 // filterCompletions keeps case-insensitive prefix matches, sorted
 // by kindRank then alphabetical. Empty prefix = no filter.
+//
+// Case preservation: if the prefix is all-lowercase, keywords and
+// functions are emitted lowercase so "sel" → "select" matches the
+// user's typing style instead of force-upper SELECT.
 func filterCompletions(items []completionItem, prefix string) []completionItem {
 	needle := strings.ToLower(prefix)
 	var out []completionItem
@@ -174,6 +183,13 @@ func filterCompletions(items []completionItem, prefix string) []completionItem {
 		}
 		return strings.ToLower(out[i].text) < strings.ToLower(out[j].text)
 	})
+	if prefix != "" && strings.ToLower(prefix) == prefix {
+		for i := range out {
+			if out[i].kind == completeKeyword || out[i].kind == completeFunction {
+				out[i].text = strings.ToLower(out[i].text)
+			}
+		}
+	}
 	return out
 }
 
@@ -227,17 +243,25 @@ func (e *editor) drawComplete(c *cellbuf, innerRow, innerCol, innerW, innerH int
 
 	const markerWidth = 4 // " X  "
 	const maxVisible = 8
+	const typeGap = 2 // spaces between text and type hint
 	visible := len(cs.items)
 	if visible > maxVisible {
 		visible = maxVisible
 	}
-	widest := 0
+	widestText := 0
+	widestType := 0
 	for _, it := range cs.items {
-		if w := displayWidth(it.text); w > widest {
-			widest = w
+		if w := displayWidth(it.text); w > widestText {
+			widestText = w
+		}
+		if w := displayWidth(it.typeHint); w > widestType {
+			widestType = w
 		}
 	}
-	popupW := markerWidth + widest + 1
+	popupW := markerWidth + widestText + 1
+	if widestType > 0 {
+		popupW = markerWidth + widestText + typeGap + widestType + 1
+	}
 	if popupW > innerW {
 		popupW = innerW
 	}
@@ -285,6 +309,8 @@ func (e *editor) drawComplete(c *cellbuf, innerRow, innerCol, innerW, innerH int
 
 	normal := Style{FG: ansiDefault, BG: ansiBrightBlack}
 	selected := Style{FG: ansiDefault, BG: ansiDefaultBG, Attrs: attrReverse}
+	typeDim := Style{FG: ansiBrightBlack, BG: ansiBrightBlack}
+	typeDimSel := Style{FG: ansiDefault, BG: ansiDefaultBG, Attrs: attrReverse}
 
 	for i := 0; i < popupH; i++ {
 		idx := scroll + i
@@ -317,6 +343,25 @@ func (e *editor) drawComplete(c *cellbuf, innerRow, innerCol, innerW, innerH int
 			}
 			c.writeStyled(popupRow+i, col, string(r), style)
 			col += w
+		}
+		// Type hint (dim) right-justified within the row.
+		if it.typeHint != "" {
+			tStyle := typeDim
+			if idx == cs.selected {
+				tStyle = typeDimSel
+			}
+			hint := truncate(it.typeHint, widestType)
+			hintCol := anchorCol + popupW - 1 - displayWidth(hint)
+			if hintCol >= col+typeGap {
+				for _, r := range hint {
+					w := runeDisplayWidth(r)
+					if w == 0 {
+						continue
+					}
+					c.writeStyled(popupRow+i, hintCol, string(r), tStyle)
+					hintCol += w
+				}
+			}
 		}
 	}
 }

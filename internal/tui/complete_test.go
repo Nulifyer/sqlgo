@@ -47,10 +47,10 @@ func TestFilterCompletionsCaseInsensitivePrefix(t *testing.T) {
 		{text: "settings", kind: completeTable},
 		{text: "users", kind: completeTable},
 	}
+	// Lowercase prefix "se" matches all four; tables outrank
+	// keywords; keywords lowercase to match the user's style.
 	got := filterCompletions(items, "se")
-	// "se" should match SELECT, SET, sessions, settings. Tables
-	// outrank keywords, so sessions + settings come first.
-	wantOrder := []string{"sessions", "settings", "SELECT", "SET"}
+	wantOrder := []string{"sessions", "settings", "select", "set"}
 	if len(got) != len(wantOrder) {
 		t.Fatalf("len(got) = %d, want %d (%+v)", len(got), len(wantOrder), got)
 	}
@@ -58,6 +58,24 @@ func TestFilterCompletionsCaseInsensitivePrefix(t *testing.T) {
 		if got[i].text != want {
 			t.Errorf("[%d] = %q, want %q", i, got[i].text, want)
 		}
+	}
+}
+
+// TestFilterCompletionsUppercasePrefixKeepsUpper: uppercase
+// prefix → keywords stay uppercase (force-case-up matches the
+// user's explicit SCREAMING SQL style).
+func TestFilterCompletionsUppercasePrefixKeepsUpper(t *testing.T) {
+	t.Parallel()
+	items := []completionItem{
+		{text: "SELECT", kind: completeKeyword},
+		{text: "SET", kind: completeKeyword},
+	}
+	got := filterCompletions(items, "SE")
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].text != "SELECT" || got[1].text != "SET" {
+		t.Errorf("got = %+v, want SELECT/SET preserved", got)
 	}
 }
 
@@ -193,16 +211,16 @@ func TestEditorCtrlSpaceOpensPopup(t *testing.T) {
 	if e.complete.prefix != "sel" {
 		t.Errorf("prefix = %q, want sel", e.complete.prefix)
 	}
-	// SELECT should be in the filtered list.
+	// Lowercase prefix → lowercase keyword.
 	found := false
 	for _, it := range e.complete.items {
-		if it.text == "SELECT" {
+		if it.text == "select" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("SELECT not in filtered items: %+v", e.complete.items)
+		t.Errorf("select not in filtered items: %+v", e.complete.items)
 	}
 }
 

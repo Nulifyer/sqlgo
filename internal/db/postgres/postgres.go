@@ -29,6 +29,7 @@ var capabilities = db.Capabilities{
 	IdentifierQuote: '"',
 	SupportsCancel:  true,
 	SupportsTLS:     true,
+	ExplainFormat:   db.ExplainFormatPostgresJSON,
 }
 
 func (driver) Capabilities() db.Capabilities { return capabilities }

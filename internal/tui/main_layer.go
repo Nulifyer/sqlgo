@@ -439,6 +439,23 @@ func (m *mainLayer) handleSpace(a *app, k Key) {
 		hl := newHistoryLayer()
 		hl.reload(a)
 		a.pushLayer(hl)
+	case 'p':
+		// Explain plan for current editor SQL.
+		sql := strings.TrimSpace(m.editor.buf.Text())
+		if sql == "" {
+			m.status = "nothing to explain"
+			return
+		}
+		if a.conn == nil {
+			m.status = "not connected"
+			return
+		}
+		tree, err := a.runExplain(sql)
+		if err != nil {
+			m.status = "explain: " + err.Error()
+			return
+		}
+		a.pushLayer(newExplainLayer(tree))
 	case 'q':
 		a.quit = true
 	}
@@ -579,6 +596,7 @@ func (m *mainLayer) queryHints(a *app) string {
 		hintIf(hasText, "Alt+F=format"),
 		"Ctrl+Space=complete",
 		hintIf(hasText, "Ctrl+F=find"),
+		hintIf(hasText, "Ctrl+Alt+Up/Dn=multicursor"),
 		"F11=fullscreen",
 		hintIf(hasText, "Ctrl+L=clear"),
 	)
@@ -602,11 +620,13 @@ func (m *mainLayer) resultsHints(a *app) string {
 }
 
 func (m *mainLayer) spaceMenuHints(a *app) string {
+	hasText := m.editor.buf.LineCount() > 1 || len(m.editor.buf.Line(0)) > 0
 	return joinHints(
 		"c=connect",
 		hintIf(a.conn != nil, "x=disconnect"),
 		hintIf(m.table.HasColumns(), "e=export"),
 		"h=history",
+		hintIf(a.conn != nil && hasText, "p=explain"),
 		"q=quit",
 		"Esc=cancel",
 	)

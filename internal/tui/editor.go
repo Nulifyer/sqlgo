@@ -25,6 +25,11 @@ type editor struct {
 	searchNeedle string
 	matches      []matchRange
 	currentMatch int // -1 when empty
+
+	// extraCursors holds secondary cursor positions for column-
+	// add multi-cursor edits. Primary cursor lives on the
+	// buffer. v1 invariant: at most one cursor per row.
+	extraCursors []cursorPos
 }
 
 // matchRange is one find/replace hit. row/col are rune indices;
@@ -42,16 +47,39 @@ func newEditor() *editor {
 // handleInsert applies one keypress. Returns true if consumed.
 // nil app is fine (tests); clipboard calls become no-ops.
 func (e *editor) handleInsert(a *app, k Key) bool {
+	// Ctrl+Alt+Up/Down: column-add multi-cursor. Checked first
+	// so the Ctrl-arrow word-jump path below doesn't swallow it.
+	if k.Ctrl && k.Alt {
+		switch k.Kind {
+		case KeyUp:
+			e.addCursorRelative(-1)
+			return true
+		case KeyDown:
+			e.addCursorRelative(1)
+			return true
+		}
+	}
+
+	// Esc collapses extras when popup is closed. Popup-open Esc
+	// is handled in the popup block below and takes precedence.
+	if e.complete == nil && k.Kind == KeyEsc && e.hasMultiCursor() {
+		e.collapseCursors()
+		return true
+	}
+
 	// Ctrl+Space: open autocomplete. Handled before Ctrl+rune
 	// clipboard block below.
 	if k.Ctrl && k.Kind == KeyRune && k.Rune == ' ' {
+		// Collapse multi-cursor first; autocomplete accept
+		// would need line-boundary aware expansion otherwise.
+		e.collapseCursors()
 		e.openCompletion(a)
 		return true
 	}
 
-	// Popup-owned keys when open: Up/Down navigate, Enter/Tab
-	// accept, Esc cancels. Any other key dismisses and falls
-	// through so the keystroke still does its normal thing.
+	// Popup-owned keys when open. Live refine: ident chars and
+	// '.' insert + re-open so the filter narrows as you type.
+	// Backspace deletes + re-opens. Non-ident keys dismiss.
 	if e.complete != nil {
 		switch k.Kind {
 		case KeyUp:
@@ -66,14 +94,27 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		case KeyEsc:
 			e.complete = nil
 			return true
+		case KeyBackspace:
+			e.buf.Backspace()
+			e.openCompletion(a)
+			return true
+		case KeyRune:
+			if !k.Ctrl && !k.Alt && (isIdentRune(k.Rune) || k.Rune == '.') {
+				e.buf.Insert(k.Rune)
+				e.openCompletion(a)
+				return true
+			}
 		}
 		e.complete = nil
 	}
 
-	// Shift+arrow: extend selection. Handled before the plain-arrow
-	// branch so selection is the default when Shift is held. Ctrl +
-	// Shift combos extend by a word at a time.
+	// Shift+arrow: extend selection. Collapses multi-cursor
+	// first -- selection doesn't fan out in v1.
 	if k.Shift {
+		switch k.Kind {
+		case KeyLeft, KeyRight, KeyUp, KeyDown, KeyHome, KeyEnd:
+			e.collapseCursors()
+		}
 		switch k.Kind {
 		case KeyLeft:
 			if k.Ctrl {
@@ -104,45 +145,45 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		}
 	}
 
-	// Ctrl + arrow / Ctrl + backspace / Ctrl + delete: word-granular
-	// navigation and deletion. Must be checked before the generic
-	// Ctrl+<rune> block below because the keys arrive as non-KeyRune.
+	// Ctrl+arrow / Ctrl+backspace / Ctrl+delete: word-granular.
 	if k.Ctrl {
 		switch k.Kind {
 		case KeyLeft:
-			e.buf.MoveWordLeft()
+			e.applyToAllCursors(func() { e.buf.MoveWordLeft() })
 			return true
 		case KeyRight:
-			e.buf.MoveWordRight()
+			e.applyToAllCursors(func() { e.buf.MoveWordRight() })
 			return true
 		case KeyBackspace:
+			e.collapseCursors() // word deletion may cross line boundary
 			e.buf.DeleteWordLeft()
 			return true
 		case KeyDelete:
+			e.collapseCursors()
 			e.buf.DeleteWordRight()
 			return true
 		}
 	}
 
-	// Ctrl+<letter> clipboard shortcuts. Undo/redo live on Alt instead
-	// of Ctrl because Ctrl+Z is intercepted by the shell's job
-	// control (SIGTSTP) in several common environments before the
-	// raw terminal can deliver the byte, and Ctrl+Y is VDSUSP on
-	// BSD/macOS which has the same failure mode.
+	// Ctrl+<letter> clipboard shortcuts. Multi-cursor collapses
+	// first; clipboard fan-out is out of scope for v1.
 	if k.Ctrl && k.Kind == KeyRune {
 		switch k.Rune {
 		case 'c':
+			e.collapseCursors()
 			if sel := e.buf.Selection(); sel != "" && a != nil && a.clipboard != nil {
 				_ = a.clipboard.Copy(sel)
 			}
 			return true
 		case 'x':
+			e.collapseCursors()
 			if sel := e.buf.Selection(); sel != "" && a != nil && a.clipboard != nil {
 				_ = a.clipboard.Copy(sel)
 				e.buf.DeleteSelection()
 			}
 			return true
 		case 'v':
+			e.collapseCursors()
 			if a != nil && a.clipboard != nil {
 				if text, err := a.clipboard.Paste(); err == nil && text != "" {
 					e.buf.InsertText(text)
@@ -150,6 +191,7 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 			}
 			return true
 		case 'a':
+			e.collapseCursors()
 			e.buf.SelectAll()
 			return true
 		}
@@ -163,8 +205,10 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 	if k.Alt && k.Kind == KeyRune {
 		switch k.Rune {
 		case 'z', 'Z':
+			e.collapseCursors()
 			e.buf.Undo()
 		case 'y', 'Y':
+			e.collapseCursors()
 			e.buf.Redo()
 		}
 		return true
@@ -177,43 +221,71 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 			// main_layer (e.g. Ctrl+L clear).
 			return false
 		}
-		e.buf.Insert(k.Rune)
+		r := k.Rune
+		e.applyToAllCursors(func() { e.buf.Insert(r) })
 		return true
 	case KeyEnter:
+		// Newlines break the "at most one cursor per row"
+		// invariant. Collapse first.
+		e.collapseCursors()
 		e.buf.InsertNewline()
 		return true
 	case KeyBackspace:
-		e.buf.Backspace()
+		if e.hasMultiCursor() {
+			// Skip cursors at col 0 -- joining lines would
+			// break the invariant.
+			e.applyToAllCursors(func() {
+				_, col := e.buf.Cursor()
+				if col > 0 {
+					e.buf.Backspace()
+				}
+			})
+		} else {
+			e.buf.Backspace()
+		}
 		return true
 	case KeyDelete:
-		e.buf.Delete()
+		if e.hasMultiCursor() {
+			e.applyToAllCursors(func() {
+				row, col := e.buf.Cursor()
+				if col < len(e.buf.Line(row)) {
+					e.buf.Delete()
+				}
+			})
+		} else {
+			e.buf.Delete()
+		}
 		return true
 	case KeyLeft:
-		e.buf.MoveLeft()
+		e.applyToAllCursors(func() { e.buf.MoveLeft() })
 		return true
 	case KeyRight:
-		e.buf.MoveRight()
+		e.applyToAllCursors(func() { e.buf.MoveRight() })
 		return true
 	case KeyUp:
+		// Vertical moves break the row-uniqueness invariant.
+		// Collapse first.
+		e.collapseCursors()
 		e.buf.MoveUp()
 		return true
 	case KeyDown:
+		e.collapseCursors()
 		e.buf.MoveDown()
 		return true
 	case KeyHome:
-		e.buf.MoveHome()
+		e.applyToAllCursors(func() { e.buf.MoveHome() })
 		return true
 	case KeyEnd:
-		e.buf.MoveEnd()
+		e.applyToAllCursors(func() { e.buf.MoveEnd() })
 		return true
 	case KeyTab:
-		// Soft tabs: insert spaces up to the next 4-column stop so
-		// Tab aligns visually regardless of the current cursor
-		// column.
-		_, col := e.buf.Cursor()
-		for n := 4 - (col % 4); n > 0; n-- {
-			e.buf.Insert(' ')
-		}
+		// Soft tabs: insert spaces up to the next 4-column stop.
+		e.applyToAllCursors(func() {
+			_, col := e.buf.Cursor()
+			for n := 4 - (col % 4); n > 0; n-- {
+				e.buf.Insert(' ')
+			}
+		})
 		return true
 	}
 	return false
@@ -315,11 +387,40 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 	if cursorVisible {
 		row, col := e.buf.Cursor()
 		s.placeCursor(innerRow+(row-e.scrollRow), innerCol+(col-e.scrollCol))
+		// Paint a reverse-video block at each extra cursor so
+		// the user can see where their column-add cursors sit.
+		// The real terminal caret stays on the primary.
+		caretStyle := Style{FG: ansiDefault, BG: ansiDefaultBG, Attrs: attrReverse}
+		for _, cp := range e.extraCursors {
+			if cp.row < e.scrollRow || cp.row >= e.scrollRow+innerH {
+				continue
+			}
+			if cp.col < e.scrollCol || cp.col-e.scrollCol >= innerW {
+				continue
+			}
+			sc := innerCol + (cp.col - e.scrollCol)
+			sr := innerRow + (cp.row - e.scrollRow)
+			// Paint a space with the caret style; if there's a
+			// real character there, use it verbatim.
+			ch := " "
+			line := e.buf.Line(cp.row)
+			if cp.col < len(line) && isPrintable(line[cp.col]) {
+				ch = string(line[cp.col])
+			}
+			s.writeStyled(sr, sc, ch, caretStyle)
+		}
 	}
 
 	if e.complete != nil {
 		e.drawComplete(s, innerRow, innerCol, innerW, innerH)
 	}
+}
+
+// isPrintable reports whether a rune should be drawn verbatim
+// under an extra-cursor caret marker. Control chars render as
+// a blank.
+func isPrintable(r rune) bool {
+	return r >= 0x20 && r != 0x7f
 }
 
 // styleForCol returns the syntax-highlight style for the column offset

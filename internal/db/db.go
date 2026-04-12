@@ -76,6 +76,10 @@ type Capabilities struct {
 	// SupportsTLS reports whether the DSN accepts TLS/SSL knobs in
 	// Config.Options. Drives the TLS field group in the connection form.
 	SupportsTLS bool
+
+	// ExplainFormat describes how this engine returns EXPLAIN output.
+	// None means the feature is unsupported for this driver.
+	ExplainFormat ExplainFormat
 }
 
 // SchemaDepth describes the object hierarchy the explorer should render
@@ -101,6 +105,24 @@ const (
 	LimitSyntaxLimit LimitSyntax = iota
 	// LimitSyntaxSelectTop is the "SELECT TOP N ..." prefix used by MSSQL.
 	LimitSyntaxSelectTop
+)
+
+// ExplainFormat selects the driver's EXPLAIN output shape. None
+// means the driver has no supported form and the TUI should skip
+// the feature for that engine.
+type ExplainFormat int
+
+const (
+	ExplainFormatNone ExplainFormat = iota
+	// ExplainFormatPostgresJSON: `EXPLAIN (FORMAT JSON) ...` returns
+	// one row with a JSON array containing a single top-level node.
+	ExplainFormatPostgresJSON
+	// ExplainFormatMySQLJSON: `EXPLAIN FORMAT=JSON ...` returns one
+	// row with a JSON object rooted at "query_block".
+	ExplainFormatMySQLJSON
+	// ExplainFormatSQLiteRows: `EXPLAIN QUERY PLAN ...` returns rows
+	// (id, parent, notused, detail) the TUI reparents into a tree.
+	ExplainFormatSQLiteRows
 )
 
 // Conn is a live database connection. NOT required to be

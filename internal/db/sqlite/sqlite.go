@@ -40,6 +40,7 @@ var capabilities = db.Capabilities{
 	IdentifierQuote: '"',
 	SupportsCancel:  true,
 	SupportsTLS:     false,
+	ExplainFormat:   db.ExplainFormatSQLiteRows,
 }
 
 func (driver) Capabilities() db.Capabilities { return capabilities }

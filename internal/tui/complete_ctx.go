@@ -34,11 +34,14 @@ func (k clauseKind) String() string {
 }
 
 // tableScope is one entry in the FROM/JOIN list. schema is empty
-// on bare names; alias is empty when no alias was given.
+// on bare names; alias is empty when no alias was given. cols is
+// populated for derived refs (subquery-FROM aliases) whose column
+// list comes from the inner SELECT list, not the live schema.
 type tableScope struct {
 	schema string
 	name   string
 	alias  string
+	cols   []string
 }
 
 // cteDef is one CTE from a WITH clause. columns is populated only
@@ -296,10 +299,12 @@ func extractCTEs(stmt []sqltok.Token) []cteDef {
 		}
 		i++
 
-		// Skip body via balanced parens.
+		// Capture the body span so we can derive columns when
+		// no explicit list was given.
 		if i >= len(stmt) || !(stmt[i].Kind == sqltok.Punct && stmt[i].Text == "(") {
 			break
 		}
+		bodyStart := i + 1
 		depth = 1
 		i++
 		for i < len(stmt) && depth > 0 {
@@ -309,6 +314,10 @@ func extractCTEs(stmt []sqltok.Token) []cteDef {
 				depth--
 			}
 			i++
+		}
+		bodyEnd := i - 1 // closing paren index
+		if len(def.columns) == 0 && bodyStart < bodyEnd {
+			def.columns = parseSelectListCols(stmt[bodyStart:bodyEnd])
 		}
 
 		out = append(out, def)
@@ -345,63 +354,269 @@ func depthZeroTokens(stmt []sqltok.Token) []sqltok.Token {
 	return out
 }
 
-// extractFromScope walks depth-0 tokens for every FROM/JOIN
-// table reference. Accepts comma-separated lists, schema.name,
-// optional AS alias. Walks the whole statement so SELECT-list
-// completion sees tables typed after the cursor.
-func extractFromScope(stmt []sqltok.Token) []tableScope {
-	cur := depthZeroTokens(stmt)
+// parseSelectListCols walks a SELECT ... FROM span at depth 0 of
+// the given tokens and returns the column labels as they'd be
+// exposed by that subquery. For each SELECT item:
+//   - bare ident → that ident
+//   - ident AS alias / ident alias → alias
+//   - qualified.ident → ident (last segment)
+//   - function(args) AS alias → alias
+//   - anything else without an alias → "" (skipped)
+//   - '*' → nil (bail; can't resolve without the schema)
+//
+// Used by subquery-FROM alias derivation and CTE body
+// derivation. Caller passes depth-filtered tokens.
+func parseSelectListCols(tokens []sqltok.Token) []string {
+	depth0 := depthZeroTokens(tokens)
+	// Find SELECT ... FROM span.
+	start := -1
+	end := len(depth0)
+	for i, t := range depth0 {
+		if t.Kind == sqltok.Keyword && strings.EqualFold(t.Text, "SELECT") {
+			start = i + 1
+			continue
+		}
+		if start >= 0 && t.Kind == sqltok.Keyword && strings.EqualFold(t.Text, "FROM") {
+			end = i
+			break
+		}
+	}
+	if start < 0 || start >= end {
+		return nil
+	}
+	// Walk comma-separated items. Parens at depth 0 were already
+	// stripped; function calls show up as `ident ( ... )` which
+	// depthZeroTokens collapsed to just `ident`. That's fine --
+	// we only want the item's visible column name anyway.
+	items := depth0[start:end]
+	var groups [][]sqltok.Token
+	cur := []sqltok.Token{}
+	for _, t := range items {
+		if t.Kind == sqltok.Punct && t.Text == "," {
+			if len(cur) > 0 {
+				groups = append(groups, cur)
+				cur = []sqltok.Token{}
+			}
+			continue
+		}
+		cur = append(cur, t)
+	}
+	if len(cur) > 0 {
+		groups = append(groups, cur)
+	}
 
+	var out []string
+	for _, g := range groups {
+		name := selectItemColName(g)
+		if name == "*" {
+			return nil // star: bail, can't resolve
+		}
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// selectItemColName returns the column name a SELECT-list item
+// exposes. Handles bare ident, "ident AS alias", "ident alias",
+// "schema.ident", and plain "*".
+func selectItemColName(g []sqltok.Token) string {
+	if len(g) == 0 {
+		return ""
+	}
+	// Check for explicit AS alias at the tail.
+	for i := len(g) - 2; i >= 0; i-- {
+		if g[i].Kind == sqltok.Keyword && strings.EqualFold(g[i].Text, "AS") && g[i+1].Kind == sqltok.Ident {
+			return g[i+1].Text
+		}
+	}
+	// Check for implicit alias: last ident when previous ident
+	// isn't a dot-qualifier. "ident1 ident2" → ident2.
+	if len(g) >= 2 {
+		last := g[len(g)-1]
+		prev := g[len(g)-2]
+		if last.Kind == sqltok.Ident && prev.Kind == sqltok.Ident {
+			return last.Text
+		}
+	}
+	// Single bare ident or dotted path: take the last ident.
+	for i := len(g) - 1; i >= 0; i-- {
+		if g[i].Kind == sqltok.Ident {
+			return g[i].Text
+		}
+	}
+	// Star?
+	for _, t := range g {
+		if t.Kind == sqltok.Operator && t.Text == "*" {
+			return "*"
+		}
+	}
+	return ""
+}
+
+// extractFromScope walks the raw stmt tokens with paren-depth
+// tracking and emits a tableScope for every FROM/JOIN reference
+// at depth 0. Handles named tables, schema-qualified names,
+// aliases (with or without AS), comma-separated lists, and
+// `(subquery) alias` derived refs whose columns come from the
+// inner SELECT list.
+func extractFromScope(stmt []sqltok.Token) []tableScope {
 	var out []tableScope
 	seen := map[string]struct{}{}
+	addRef := func(ref tableScope) {
+		if ref.name == "" {
+			return
+		}
+		key := ref.schema + "\x00" + ref.name + "\x00" + ref.alias
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, ref)
+	}
+
+	depth := 0
 	i := 0
-	for i < len(cur) {
-		t := cur[i]
+	collecting := false
+	for i < len(stmt) {
+		t := stmt[i]
+		// Paren depth tracking.
+		if t.Kind == sqltok.Punct && t.Text == "(" {
+			// If we're in collecting mode and this `(` sits at
+			// depth 0, it's a subquery-FROM item. Find the
+			// matching `)`, parse the inner SELECT list, then
+			// read the alias.
+			if collecting && depth == 0 {
+				end := matchingParen(stmt, i)
+				if end > i {
+					inner := stmt[i+1 : end]
+					cols := parseSelectListCols(inner)
+					after := end + 1
+					ref := tableScope{cols: cols}
+					if after < len(stmt) &&
+						stmt[after].Kind == sqltok.Keyword &&
+						strings.EqualFold(stmt[after].Text, "AS") &&
+						after+1 < len(stmt) &&
+						stmt[after+1].Kind == sqltok.Ident {
+						ref.name = stmt[after+1].Text
+						ref.alias = stmt[after+1].Text
+						after += 2
+					} else if after < len(stmt) && stmt[after].Kind == sqltok.Ident {
+						ref.name = stmt[after].Text
+						ref.alias = stmt[after].Text
+						after++
+					}
+					addRef(ref)
+					i = after
+					continue
+				}
+			}
+			depth++
+			i++
+			continue
+		}
+		if t.Kind == sqltok.Punct && t.Text == ")" {
+			if depth > 0 {
+				depth--
+			}
+			i++
+			continue
+		}
+		if depth > 0 {
+			i++
+			continue
+		}
+
+		// Depth 0: clause + collection state machine.
 		if t.Kind == sqltok.Keyword {
 			up := strings.ToUpper(t.Text)
 			if up == "FROM" || up == "JOIN" {
+				collecting = true
 				i++
-				for i < len(cur) {
-					if cur[i].Kind == sqltok.Keyword {
-						stopUp := strings.ToUpper(cur[i].Text)
-						if stopUp == "WHERE" || stopUp == "GROUP" || stopUp == "ORDER" ||
-							stopUp == "HAVING" || stopUp == "LIMIT" || stopUp == "OFFSET" ||
-							stopUp == "UNION" || stopUp == "INTERSECT" || stopUp == "EXCEPT" ||
-							stopUp == "ON" || stopUp == "USING" {
-							break
-						}
-						if stopUp == "JOIN" || stopUp == "INNER" || stopUp == "LEFT" ||
-							stopUp == "RIGHT" || stopUp == "FULL" || stopUp == "CROSS" ||
-							stopUp == "NATURAL" {
-							break
-						}
-					}
-					if cur[i].Kind == sqltok.Punct && cur[i].Text == "," {
-						i++
-						continue
-					}
-					if cur[i].Kind != sqltok.Ident {
-						i++
-						continue
-					}
-					ref, consumed := parseTableRef(cur[i:])
-					if ref.name != "" {
-						key := ref.schema + "\x00" + ref.name + "\x00" + ref.alias
-						if _, ok := seen[key]; !ok {
-							seen[key] = struct{}{}
-							out = append(out, ref)
-						}
-					}
-					if consumed == 0 {
-						i++
-					} else {
-						i += consumed
-					}
-				}
 				continue
 			}
+			if collecting {
+				if up == "WHERE" || up == "GROUP" || up == "ORDER" ||
+					up == "HAVING" || up == "LIMIT" || up == "OFFSET" ||
+					up == "UNION" || up == "INTERSECT" || up == "EXCEPT" ||
+					up == "ON" || up == "USING" {
+					collecting = false
+					i++
+					continue
+				}
+				if up == "INNER" || up == "LEFT" || up == "RIGHT" ||
+					up == "FULL" || up == "CROSS" || up == "NATURAL" {
+					// Stays in collecting; the following JOIN
+					// keyword is fine.
+					i++
+					continue
+				}
+			}
+			i++
+			continue
 		}
+
+		if !collecting {
+			i++
+			continue
+		}
+
+		if t.Kind == sqltok.Punct && t.Text == "," {
+			i++
+			continue
+		}
+
+		if t.Kind == sqltok.Ident {
+			// Collect the depth-0 run starting here for the
+			// table-ref parser (it wants a contiguous ident/
+			// punct sequence without paren noise).
+			run := collectDepthZeroRun(stmt[i:])
+			ref, consumed := parseTableRef(run)
+			if consumed == 0 {
+				i++
+				continue
+			}
+			addRef(ref)
+			// Advance i by the matching number of raw tokens.
+			i += consumed
+			continue
+		}
+
 		i++
+	}
+	return out
+}
+
+// matchingParen returns the index of the `)` that closes the `(`
+// at stmt[open]. Returns -1 on mismatch. Caller must ensure
+// stmt[open] is the opening paren.
+func matchingParen(stmt []sqltok.Token, open int) int {
+	depth := 0
+	for i := open; i < len(stmt); i++ {
+		t := stmt[i]
+		if t.Kind == sqltok.Punct && t.Text == "(" {
+			depth++
+		} else if t.Kind == sqltok.Punct && t.Text == ")" {
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// collectDepthZeroRun returns the contiguous run of depth-0
+// tokens starting at stmt[0] until a paren or end of slice.
+// Used to hand a clean slice to parseTableRef.
+func collectDepthZeroRun(stmt []sqltok.Token) []sqltok.Token {
+	var out []sqltok.Token
+	for _, t := range stmt {
+		if t.Kind == sqltok.Punct && (t.Text == "(" || t.Text == ")") {
+			break
+		}
+		out = append(out, t)
 	}
 	return out
 }
@@ -556,17 +771,31 @@ func (a *app) gatherQualified(ctx completionCtx) []completionItem {
 		if !match {
 			match = strings.EqualFold(t.name, q)
 		}
-		if match {
-			cols := a.fetchColumnsFor(t)
-			if len(cols) == 0 {
-				return nil
-			}
-			var items []completionItem
-			for _, c := range cols {
-				items = append(items, completionItem{text: c.Name, kind: completeColumn})
-			}
-			return items
+		if !match {
+			continue
 		}
+		// Derived subquery-FROM refs: use the pre-parsed
+		// column list, skip the DB entirely.
+		if len(t.cols) > 0 {
+			out := make([]completionItem, 0, len(t.cols))
+			for _, col := range t.cols {
+				out = append(out, completionItem{text: col, kind: completeColumn})
+			}
+			return out
+		}
+		cols := a.fetchColumnsFor(t)
+		if len(cols) == 0 {
+			return nil
+		}
+		var items []completionItem
+		for _, c := range cols {
+			items = append(items, completionItem{
+				text:     c.Name,
+				kind:     completeColumn,
+				typeHint: c.TypeName,
+			})
+		}
+		return items
 	}
 
 	m := a.mainLayerPtr()
@@ -669,6 +898,13 @@ func (a *app) tableCandidates() []completionItem {
 func (a *app) inScopeColumnCandidates(ctx completionCtx) []completionItem {
 	var out []completionItem
 	for _, t := range ctx.inScope {
+		// Derived subquery-FROM: pre-parsed cols win.
+		if len(t.cols) > 0 {
+			for _, col := range t.cols {
+				out = append(out, completionItem{text: col, kind: completeColumn})
+			}
+			continue
+		}
 		if cteCols, ok := ctx.lookupCTEColumns(t.name); ok {
 			for _, col := range cteCols {
 				out = append(out, completionItem{text: col, kind: completeColumn})
@@ -677,7 +913,11 @@ func (a *app) inScopeColumnCandidates(ctx completionCtx) []completionItem {
 		}
 		cols := a.fetchColumnsFor(t)
 		for _, c := range cols {
-			out = append(out, completionItem{text: c.Name, kind: completeColumn})
+			out = append(out, completionItem{
+				text:     c.Name,
+				kind:     completeColumn,
+				typeHint: c.TypeName,
+			})
 		}
 	}
 	return out
