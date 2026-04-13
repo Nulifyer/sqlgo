@@ -223,6 +223,12 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		}
 		r := k.Rune
 		e.applyToAllCursors(func() { e.buf.Insert(r) })
+		// Auto-trigger completion when typing an identifier or '.'
+		// with a single cursor. Multi-cursor is skipped since accept
+		// would only replace one cursor's prefix.
+		if !e.hasMultiCursor() && (isIdentRune(r) || r == '.') {
+			e.openCompletion(a)
+		}
 		return true
 	case KeyEnter:
 		// Newlines break the "at most one cursor per row"

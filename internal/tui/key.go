@@ -121,8 +121,13 @@ func (kr *keyReader) readUTF8(first byte) (InputMsg, error) {
 // readEscape handles ESC, ESC+[<...>, ESC+O<...>, and ESC+<rune> (Alt+rune)
 // sequences. A bare ESC (no follow-up within a short window) returns KeyEsc.
 func (kr *keyReader) readEscape() (InputMsg, error) {
-	// Peek with a small wait so we can distinguish bare Esc from CSI.
-	if !kr.peekAvailable(8 * time.Millisecond) {
+	// Peek with a wait so we can distinguish bare Esc from CSI. The
+	// window needs to cover cold-buffer latency on ConPTY / SSH;
+	// 8ms was too tight and caused arrow-key splits where the "["
+	// arrived late, leaving "5~" or "~" remnants from PgUp/PgDn
+	// sequences to leak in as literal runes. 50ms is well under
+	// perceptible Esc lag and well over typical inter-byte delays.
+	if !kr.peekAvailable(50 * time.Millisecond) {
 		return Key{Kind: KeyEsc}, nil
 	}
 	b, err := kr.r.ReadByte()

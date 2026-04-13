@@ -47,10 +47,12 @@ func TestFilterCompletionsCaseInsensitivePrefix(t *testing.T) {
 		{text: "settings", kind: completeTable},
 		{text: "users", kind: completeTable},
 	}
-	// Lowercase prefix "se" matches all four; tables outrank
-	// keywords; keywords lowercase to match the user's style.
+	// Lowercase prefix "se": prefix hits (sessions, settings,
+	// SELECT, SET) outrank the subsequence-only hit (users);
+	// tables outrank keywords inside the prefix-hit tier;
+	// keywords lowercase to match the user's style.
 	got := filterCompletions(items, "se")
-	wantOrder := []string{"sessions", "settings", "select", "set"}
+	wantOrder := []string{"sessions", "settings", "select", "set", "users"}
 	if len(got) != len(wantOrder) {
 		t.Fatalf("len(got) = %d, want %d (%+v)", len(got), len(wantOrder), got)
 	}
