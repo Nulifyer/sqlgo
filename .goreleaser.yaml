@@ -1,0 +1,45 @@
+version: 2
+
+project_name: sqlgo
+
+builds:
+  - id: sqlgo
+    binary: sqlgo
+    main: ./cmd/sqlgo
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE*
+      - README*
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  use: github
+  abbrev: 7
+  format: "{{ .SHA }} {{ .Message }}{{ if .Logins }} ({{ .Logins | englishJoin }}){{ end }}"
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
