@@ -4,11 +4,6 @@
 
 **A fast, keyboard-driven TUI SQL client for PostgreSQL, MySQL, SQL Server, and SQLite.**
 
-[![Go Version](https://img.shields.io/github/go-mod/go-version/Nulifyer/sqlgo?style=flat-square)](go.mod)
-[![Release](https://img.shields.io/github/v/release/Nulifyer/sqlgo?style=flat-square)](https://github.com/Nulifyer/sqlgo/releases)
-[![License](https://img.shields.io/github/license/Nulifyer/sqlgo?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-blue?style=flat-square)](#install)
-
 </div>
 
 ---
