@@ -489,7 +489,7 @@ func (a *app) connectTo(c config.Connection) {
 	var tunnel *sshtunnel.Tunnel
 	if c.SSH.Host != "" {
 		if pl != nil {
-			pl.setStatus("ssh tunnel: dialing...")
+			pl.setStatus("ssh tunnel: dialing…")
 			a.draw()
 			_ = a.scr.flush()
 		}
@@ -541,7 +541,7 @@ func (a *app) connectTo(c config.Connection) {
 	}
 
 	if pl != nil {
-		pl.setStatus("connecting...")
+		pl.setStatus("connecting…")
 		// Flush the status update before we block on Open so the user
 		// sees feedback.
 		a.draw()
@@ -670,7 +670,7 @@ func (a *app) runQuery() {
 	m.table.Clear()
 	m.lastHasResult = false
 	m.lastErr = ""
-	m.status = "running query..."
+	m.status = "running query…"
 	start := a.lastQueryStart
 
 	tbl := m.table
@@ -734,7 +734,7 @@ func (a *app) cancelQuery() {
 		return
 	}
 	a.cancel()
-	a.mainLayerPtr().status = "cancelling..."
+	a.mainLayerPtr().status = "cancelling…"
 }
 
 // handleQueryEvent updates the footer status as events arrive. The table
@@ -745,9 +745,9 @@ func (a *app) handleQueryEvent(e queryEvent) {
 	m := a.mainLayerPtr()
 	switch e.kind {
 	case evtStarted:
-		m.status = "streaming..."
+		m.status = "streaming…"
 	case evtProgress:
-		m.status = fmt.Sprintf("streaming... %d row(s)", e.loaded)
+		m.status = fmt.Sprintf("streaming… %d row(s)", e.loaded)
 	case evtDone:
 		a.running = false
 		a.cancel = nil

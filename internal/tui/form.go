@@ -427,15 +427,15 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 		if field.mask {
 			val = strings.Repeat("*", len([]rune(val)))
 		}
-		// Cycler rows render "< value >". Empty → "(default)".
+		// Cycler rows render "‹ value ›". Empty → "(default)".
 		if i == coreDriver {
-			val = "< " + engineSpecs[f.driverIdx].label + " >"
+			val = "‹ " + engineSpecs[f.driverIdx].label + " ›"
 		} else if field.isCycler() {
 			display := val
 			if display == "" {
 				display = "(default)"
 			}
-			val = "< " + display + " >"
+			val = "‹ " + display + " ›"
 		}
 
 		vCol := innerCol + labelW + 2

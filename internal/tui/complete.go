@@ -18,22 +18,26 @@ const (
 	completeFunction
 )
 
+// marker returns a single-cell glyph that labels a completion item's kind
+// in the popup's left gutter. Glyphs chosen to be visually distinct at a
+// glance: keyword/schema/table/view/column/alias/function all look
+// different without relying on color.
 func (k completionKind) marker() string {
 	switch k {
 	case completeKeyword:
-		return "k"
+		return "◆"
 	case completeSchema:
-		return "s"
+		return "§"
 	case completeTable:
-		return "t"
+		return "▦"
 	case completeView:
-		return "v"
+		return "◇"
 	case completeColumn:
-		return "c"
+		return "∷"
 	case completeAlias:
-		return "a"
+		return "@"
 	case completeFunction:
-		return "f"
+		return "ƒ"
 	}
 	return " "
 }

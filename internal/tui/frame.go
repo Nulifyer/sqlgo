@@ -6,7 +6,7 @@ type borderSet struct {
 	tl, tr, bl, br, h, v rune
 }
 
-var borderSingle = borderSet{tl: '┌', tr: '┐', bl: '└', br: '┘', h: '─', v: '│'}
+var borderSingle = borderSet{tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│'}
 
 // drawFrame renders a bordered panel with an optional title. Focused panels
 // use colorBorderFocused / colorTitleFocused; others use the dim variants.

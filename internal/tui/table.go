@@ -882,7 +882,7 @@ func rowRuneRuns(cells []string, widths []int) []runeRun {
 	var out []runeRun
 	for i, cell := range cells {
 		if i > 0 {
-			out = append(out, runeRun{s: " "}, runeRun{s: "|"}, runeRun{s: " "})
+			out = append(out, runeRun{s: " "}, runeRun{s: "│"}, runeRun{s: " "})
 		}
 		out = appendCellRuns(out, cell, widths[i])
 	}
@@ -913,7 +913,7 @@ func wrapRowRuns(cells []string, widths []int) [][]runeRun {
 		var row []runeRun
 		for i, col := range chopped {
 			if i > 0 {
-				row = append(row, runeRun{s: " "}, runeRun{s: "|"}, runeRun{s: " "})
+				row = append(row, runeRun{s: " "}, runeRun{s: "│"}, runeRun{s: " "})
 			}
 			if line < len(col) {
 				row = append(row, col[line]...)
@@ -1067,18 +1067,18 @@ func appendCellRuns(out []runeRun, cell string, widthN int) []runeRun {
 	return padSpaces()
 }
 
-// renderHeaderRow formats the column headers including an ASCII sort
-// marker (" ^" / " v") on the sorted column so the user can tell at a
-// glance which column ordering is active.
+// renderHeaderRow formats the column headers including a sort
+// direction marker (" ▲" / " ▼") on the sorted column so the user can
+// tell at a glance which column ordering is active.
 func renderHeaderRow(cols []db.Column, widths []int, sortCol int, desc bool) string {
 	labels := make([]string, len(cols))
 	for i, c := range cols {
 		label := c.Name
 		if i == sortCol {
 			if desc {
-				label += " v"
+				label += " ▼"
 			} else {
-				label += " ^"
+				label += " ▲"
 			}
 			if displayWidth(label) > widths[i] {
 				// Measure string may exceed col width after adding the
@@ -1098,7 +1098,7 @@ func renderRow(cells []string, widths []int) string {
 	var b strings.Builder
 	for i, cell := range cells {
 		if i > 0 {
-			b.WriteString(" | ")
+			b.WriteString(" │ ")
 		}
 		padCellTo(&b, cell, widths[i])
 	}
@@ -1109,9 +1109,9 @@ func renderSeparator(widths []int) string {
 	var b strings.Builder
 	for i, w := range widths {
 		if i > 0 {
-			b.WriteString("-+-")
+			b.WriteString("─┼─")
 		}
-		b.WriteString(strings.Repeat("-", w))
+		b.WriteString(strings.Repeat("─", w))
 	}
 	return b.String()
 }
@@ -1314,11 +1314,11 @@ func truncate(s string, w int) string {
 	if stringDisplayWidth(s) <= w {
 		return s
 	}
-	if w <= 3 {
+	if w <= 1 {
 		// Too narrow for an ellipsis; just clip by visual width.
 		return clipToWidth(s, w)
 	}
-	return clipToWidth(s, w-3) + "..."
+	return clipToWidth(s, w-1) + "…"
 }
 
 // clipToWidth returns the longest prefix of s whose visual width is

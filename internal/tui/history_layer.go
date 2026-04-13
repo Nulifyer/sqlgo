@@ -151,7 +151,7 @@ func (h *historyLayer) Draw(a *app, c *cellbuf) {
 	c.placeCursor(row+1, searchCol+len(rs))
 
 	// Separator row of dashes under the search field.
-	c.hLine(row+2, col+1, col+r.w-2, '-')
+	c.hLine(row+2, col+1, col+r.w-2, '─')
 
 	// Results list: rows 3..(h-2) inclusive inside the box.
 	listTop := row + 3
@@ -188,7 +188,7 @@ func (h *historyLayer) Draw(a *app, c *cellbuf) {
 			line := formatHistoryLine(e, boxW-4, h.scope == scopeAll)
 			if idx == h.selected {
 				c.setFg(colorBorderFocused)
-				c.writeAt(listTop+i, innerCol, truncate("> "+line, boxW-4))
+				c.writeAt(listTop+i, innerCol, truncate("▶ "+line, boxW-4))
 				c.resetStyle()
 			} else {
 				c.writeAt(listTop+i, innerCol, truncate("  "+line, boxW-4))

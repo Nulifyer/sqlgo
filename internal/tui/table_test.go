@@ -217,7 +217,7 @@ func TestTableRendersUnicodeEndToEnd(t *testing.T) {
 		t.Fatalf("cjk row not found in output")
 	}
 	tail := plain[idx:]
-	sepIdx := bytes.Index([]byte(tail), []byte(" | "))
+	sepIdx := bytes.Index([]byte(tail), []byte(" │ "))
 	if sepIdx < 0 {
 		t.Fatalf("no separator after cjk label")
 	}
@@ -447,8 +447,8 @@ func TestTruncate(t *testing.T) {
 	}{
 		{"hello", 10, "hello"},
 		{"hello", 5, "hello"},
-		{"hello", 4, "h..."},
-		{"hello", 3, "hel"},
+		{"hello", 4, "hel…"},
+		{"hello", 3, "he…"},
 		{"hello", 1, "h"},
 		{"hello", 0, ""},
 	}
@@ -540,8 +540,8 @@ func TestWrapRowRunsColumnAlignment(t *testing.T) {
 		if len(line) != 9 {
 			t.Fatalf("line %d len = %d, want 9", i, len(line))
 		}
-		if line[3].s != " " || line[4].s != "|" || line[5].s != " " {
-			t.Errorf("line %d separator slots = %q %q %q, want ' ' '|' ' '",
+		if line[3].s != " " || line[4].s != "│" || line[5].s != " " {
+			t.Errorf("line %d separator slots = %q %q %q, want ' ' '│' ' '",
 				i, line[3].s, line[4].s, line[5].s)
 		}
 	}

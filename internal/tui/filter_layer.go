@@ -72,7 +72,7 @@ func (fl *filterLayer) Draw(a *app, c *cellbuf) {
 	// status. Dimmed so it doesn't compete with the match count.
 	if note := m.table.FilterNote(); note != "" {
 		c.setFg(colorBorderFocused)
-		c.writeAt(r.row+r.h-2, innerCol, truncate("! "+note, boxW-4))
+		c.writeAt(r.row+r.h-2, innerCol, truncate("⚠ "+note, boxW-4))
 		c.resetStyle()
 	}
 }

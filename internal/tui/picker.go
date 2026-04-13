@@ -98,7 +98,7 @@ func (p *picker) draw(s *cellbuf, termW, termH int) {
 			}
 			if i == p.selected {
 				s.setFg(colorBorderFocused)
-				s.writeAt(listTop+i, innerCol, "> "+line)
+				s.writeAt(listTop+i, innerCol, "▶ "+line)
 				s.resetStyle()
 			} else {
 				s.writeAt(listTop+i, innerCol, "  "+line)

@@ -378,25 +378,29 @@ func (e *explorer) draw(c *cellbuf, r rect, focused bool) {
 func renderExplorerLine(it explorerItem, expanded map[string]bool) string {
 	switch it.kind {
 	case itemSchema:
-		marker := "+"
+		marker := "▸"
 		if expanded[it.schemaName] {
-			marker = "-"
+			marker = "▾"
 		}
 		return marker + " " + it.label
 	case itemSubgroup:
-		marker := "+"
+		marker := "▸"
 		if expanded[subgroupExpansionKey(it.schemaName, it.subgroup)] {
-			marker = "-"
+			marker = "▾"
 		}
 		if it.schemaName == "" {
 			return marker + " " + it.label
 		}
 		return "  " + marker + " " + it.label
 	case itemTable, itemView:
-		if it.schemaName == "" {
-			return "    " + it.label
+		leaf := "· "
+		if it.kind == itemView {
+			leaf = "◇ "
 		}
-		return "      " + it.label
+		if it.schemaName == "" {
+			return "    " + leaf + it.label
+		}
+		return "      " + leaf + it.label
 	}
 	return it.label
 }

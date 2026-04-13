@@ -68,7 +68,7 @@ func (tl *trustLayer) Draw(a *app, c *cellbuf) {
 	))
 
 	if tl.status != "" {
-		c.writeAt(row+boxH-3, innerCol, truncate("! "+tl.status, boxW-4))
+		c.writeAt(row+boxH-3, innerCol, truncate("⚠ "+tl.status, boxW-4))
 	}
 
 	prompt := "Trust this key? [y]=yes  [n/Esc]=no"
@@ -124,7 +124,7 @@ func (tl *trustLayer) accept(a *app) {
 	}
 	a.popLayer()
 	if pl, ok := a.topLayer().(*pickerLayer); ok {
-		pl.setStatus("ssh host trusted; reconnecting...")
+		pl.setStatus("ssh host trusted; reconnecting…")
 		a.draw()
 		_ = a.scr.flush()
 	}

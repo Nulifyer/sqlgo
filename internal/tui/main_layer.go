@@ -520,19 +520,16 @@ func (m *mainLayer) resultsRightInfo(a *app) string {
 // query feedback like "running..." or "3 row(s) in 12ms" and is allowed to
 // be clipped because the Results panel itself shows the real outcome.
 func (m *mainLayer) statusText(a *app, width int) string {
-	conn := "(not connected)"
+	conn := "○ (not connected)"
 	if a.activeConn != nil {
-		conn = a.activeConn.Name
+		conn = "● " + a.activeConn.Name
 	}
 	hints := a.topLayer().Hints(a)
-	s := fmt.Sprintf(" [%s]  %s  |  %s", m.focus, conn, hints)
+	s := fmt.Sprintf(" [%s]  %s  │  %s", m.focus, conn, hints)
 	if m.status != "" {
 		s += "    (" + m.status + ")"
 	}
-	if len(s) > width {
-		s = s[:width]
-	}
-	return s
+	return truncate(s, width)
 }
 
 // Hints is the Layer interface entry point for mainLayer. It dispatches on

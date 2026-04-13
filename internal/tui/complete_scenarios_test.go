@@ -941,8 +941,8 @@ func TestScenarioFunctionsNotInFromTarget(t *testing.T) {
 // doesn't silently drop the function marker.
 func TestScenarioFunctionKindHasMarker(t *testing.T) {
 	t.Parallel()
-	if got := completeFunction.marker(); got != "f" {
-		t.Errorf("completeFunction.marker() = %q, want %q", got, "f")
+	if got := completeFunction.marker(); got != "ƒ" {
+		t.Errorf("completeFunction.marker() = %q, want %q", got, "ƒ")
 	}
 }
 
