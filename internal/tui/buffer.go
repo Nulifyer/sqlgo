@@ -571,6 +571,88 @@ func (b *buffer) Selection() string {
 	return string(out)
 }
 
+// IndentRange prepends n spaces to each line in [row1, row2]. The
+// cursor and selection anchor shift right by n when they sit on
+// affected rows so the user's selection visually stays put.
+func (b *buffer) IndentRange(row1, row2, n int) {
+	if n <= 0 {
+		return
+	}
+	if row1 < 0 {
+		row1 = 0
+	}
+	if row2 >= len(b.lines) {
+		row2 = len(b.lines) - 1
+	}
+	if row1 > row2 {
+		return
+	}
+	b.snapshot()
+	pad := make([]rune, n)
+	for i := range pad {
+		pad[i] = ' '
+	}
+	for r := row1; r <= row2; r++ {
+		line := b.lines[r]
+		newLine := make([]rune, 0, len(line)+n)
+		newLine = append(newLine, pad...)
+		newLine = append(newLine, line...)
+		b.lines[r] = newLine
+	}
+	if b.row >= row1 && b.row <= row2 {
+		b.col += n
+	}
+	if b.anchorSet && b.anchorRow >= row1 && b.anchorRow <= row2 {
+		b.anchorCol += n
+	}
+	b.lastEditKind = editNone
+}
+
+// DedentRange removes up to n leading spaces from each line in
+// [row1, row2]. Cursor/anchor columns are clamped so they never
+// fall off the start of a shortened line.
+func (b *buffer) DedentRange(row1, row2, n int) {
+	if n <= 0 {
+		return
+	}
+	if row1 < 0 {
+		row1 = 0
+	}
+	if row2 >= len(b.lines) {
+		row2 = len(b.lines) - 1
+	}
+	if row1 > row2 {
+		return
+	}
+	b.snapshot()
+	for r := row1; r <= row2; r++ {
+		line := b.lines[r]
+		k := 0
+		for k < n && k < len(line) && line[k] == ' ' {
+			k++
+		}
+		if k == 0 {
+			continue
+		}
+		b.lines[r] = line[k:]
+		if b.row == r {
+			if b.col >= k {
+				b.col -= k
+			} else {
+				b.col = 0
+			}
+		}
+		if b.anchorSet && b.anchorRow == r {
+			if b.anchorCol >= k {
+				b.anchorCol -= k
+			} else {
+				b.anchorCol = 0
+			}
+		}
+	}
+	b.lastEditKind = editNone
+}
+
 // DeleteSelection removes the active selection, taking an undo snapshot
 // before mutating.
 func (b *buffer) DeleteSelection() {

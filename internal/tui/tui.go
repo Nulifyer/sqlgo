@@ -342,7 +342,7 @@ func Run() error {
 }
 
 func (a *app) loop() error {
-	keys := newKeyReader(os.Stdin)
+	keys := newKeyReader(stdinReader())
 	msgCh := make(chan InputMsg, inputChanBuf)
 	keyErrCh := make(chan error, 1)
 	go func() {

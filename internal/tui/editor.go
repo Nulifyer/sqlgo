@@ -285,13 +285,50 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		e.applyToAllCursors(func() { e.buf.MoveEnd() })
 		return true
 	case KeyTab:
-		// Soft tabs: insert spaces up to the next softTabWidth-column stop.
+		// Multi-line selection: indent each selected line by one soft
+		// tab. Otherwise insert spaces up to the next softTabWidth
+		// column stop at the cursor.
+		if e.buf.HasSelection() {
+			r1, _, r2, c2 := e.buf.normalizedSelection()
+			if r1 != r2 {
+				// A selection that ends right at column 0 of r2 was
+				// only extended onto that row by the trailing newline
+				// -- the user didn't really pick any text on it, so
+				// don't indent it.
+				end := r2
+				if c2 == 0 {
+					end = r2 - 1
+				}
+				if end >= r1 {
+					e.buf.IndentRange(r1, end, softTabWidth)
+					return true
+				}
+			}
+		}
 		e.applyToAllCursors(func() {
 			_, col := e.buf.Cursor()
 			for n := softTabWidth - (col % softTabWidth); n > 0; n-- {
 				e.buf.Insert(' ')
 			}
 		})
+		return true
+	case KeyBackTab:
+		// Dedent: remove up to softTabWidth leading spaces from each
+		// line in the selection, or from the current line if there's
+		// no selection.
+		if e.buf.HasSelection() {
+			r1, _, r2, c2 := e.buf.normalizedSelection()
+			end := r2
+			if r1 != r2 && c2 == 0 {
+				end = r2 - 1
+			}
+			if end >= r1 {
+				e.buf.DedentRange(r1, end, softTabWidth)
+			}
+		} else {
+			row, _ := e.buf.Cursor()
+			e.buf.DedentRange(row, row, softTabWidth)
+		}
 		return true
 	}
 	return false
