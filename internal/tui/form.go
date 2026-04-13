@@ -4,7 +4,6 @@ import (
 	"context"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/config"
 )
@@ -247,7 +246,7 @@ func (f *connForm) toConnection() (config.Connection, error) {
 	port := 0
 	if portStr != "" {
 		p, err := strconv.Atoi(portStr)
-		if err != nil || p < 0 || p > 65535 {
+		if err != nil || p < 0 || p > maxTCPPort {
 			return config.Connection{}, errSimple("port must be 0..65535")
 		}
 		port = p
@@ -288,13 +287,13 @@ func (f *connForm) toConnection() (config.Connection, error) {
 	}
 	if s := strings.TrimSpace(f.ssh[1].in.String()); s != "" {
 		p, err := strconv.Atoi(s)
-		if err != nil || p < 1 || p > 65535 {
+		if err != nil || p < 1 || p > maxTCPPort {
 			return config.Connection{}, errSimple("ssh port must be 1..65535")
 		}
 		ssh.Port = p
 	}
 	if ssh.Host != "" && ssh.Port == 0 {
-		ssh.Port = 22
+		ssh.Port = defaultSSHPort
 	}
 	out.SSH = ssh
 
@@ -369,8 +368,8 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 	labelW := 16
 	valueW := 44
 	boxW := labelW + valueW + 6
-	if boxW > termW-4 {
-		boxW = termW - 4
+	if boxW > termW - dialogMargin {
+		boxW = termW - dialogMargin
 	}
 
 	fields := f.allFields()
@@ -503,7 +502,7 @@ func (fl *formLayer) HandleKey(a *app, k Key) {
 	if !submit {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storeReadTimeout)
 	defer cancel()
 	usedKeyring, err := a.persistConnection(ctx, fl.f.originalName, c)
 	if err != nil {

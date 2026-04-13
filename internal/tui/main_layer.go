@@ -60,6 +60,7 @@ type mainLayer struct {
 	lastElapsed   time.Duration
 	lastHasResult bool
 	lastCapped    bool
+	lastCapReason string
 	lastErr       string
 }
 
@@ -131,18 +132,17 @@ func (m *mainLayer) Draw(a *app, c *cellbuf) {
 func (m *mainLayer) drawFullscreen(a *app, c *cellbuf) {
 	termW := a.term.width
 	termH := a.term.height
-	statusH := 1
-	bodyH := termH - statusH
-	if bodyH < 4 {
-		bodyH = 4
+	bodyH := termH - statusBarH
+	if bodyH < bodyMinH {
+		bodyH = bodyMinH
 	}
 	queryRect := rect{row: 1, col: 1, w: termW, h: bodyH}
 	drawFrame(c, queryRect, "Query [fullscreen]", true)
 	m.editor.draw(c, queryRect, true)
 
-	statusRect := rect{row: bodyH + 1, col: 1, w: termW, h: statusH}
+	statusRow := bodyH + 1
 	c.setFg(colorStatusBar)
-	c.writeAt(statusRect.row, statusRect.col, m.statusText(a, statusRect.w))
+	c.writeAt(statusRow, 1, m.statusText(a, termW))
 	c.resetStyle()
 }
 
@@ -427,7 +427,7 @@ func (m *mainLayer) prefillSelectFromExplorer(a *app) {
 	if a.conn != nil {
 		caps = a.conn.Capabilities()
 	}
-	m.editor.buf.SetText(sqltok.Format(BuildSelect(caps, t, 100)))
+	m.editor.buf.SetText(sqltok.Format(BuildSelect(caps, t, defaultSelectLimit)))
 	m.focus = FocusQuery
 }
 
@@ -506,7 +506,11 @@ func (m *mainLayer) resultsRightInfo(a *app) string {
 	}
 	suffix := ""
 	if m.lastCapped {
-		suffix = " (capped)"
+		if m.lastCapReason != "" {
+			suffix = " (capped: " + m.lastCapReason + ")"
+		} else {
+			suffix = " (capped)"
+		}
 	}
 	return fmt.Sprintf("%d rows / %d cols / %s%s", m.lastRowCount, m.lastColCount, m.lastElapsed.Round(time.Millisecond), suffix)
 }

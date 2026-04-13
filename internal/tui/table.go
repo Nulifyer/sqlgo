@@ -39,8 +39,10 @@ type table struct {
 	cols      []db.Column
 	widths    []int
 	rendered  [][]string
+	bytes     int64
 	streaming bool
 	capped    bool
+	capReason string
 	err       error
 
 	// view is an index into rendered. When nil, the natural order (0..N-1)
@@ -85,6 +87,11 @@ const (
 // const) so tests can poke it directly.
 var maxBufferedRows = loadRowCap()
 
+// maxBufferedBytes is the hybrid byte cap, overridable via
+// SQLGO_BYTE_CAP (value in bytes). Zero or invalid falls back to
+// defaultMaxBufferedBytes.
+var maxBufferedBytes = loadByteCap()
+
 func loadRowCap() int {
 	v := strings.TrimSpace(os.Getenv("SQLGO_ROW_CAP"))
 	if v == "" {
@@ -93,6 +100,18 @@ func loadRowCap() int {
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
 		return defaultMaxBufferedRows
+	}
+	return n
+}
+
+func loadByteCap() int64 {
+	v := strings.TrimSpace(os.Getenv("SQLGO_BYTE_CAP"))
+	if v == "" {
+		return defaultMaxBufferedBytes
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return defaultMaxBufferedBytes
 	}
 	return n
 }
@@ -116,6 +135,8 @@ func (t *table) Clear() {
 	t.cellCol = 0
 	t.streaming = false
 	t.capped = false
+	t.capReason = ""
+	t.bytes = 0
 	t.err = nil
 	t.scrollRow = 0
 	t.scrollCol = 0
@@ -144,6 +165,8 @@ func (t *table) Init(cols []db.Column) {
 	t.cellCol = 0
 	t.streaming = true
 	t.capped = false
+	t.capReason = ""
+	t.bytes = 0
 	t.err = nil
 	t.scrollRow = 0
 	t.scrollCol = 0
@@ -156,13 +179,21 @@ func (t *table) Init(cols []db.Column) {
 // sampleRows to keep append cost bounded.
 func (t *table) Append(row []any) bool {
 	cells := make([]string, len(row))
+	var rowBytes int64
 	for i, v := range row {
 		cells[i] = sanitizeCell(rawStringify(v))
+		rowBytes += int64(len(cells[i]))
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if len(t.rendered) >= maxBufferedRows {
 		t.capped = true
+		t.capReason = fmt.Sprintf("%d rows", maxBufferedRows)
+		return false
+	}
+	if t.bytes+rowBytes > maxBufferedBytes {
+		t.capped = true
+		t.capReason = formatByteSize(maxBufferedBytes)
 		return false
 	}
 	if len(t.rendered) < sampleRows {
@@ -176,7 +207,27 @@ func (t *table) Append(row []any) bool {
 		}
 	}
 	t.rendered = append(t.rendered, cells)
+	t.bytes += rowBytes
 	return true
+}
+
+// formatByteSize renders n as a compact human-readable size for
+// status messages ("256MB", "1GB"). Binary (power-of-1024) units.
+func formatByteSize(n int64) string {
+	const (
+		kib = 1 << 10
+		mib = 1 << 20
+		gib = 1 << 30
+	)
+	switch {
+	case n >= gib:
+		return fmt.Sprintf("%dGB", n/gib)
+	case n >= mib:
+		return fmt.Sprintf("%dMB", n/mib)
+	case n >= kib:
+		return fmt.Sprintf("%dKB", n/kib)
+	}
+	return fmt.Sprintf("%dB", n)
 }
 
 // Done marks the stream as finished and records any final error (nil on
@@ -224,6 +275,14 @@ func (t *table) Capped() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.capped
+}
+
+// CapReason returns a short label describing which cap tripped
+// ("100000 rows", "256MB"). Empty when Capped() is false.
+func (t *table) CapReason() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.capReason
 }
 
 // Snapshot returns a point-in-time copy of the current columns and the
@@ -290,12 +349,12 @@ func (t *table) MoveCellBy(dRow, dCol int) {
 	t.clampCursorLocked()
 }
 
-// MoveCellPage shifts the row cursor by approximately one page (10 rows)
-// without touching the column cursor.
+// MoveCellPage shifts the row cursor by approximately one page
+// (tablePageStep rows) without touching the column cursor.
 func (t *table) MoveCellPage(dir int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.cellRow += dir * 10
+	t.cellRow += dir * tablePageStep
 	t.clampCursorLocked()
 }
 
@@ -1026,9 +1085,10 @@ func appendCellRuns(out []runeRun, cell string, widthN int) []runeRun {
 				return padSpaces()
 			}
 			ch := "n"
-			if r == '\r' {
+			switch r {
+			case '\r':
 				ch = "r"
-			} else if r == '\t' {
+			case '\t':
 				ch = "t"
 			}
 			out = append(out,
@@ -1239,13 +1299,6 @@ func displayWidth(s string) int {
 	return n
 }
 
-func runeLen(s string) int {
-	n := 0
-	for range s {
-		n++
-	}
-	return n
-}
 
 // stringifyCell converts a driver-returned value into a display string.
 // Keeps escape chars intact for the draw path to style; control chars
@@ -1292,15 +1345,6 @@ func sanitizeCell(s string) string {
 		}
 	}
 	return b.String()
-}
-
-// padRight writes s then spaces up to width w. Used by legacy callers
-// that don't care about escape expansion.
-func padRight(b *strings.Builder, s string, w int) {
-	b.WriteString(s)
-	for i := runeLen(s); i < w; i++ {
-		b.WriteByte(' ')
-	}
 }
 
 // truncate clips s to at most w visual columns, appending "..." when

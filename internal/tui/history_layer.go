@@ -42,7 +42,21 @@ type historyLayer struct {
 	clearArmed bool
 }
 
-const historyPageSize = 50
+// historyFetchSize scales the row pull with the terminal height so
+// taller terminals load enough rows to fill the visible list plus a
+// scroll buffer, while short terminals don't waste a round trip.
+// Clamped to [20, 200] so a giant terminal doesn't pull unbounded
+// history and a tiny one still has something to scroll through.
+func historyFetchSize(a *app) int {
+	n := (a.term.height - 6) * 2
+	if n < 20 {
+		n = 20
+	}
+	if n > 200 {
+		n = 200
+	}
+	return n
+}
 
 func newHistoryLayer() *historyLayer {
 	return &historyLayer{search: newInput("")}
@@ -63,7 +77,7 @@ func (h *historyLayer) reload(a *app) {
 	if h.scope == scopeCurrent && a.activeConn != nil {
 		connName = a.activeConn.Name
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storeQuickTimeout)
 	defer cancel()
 
 	q := strings.TrimSpace(h.search.String())
@@ -71,10 +85,11 @@ func (h *historyLayer) reload(a *app) {
 		entries []store.HistoryEntry
 		err     error
 	)
+	limit := historyFetchSize(a)
 	if q == "" {
-		entries, err = a.store.ListRecentHistory(ctx, connName, historyPageSize)
+		entries, err = a.store.ListRecentHistory(ctx, connName, limit)
 	} else {
-		entries, err = a.store.SearchHistory(ctx, connName, q, historyPageSize)
+		entries, err = a.store.SearchHistory(ctx, connName, q, limit)
 	}
 	if err != nil {
 		h.status = "history: " + err.Error()
@@ -100,14 +115,14 @@ func (h *historyLayer) reload(a *app) {
 func (h *historyLayer) Draw(a *app, c *cellbuf) {
 	boxW := 100
 	if boxW > a.term.width-4 {
-		boxW = a.term.width - 4
+		boxW = a.term.width - dialogMargin
 	}
 	if boxW < 50 {
 		boxW = 50
 	}
 	boxH := 20
 	if boxH > a.term.height-4 {
-		boxH = a.term.height - 4
+		boxH = a.term.height - dialogMargin
 	}
 	if boxH < 10 {
 		boxH = 10
@@ -280,7 +295,7 @@ func (h *historyLayer) deleteSelected(a *app) {
 		return
 	}
 	target := h.entries[h.selected]
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storeQuickTimeout)
 	defer cancel()
 	if err := a.store.DeleteHistory(ctx, target.ID); err != nil {
 		h.status = "delete: " + err.Error()
@@ -324,7 +339,7 @@ func (h *historyLayer) confirmClear(a *app) {
 	if h.scope == scopeCurrent && a.activeConn != nil {
 		connName = a.activeConn.Name
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storeReadTimeout)
 	defer cancel()
 	n, err := a.store.ClearHistory(ctx, connName)
 	if err != nil {

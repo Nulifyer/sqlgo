@@ -126,14 +126,6 @@ func (c *cellbuf) at(row, col int) *cell {
 // setFg sets the foreground for subsequent writes.
 func (c *cellbuf) setFg(fg int) { c.pen.FG = fg }
 
-// setBg sets the background for subsequent writes.
-func (c *cellbuf) setBg(bg int) { c.pen.BG = bg }
-
-// setStyle replaces the pen with the given style. Use this instead of
-// setFg+setBg chains when you already have a Style value in hand (e.g.
-// from a Theme lookup).
-func (c *cellbuf) setStyle(s Style) { c.pen = s }
-
 // resetStyle returns the pen to the terminal default.
 func (c *cellbuf) resetStyle() { c.pen = defaultStyle() }
 

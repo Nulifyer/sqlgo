@@ -67,12 +67,12 @@ func (el *explainLayer) rebuild(collapsed map[*explainNode]bool) {
 func (el *explainLayer) Draw(a *app, c *cellbuf) {
 	boxW := 80
 	if boxW > a.term.width-4 {
-		boxW = a.term.width - 4
+		boxW = a.term.width - dialogMargin
 	}
 	if boxW < 48 {
 		boxW = 48
 	}
-	boxH := a.term.height - 4
+	boxH := a.term.height - dialogMargin
 	if boxH > 28 {
 		boxH = 28
 	}

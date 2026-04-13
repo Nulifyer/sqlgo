@@ -25,7 +25,7 @@ func newFindLayer(seed string) *findLayer {
 func (fl *findLayer) Draw(a *app, c *cellbuf) {
 	boxW := 64
 	if boxW > a.term.width-4 {
-		boxW = a.term.width - 4
+		boxW = a.term.width - dialogMargin
 	}
 	if boxW < 40 {
 		boxW = 40

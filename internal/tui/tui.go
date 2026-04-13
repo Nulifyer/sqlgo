@@ -45,11 +45,12 @@ const (
 // Moving status updates through the same channel as the final result
 // gives the main loop a single select-case for everything query-related.
 type queryEvent struct {
-	kind    queryEventKind
-	loaded  int
-	capped  bool
-	err     error
-	elapsed time.Duration
+	kind      queryEventKind
+	loaded    int
+	capped    bool
+	capReason string
+	err       error
+	elapsed   time.Duration
 }
 
 // app is the top-level TUI state. The UI is composed of a stack of Layers;
@@ -109,7 +110,7 @@ type app struct {
 // into connCache. Called after every mutation (save, delete, rename) so
 // the picker's next Draw sees the change.
 func (a *app) refreshConnections() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storeReadTimeout)
 	defer cancel()
 	list, err := a.store.ListConnections(ctx)
 	if err != nil {
@@ -289,7 +290,7 @@ func Run() error {
 		scr:  newScreen(os.Stdout, t.width, t.height),
 		// Buffer a handful of events so a fast-streaming query doesn't
 		// stall the drain goroutine on a non-blocking progress send.
-		resultCh:         make(chan queryEvent, 8),
+		resultCh:         make(chan queryEvent, resultChanBuf),
 		clipboard:        clipboard.System(),
 		secrets:          sec,
 		secretsAvailable: secAvail,
@@ -300,7 +301,7 @@ func Run() error {
 	// Any pre-existing connections.json file in the config dir is
 	// imported on first boot so users upgrading from the JSON-only build
 	// keep their saved connections.
-	bootCtx, cancelBoot := context.WithTimeout(context.Background(), 10*time.Second)
+	bootCtx, cancelBoot := context.WithTimeout(context.Background(), storeBootTimeout)
 	st, err := store.Open(bootCtx)
 	cancelBoot()
 	if err != nil {
@@ -308,7 +309,7 @@ func Run() error {
 	}
 	a.store = st
 
-	bootCtx, cancelBoot = context.WithTimeout(context.Background(), 10*time.Second)
+	bootCtx, cancelBoot = context.WithTimeout(context.Background(), storeBootTimeout)
 	if _, err := a.store.BootstrapFromLegacyConfig(bootCtx); err != nil {
 		// Non-fatal: log to stderr and continue with whatever the store
 		// has (possibly empty).
@@ -342,7 +343,7 @@ func Run() error {
 
 func (a *app) loop() error {
 	keys := newKeyReader(os.Stdin)
-	msgCh := make(chan InputMsg, 8)
+	msgCh := make(chan InputMsg, inputChanBuf)
 	keyErrCh := make(chan error, 1)
 	go func() {
 		for {
@@ -363,6 +364,12 @@ func (a *app) loop() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
+
+	// Resize source: SIGWINCH on Unix, polling ticker on Windows.
+	// Either way a message on resizeCh means "recheck terminal size";
+	// refreshSize() below decides whether the screen actually changed.
+	resizeCh, stopResize := watchResize()
+	defer stopResize()
 
 	for !a.quit {
 		if a.term.refreshSize() {
@@ -390,6 +397,8 @@ func (a *app) loop() error {
 			a.handleInput(m)
 		case e := <-a.resultCh:
 			a.handleQueryEvent(e)
+		case <-resizeCh:
+			// Wake: loop top calls refreshSize() and redraws.
 		case <-sigCh:
 			a.quit = true
 		}
@@ -548,7 +557,7 @@ func (a *app) connectTo(c config.Connection) {
 		_ = a.scr.flush()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer cancel()
 	conn, err := d.Open(ctx, cfg)
 	if err != nil {
@@ -632,7 +641,7 @@ func (a *app) loadSchema() {
 		m.explorer.SetSchema(nil, db.SchemaDepthSchemas)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), schemaTimeout)
 	defer cancel()
 	info, err := a.conn.Schema(ctx)
 	if err != nil {
@@ -699,7 +708,7 @@ func (a *app) runQuery() {
 			}
 			if !tbl.Append(row) {
 				tbl.Done(nil)
-				resultCh <- queryEvent{kind: evtDone, loaded: loaded, capped: true, elapsed: time.Since(start)}
+				resultCh <- queryEvent{kind: evtDone, loaded: loaded, capped: true, capReason: tbl.CapReason(), elapsed: time.Since(start)}
 				return
 			}
 			loaded++
@@ -707,7 +716,7 @@ func (a *app) runQuery() {
 			// redraw so the user watches rows stream in live. If the
 			// channel is full we skip -- evtDone will carry the final
 			// count anyway.
-			if time.Since(lastReport) > 50*time.Millisecond {
+			if time.Since(lastReport) > progressThrottle {
 				select {
 				case resultCh <- queryEvent{kind: evtProgress, loaded: loaded}:
 				default:
@@ -755,6 +764,7 @@ func (a *app) handleQueryEvent(e queryEvent) {
 		m.lastColCount = m.table.ColCount()
 		m.lastElapsed = e.elapsed
 		m.lastCapped = e.capped
+		m.lastCapReason = e.capReason
 		m.lastHasResult = true
 		m.lastErr = ""
 		if e.err != nil {
@@ -771,7 +781,11 @@ func (a *app) handleQueryEvent(e queryEvent) {
 		} else {
 			suffix := ""
 			if e.capped {
-				suffix = " (buffer capped)"
+				if e.capReason != "" {
+					suffix = " (buffer capped: " + e.capReason + ")"
+				} else {
+					suffix = " (buffer capped)"
+				}
 			}
 			m.status = fmt.Sprintf("%d row(s) in %s%s", e.loaded, e.elapsed.Round(time.Millisecond), suffix)
 		}
@@ -800,7 +814,7 @@ func (a *app) recordHistory(e queryEvent) {
 	if e.err != nil && !errors.Is(e.err, context.Canceled) {
 		entry.Error = e.err.Error()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storeHistoryTimeout)
 	defer cancel()
 	if err := a.store.RecordHistory(ctx, entry); err != nil {
 		// Append to status rather than overwriting -- the primary row

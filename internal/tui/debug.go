@@ -19,24 +19,33 @@ type debugEvent struct {
 	sequence int // 1-based ordinal for display
 }
 
-// debugLayerMax is the ring size for the captured-key log. Large enough
-// to see a full keystroke burst (arrow repeats, paste chunks) but small
-// enough that the box stays readable in a 24-line terminal.
-const debugLayerMax = 24
+// debugLayerCap returns the ring size for the captured-key log. It
+// scales with terminal height so the log holds roughly the number of
+// lines the box can actually display. Clamped to [10, 200].
+func debugLayerCap(a *app) int {
+	n := a.term.height - 6
+	if n < 10 {
+		n = 10
+	}
+	if n > 200 {
+		n = 200
+	}
+	return n
+}
 
 func newDebugLayer() *debugLayer { return &debugLayer{} }
 
 func (d *debugLayer) Draw(a *app, c *cellbuf) {
 	boxW := 60
 	if boxW > a.term.width-4 {
-		boxW = a.term.width - 4
+		boxW = a.term.width - dialogMargin
 	}
 	if boxW < 30 {
 		boxW = 30
 	}
-	boxH := debugLayerMax + 6
+	boxH := debugLayerCap(a) + 6
 	if boxH > a.term.height-4 {
-		boxH = a.term.height - 4
+		boxH = a.term.height - dialogMargin
 	}
 	if boxH < 10 {
 		boxH = 10
@@ -87,10 +96,11 @@ func (d *debugLayer) HandleKey(a *app, k Key) {
 		seq = d.log[n-1].sequence + 1
 	}
 	d.log = append(d.log, debugEvent{key: k, sequence: seq})
-	if len(d.log) > debugLayerMax {
+	ringCap := debugLayerCap(a)
+	if len(d.log) > ringCap {
 		// Drop oldest; keep tail. Simple shift -- bounded size keeps this
 		// cheap.
-		d.log = append(d.log[:0], d.log[len(d.log)-debugLayerMax:]...)
+		d.log = append(d.log[:0], d.log[len(d.log)-ringCap:]...)
 	}
 }
 

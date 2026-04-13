@@ -279,10 +279,10 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		e.applyToAllCursors(func() { e.buf.MoveEnd() })
 		return true
 	case KeyTab:
-		// Soft tabs: insert spaces up to the next 4-column stop.
+		// Soft tabs: insert spaces up to the next softTabWidth-column stop.
 		e.applyToAllCursors(func() {
 			_, col := e.buf.Cursor()
-			for n := 4 - (col % 4); n > 0; n-- {
+			for n := softTabWidth - (col % softTabWidth); n > 0; n-- {
 				e.buf.Insert(' ')
 			}
 		})

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 )
@@ -44,7 +43,7 @@ func (a *app) runExplain(sql string) (*explainTree, error) {
 	}
 
 	wrapped := explainWrapSQL(caps.ExplainFormat, sql)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), explainTimeout)
 	defer cancel()
 	rows, err := a.conn.Query(ctx, wrapped)
 	if err != nil {

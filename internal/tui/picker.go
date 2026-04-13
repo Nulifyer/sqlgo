@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/config"
 	"github.com/Nulifyer/sqlgo/internal/store"
@@ -47,8 +46,8 @@ func (p *picker) moveDown() {
 
 func (p *picker) draw(s *cellbuf, termW, termH int) {
 	boxW := 70
-	if boxW > termW-4 {
-		boxW = termW - 4
+	if boxW > termW - dialogMargin {
+		boxW = termW - dialogMargin
 	}
 	if boxW < 30 {
 		boxW = 30
@@ -57,8 +56,8 @@ func (p *picker) draw(s *cellbuf, termW, termH int) {
 	if boxH < 12 {
 		boxH = 12
 	}
-	if boxH > termH-4 {
-		boxH = termH - 4
+	if boxH > termH - dialogMargin {
+		boxH = termH - dialogMargin
 	}
 	row := (termH - boxH) / 2
 	col := (termW - boxW) / 2
@@ -205,7 +204,7 @@ func (pl *pickerLayer) unlinkKeyring(a *app) {
 		return
 	}
 	name := pl.p.conns[i].Name
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storeReadTimeout)
 	defer cancel()
 	if err := a.unlinkSecret(ctx, name); err != nil {
 		pl.p.status = "unlink: " + err.Error()
@@ -225,7 +224,7 @@ func (pl *pickerLayer) deleteSelected(a *app) {
 		return
 	}
 	name := pl.p.conns[i].Name
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storeReadTimeout)
 	defer cancel()
 	if err := a.deleteConnection(ctx, name); err != nil {
 		if errors.Is(err, store.ErrConnectionNotFound) {

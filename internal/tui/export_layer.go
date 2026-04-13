@@ -24,14 +24,14 @@ func newExportLayer(seed string) *exportLayer {
 func (el *exportLayer) Draw(a *app, c *cellbuf) {
 	boxW := 64
 	if boxW > a.term.width-4 {
-		boxW = a.term.width - 4
+		boxW = a.term.width - dialogMargin
 	}
 	if boxW < 40 {
 		boxW = 40
 	}
 	boxH := 11
 	if boxH > a.term.height-4 {
-		boxH = a.term.height - 4
+		boxH = a.term.height - dialogMargin
 	}
 	row := (a.term.height - boxH) / 2
 	col := (a.term.width - boxW) / 2

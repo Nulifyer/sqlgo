@@ -91,14 +91,14 @@ func (il *inspectorLayer) ensureWrapped(innerW int) {
 func (il *inspectorLayer) Draw(a *app, c *cellbuf) {
 	boxW := 90
 	if boxW > a.term.width-4 {
-		boxW = a.term.width - 4
+		boxW = a.term.width - dialogMargin
 	}
 	if boxW < 40 {
 		boxW = 40
 	}
 	boxH := 24
 	if boxH > a.term.height-4 {
-		boxH = a.term.height - 4
+		boxH = a.term.height - dialogMargin
 	}
 	if boxH < 10 {
 		boxH = 10

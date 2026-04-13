@@ -26,7 +26,7 @@ func newTrustLayer(target config.Connection, err *sshtunnel.UnknownHostError) *t
 func (tl *trustLayer) Draw(a *app, c *cellbuf) {
 	boxW := 72
 	if boxW > a.term.width-4 {
-		boxW = a.term.width - 4
+		boxW = a.term.width - dialogMargin
 	}
 	if boxW < 48 {
 		boxW = 48
