@@ -139,6 +139,14 @@ func (l *lexer) run() []Token {
 		case c == '\'' || c == '"' || c == '`':
 			l.scanString(c)
 			l.emit(String, start)
+		case (c == 'N' || c == 'n' || c == 'B' || c == 'b' || c == 'X' || c == 'x') && l.peek(1) == '\'':
+			// MSSQL Unicode (N'...'), SQL-92 bit string (B'...') and
+			// hex string (X'...') literal prefixes. Absorb the prefix
+			// letter into a single String token so formatters don't
+			// split "N'foo'" into an Ident + String pair.
+			l.i++
+			l.scanString('\'')
+			l.emit(String, start)
 		case c == '[':
 			// MSSQL-style bracketed identifier.
 			l.scanBracketed()

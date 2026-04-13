@@ -118,6 +118,18 @@ type formatter struct {
 	// currentSplit is the outermost split state at paren depth zero.
 	// Flipped on SELECT/FROM/SET/VALUES/GROUP BY/ORDER BY.
 	currentSplit bool
+
+	// betweenPending is set when a BETWEEN keyword is emitted and
+	// cleared by the first AND at the same paren depth. That AND is
+	// the BETWEEN upper-bound delimiter, not a logical AND, so it
+	// must stay inline instead of wrapping.
+	betweenPending bool
+
+	// emitted flips true once any non-comment, non-whitespace token
+	// has been written. Leading-file comments consult this to decide
+	// whether to land at baseIndent (before any clause) or
+	// itemIndent (inside a clause).
+	emitted bool
 }
 
 // itemIndent is the indent used for items inside the current clause
@@ -137,26 +149,113 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 	case Whitespace:
 		return i + 1
 	case Comment:
-		f.writeRaw(t.Text)
-		if strings.HasSuffix(t.Text, "\n") {
-			f.newlineTo(f.itemIndent())
+		indent := f.itemIndent()
+		if !f.emitted {
+			indent = f.baseIndent
+		}
+		if strings.Contains(t.Text, "\n") && !strings.HasPrefix(t.Text, "--") {
+			// Multi-line block comment: re-align continuation lines to
+			// the current indent with a " * " prefix, preserve the
+			// user's relative indent within the comment, and emit the
+			// closing "*/" on its own line so the block has a clean,
+			// easy-to-edit footer.
+			lines := strings.Split(t.Text, "\n")
+			cont := lines[1:]
+
+			// Common leading whitespace width across non-blank lines
+			// is the user's base indent inside the comment; anything
+			// past it is intentional relative indent we want to keep.
+			minLead := -1
+			for _, line := range cont {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				lead := len(line) - len(strings.TrimLeft(line, " \t"))
+				if minLead < 0 || lead < minLead {
+					minLead = lead
+				}
+			}
+			if minLead < 0 {
+				minLead = 0
+			}
+
+			type cl struct {
+				content string
+				closer  bool
+			}
+			items := make([]cl, 0, len(cont))
+			for _, line := range cont {
+				s := line
+				if len(s) >= minLead {
+					s = s[minLead:]
+				}
+				// Strip optional "* " scaffolding the user already had
+				// so we don't double it up.
+				if strings.HasPrefix(s, "*") && !strings.HasPrefix(s, "*/") {
+					s = s[1:]
+					if strings.HasPrefix(s, " ") || strings.HasPrefix(s, "\t") {
+						s = s[1:]
+					}
+				}
+				trimR := strings.TrimRight(s, " \t")
+				if strings.HasSuffix(trimR, "*/") {
+					content := strings.TrimSuffix(trimR, "*/")
+					content = strings.TrimRight(content, " \t")
+					items = append(items, cl{content, true})
+					continue
+				}
+				items = append(items, cl{trimR, false})
+			}
+
+			f.writeRaw(lines[0])
+			sawCloser := false
+			for _, c := range items {
+				if c.closer {
+					sawCloser = true
+					if c.content == "" {
+						continue
+					}
+				}
+				f.newlineTo(indent)
+				if c.content == "" {
+					f.writeRaw(" *")
+				} else {
+					f.writeRaw(" * " + c.content)
+				}
+			}
+			if sawCloser {
+				f.newlineTo(indent)
+				f.writeRaw(" */")
+			}
+		} else {
+			f.writeRaw(t.Text)
+		}
+		// Line comments (-- ...) must be followed by a newline or the
+		// comment swallows whatever follows. Block comments trail with
+		// a space so they can sit inline inside an expression.
+		if strings.HasPrefix(t.Text, "--") || strings.HasSuffix(t.Text, "\n") || strings.Contains(t.Text, "\n") {
+			f.newlineTo(indent)
 		} else {
 			f.writeRaw(" ")
 		}
 		return i + 1
 	case String:
+		f.emitted = true
 		f.writeRaw(t.Text)
 		f.writeRaw(" ")
 		return i + 1
 	case Number:
+		f.emitted = true
 		f.writeRaw(t.Text)
 		f.writeRaw(" ")
 		return i + 1
 	case Ident:
+		f.emitted = true
 		f.writeRaw(t.Text)
 		f.writeRaw(" ")
 		return i + 1
 	case Keyword:
+		f.emitted = true
 		upper := strings.ToUpper(t.Text)
 
 		// GROUP BY / ORDER BY are two-word clause heads. We detect the
@@ -223,11 +322,23 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 
 		// AND / OR at top level (paren depth zero) wrap to the
 		// current item indent so long WHERE predicates read cleanly.
+		// Exception: the AND that delimits a BETWEEN's upper bound
+		// must stay inline -- flagged by betweenPending.
 		if (upper == "AND" || upper == "OR") && len(f.parenStack) == 0 {
+			if upper == "AND" && f.betweenPending {
+				f.betweenPending = false
+				f.writeRaw("AND")
+				f.writeRaw(" ")
+				return i + 1
+			}
 			f.newlineTo(f.itemIndent())
 			f.writeRaw(upper)
 			f.writeRaw(" ")
 			return i + 1
+		}
+
+		if upper == "BETWEEN" && len(f.parenStack) == 0 {
+			f.betweenPending = true
 		}
 
 		// Default: inline uppercase with a trailing space.
@@ -236,6 +347,7 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 		return i + 1
 
 	case Punct:
+		f.emitted = true
 		switch t.Text {
 		case ",":
 			f.trimTrailingSpace()
@@ -253,8 +365,16 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 				f.writeRaw(" ")
 			}
 		case "(":
-			if IsFunctionCall(tokens, i) {
-				f.trimTrailingSpace()
+			// Keep IN (...) value lists inline -- they're short,
+			// comma-separated, and read worse wrapped than a
+			// function call does. Same treatment as a function call:
+			// no indent bump, no newline before the body.
+			isFn := IsFunctionCall(tokens, i)
+			inlineGroup := isFn || prevKeyword(tokens, i) == "IN"
+			if inlineGroup {
+				if isFn {
+					f.trimTrailingSpace()
+				}
 				f.writeRaw("(")
 				f.parenStack = append(f.parenStack, -1)
 				f.splitStack = append(f.splitStack, false)
@@ -303,13 +423,9 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 			f.writeRaw(")")
 			f.writeRaw(" ")
 		case ";":
-			// Semicolons sit on their own line at the base indent so
-			// the statement terminator is visually distinct from the
-			// preceding FROM / WHERE / etc content. We trim any
-			// trailing space from the previous token first, drop to
-			// a fresh line at baseIndent, then emit the ; and drop
-			// to another line at baseIndent for whatever follows.
-			f.trimTrailingSpace()
+			// Semicolon lives on its own line at the base indent so
+			// the user can easily edit or remove it when stitching
+			// statements together.
 			f.newlineTo(f.baseIndent)
 			f.writeRaw(";")
 			f.newlineTo(f.baseIndent)
@@ -321,6 +437,7 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 		}
 		return i + 1
 	case Operator:
+		f.emitted = true
 		f.writeRaw(t.Text)
 		f.writeRaw(" ")
 		return i + 1

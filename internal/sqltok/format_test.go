@@ -164,20 +164,17 @@ func firstLine(lines []string) string {
 	return lines[0]
 }
 
-// TestFormatSemicolonOnOwnLine verifies that a trailing ; lands at
-// column 0 on its own line rather than hanging off the last content
-// row of the previous clause.
+// TestFormatSemicolonOnOwnLine verifies that a trailing ; sits alone
+// on its own line at column 0, which makes it easier for the user to
+// edit or remove when stitching statements together.
 func TestFormatSemicolonOnOwnLine(t *testing.T) {
 	t.Parallel()
 	got := Format("SELECT 1 FROM t;")
 	if !hasLineStartingWith(got, ";") {
-		t.Errorf("semicolon did not land at column 0:\n%s", got)
+		t.Errorf("; should sit on its own line:\n%s", got)
 	}
-	// The ; must also not share a line with the table reference.
-	for _, line := range splitLines(got) {
-		if contains(line, "t;") {
-			t.Errorf("; stayed inline with table ref: %q", line)
-		}
+	if contains(got, "t;") {
+		t.Errorf("; should not hug preceding token:\n%s", got)
 	}
 }
 

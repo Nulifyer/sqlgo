@@ -45,6 +45,8 @@ type Theme struct {
 	SQLOperator Style
 	SQLPunct    Style
 	SQLFunction Style // ident immediately followed by '(' and its matching parens
+	SQLTable    Style // ident in table position (after FROM/JOIN/etc.)
+	SQLColumn   Style // ident that isn't a function or table -- column refs, aliases
 }
 
 // defaultTheme is the out-of-the-box color scheme. Foregrounds for the
@@ -68,6 +70,8 @@ var defaultTheme = Theme{
 	SQLOperator: Style{FG: ansiBrightYellow, BG: ansiDefaultBG},
 	SQLPunct:    Style{FG: ansiDefault, BG: ansiDefaultBG},
 	SQLFunction: Style{FG: ansiBrightYellow, BG: ansiDefaultBG, Attrs: attrBold},
+	SQLTable:    Style{FG: ansiBrightCyan, BG: ansiDefaultBG},
+	SQLColumn:   Style{FG: ansiDefault, BG: ansiDefaultBG},
 }
 
 // currentTheme is the theme consulted by widgets. Swapping this is how a

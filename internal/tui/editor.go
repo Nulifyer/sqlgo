@@ -423,6 +423,49 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 	currentMatchBg := Style{FG: ansiDefault, BG: ansiDefaultBG, Attrs: attrReverse | attrUnderline}
 	hasSearch := e.searchNeedle != "" && len(e.matches) > 0
 
+	// Precompute cross-line table-context state so table idents on a
+	// separate line from their introducer (e.g. FROM\n    dbo.products)
+	// still highlight. Scan from line 0 up to the last visible line.
+	// Also track block-comment carryover so a /* ... */ that spans
+	// multiple lines paints as comment on every continuation line.
+	tableState := tblNormal
+	inBlockComment := false
+	lineStartStates := make([]int, innerH)
+	commentCarryEnd := make([]int, innerH)
+	scanEnd := e.scrollRow + innerH
+	if scanEnd > e.buf.LineCount() {
+		scanEnd = e.buf.LineCount()
+	}
+	for li := 0; li < scanEnd; li++ {
+		line := e.buf.Line(li)
+		if li >= e.scrollRow {
+			lineStartStates[li-e.scrollRow] = tableState
+		}
+		if inBlockComment {
+			closeIdx := indexOfCloseBlock(line)
+			if closeIdx < 0 {
+				if li >= e.scrollRow {
+					commentCarryEnd[li-e.scrollRow] = len(line)
+				}
+				continue
+			}
+			if li >= e.scrollRow {
+				commentCarryEnd[li-e.scrollRow] = closeIdx + 2
+			}
+			inBlockComment = false
+			tableState = advanceTableState(tableState, sqltok.TokenizeLine(line[closeIdx+2:]))
+			continue
+		}
+		tokens := sqltok.TokenizeLine(line)
+		tableState = advanceTableState(tableState, tokens)
+		for _, t := range tokens {
+			if t.Kind == sqltok.Comment && strings.HasPrefix(t.Text, "/*") && !strings.HasSuffix(t.Text, "*/") {
+				inBlockComment = true
+				break
+			}
+		}
+	}
+
 	for i := 0; i < innerH; i++ {
 		lineIdx := e.scrollRow + i
 		if lineIdx >= e.buf.LineCount() {
@@ -431,6 +474,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 		line := e.buf.Line(lineIdx)
 
 		tokens := sqltok.TokenizeLine(line)
+		startState := lineStartStates[i]
 
 		// Walk runes from scrollCol onward. colOut advances by
 		// runewidth so wide glyphs take 2 columns.
@@ -444,7 +488,10 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			if colOut >= bodyW {
 				break
 			}
-			st := styleForCol(tokens, vc)
+			st := styleForCol(tokens, vc, startState)
+			if vc < commentCarryEnd[i] {
+				st = currentTheme.SQLComment
+			}
 			if hasSearch {
 				if isCurrent, inMatch := e.matchStyleAt(lineIdx, vc); inMatch {
 					if isCurrent {
@@ -526,7 +573,7 @@ func isPrintable(r rune) bool {
 // line is short and the editor's viewport is likewise bounded by
 // innerW. Whitespace between tokens and anything past the last token
 // fall back to the default style.
-func styleForCol(tokens []sqltok.Token, col int) Style {
+func styleForCol(tokens []sqltok.Token, col int, startState int) Style {
 	for i, t := range tokens {
 		if col < t.StartCol {
 			return defaultStyle()
@@ -534,6 +581,12 @@ func styleForCol(tokens []sqltok.Token, col int) Style {
 		if col < t.EndCol {
 			if isFunctionToken(tokens, i) {
 				return currentTheme.SQLFunction
+			}
+			if t.Kind == sqltok.Ident && isTableIdent(tokens, i, startState) {
+				return currentTheme.SQLTable
+			}
+			if t.Kind == sqltok.Ident {
+				return currentTheme.SQLColumn
 			}
 			return styleForKind(t.Kind)
 		}
@@ -586,6 +639,80 @@ func isFunctionToken(tokens []sqltok.Token, i int) bool {
 				}
 			}
 		}
+	}
+	return false
+}
+
+// Table-context states for the cross-line table-ident detector.
+// tblNormal: nothing expected. tblExpect: next meaningful token, if an
+// Ident/String, is a table name. tblAfter: just consumed a table ident;
+// a following "." re-enters tblExpect so schema.name chains highlight.
+const (
+	tblNormal = iota
+	tblExpect
+	tblAfter
+)
+
+// advanceTableState folds all meaningful tokens on a line through the
+// table-context state machine and returns the exit state. Used to carry
+// context across line boundaries so "FROM\n    dbo.products" still
+// highlights.
+func advanceTableState(state int, tokens []sqltok.Token) int {
+	for _, t := range tokens {
+		if t.Kind == sqltok.Whitespace || t.Kind == sqltok.Comment {
+			continue
+		}
+		state = stepTableState(state, t)
+	}
+	return state
+}
+
+func stepTableState(state int, t sqltok.Token) int {
+	switch state {
+	case tblExpect:
+		if t.Kind == sqltok.Ident || t.Kind == sqltok.String {
+			return tblAfter
+		}
+		if t.Kind == sqltok.Keyword && isTableIntroducer(t.Text) {
+			return tblExpect
+		}
+		return tblNormal
+	case tblAfter:
+		if t.Kind == sqltok.Punct && t.Text == "." {
+			return tblExpect
+		}
+		if t.Kind == sqltok.Keyword && isTableIntroducer(t.Text) {
+			return tblExpect
+		}
+		return tblNormal
+	}
+	if t.Kind == sqltok.Keyword && isTableIntroducer(t.Text) {
+		return tblExpect
+	}
+	return tblNormal
+}
+
+func isTableIntroducer(s string) bool {
+	switch strings.ToUpper(s) {
+	case "FROM", "JOIN", "INTO", "UPDATE", "TABLE", "VIEW", "REFERENCES":
+		return true
+	}
+	return false
+}
+
+// isTableIdent reports whether tokens[i] (an Ident) names a table/view
+// given the table-context state at the start of the line. Replays the
+// state machine forward to tokens[i].
+func isTableIdent(tokens []sqltok.Token, i int, startState int) bool {
+	state := startState
+	for j, t := range tokens {
+		if t.Kind == sqltok.Whitespace || t.Kind == sqltok.Comment {
+			continue
+		}
+		if j == i {
+			return state == tblExpect && (t.Kind == sqltok.Ident || t.Kind == sqltok.String)
+		}
+		state = stepTableState(state, t)
 	}
 	return false
 }
@@ -770,6 +897,18 @@ func wordBoundsAt(line []rune, col int) (int, int) {
 		end++
 	}
 	return start, end
+}
+
+// indexOfCloseBlock returns the rune index of `*` in the first `*/`
+// sequence in line, or -1 if none. Used by the highlighter to detect
+// where a carried-over /* ... */ block comment closes.
+func indexOfCloseBlock(line []rune) int {
+	for i := 0; i+1 < len(line); i++ {
+		if line[i] == '*' && line[i+1] == '/' {
+			return i
+		}
+	}
+	return -1
 }
 
 // ensureCursorVisible scrolls the viewport so the cursor sits inside
