@@ -34,7 +34,24 @@ type buffer struct {
 	// never hits it.
 	undo []bufferSnapshot
 	redo []bufferSnapshot
+
+	// Coalescing: consecutive same-kind edits at adjacent cursor
+	// positions share a single undo snapshot so Undo pops a word (or
+	// run of backspaces) at a time instead of one rune at a time.
+	lastEditKind editKind
+	lastEditRow  int
+	lastEditCol  int
 }
+
+type editKind int
+
+const (
+	editNone editKind = iota
+	editInsertWord
+	editInsertPunct
+	editBackspace
+	editDelete
+)
 
 type bufferSnapshot struct {
 	text string
@@ -94,6 +111,7 @@ func (b *buffer) SetCursor(row, col int) {
 	}
 	b.row = row
 	b.col = col
+	b.lastEditKind = editNone
 }
 
 // Clear resets the buffer to a single empty line and wipes undo/redo.
@@ -132,16 +150,20 @@ func (b *buffer) setTextRaw(s string) {
 // Insert writes r at the cursor and advances one column. If a
 // selection is active it's deleted first.
 func (b *buffer) Insert(r rune) {
-	b.snapshot()
-	if b.anchorSet {
+	if b.HasSelection() {
+		b.snapshot()
 		b.deleteSelectionNoSnap()
+		b.insertRuneNoSnap(r)
+		return
 	}
-	line := b.lines[b.row]
-	line = append(line, 0)
-	copy(line[b.col+1:], line[b.col:])
-	line[b.col] = r
-	b.lines[b.row] = line
-	b.col++
+	kind := editInsertPunct
+	if isWordChar(r) {
+		kind = editInsertWord
+	}
+	b.snapshotKind(kind)
+	b.anchorSet = false
+	b.insertRuneNoSnap(r)
+	b.recordEdit(kind)
 }
 
 // InsertText writes a whole string (possibly multi-line) at the cursor.
@@ -196,50 +218,64 @@ func (b *buffer) insertRuneNoSnap(r rune) {
 // Backspace deletes the character before the cursor, the active
 // selection, or joins with the previous line if at column 0.
 func (b *buffer) Backspace() {
-	b.snapshot()
-	if b.anchorSet {
+	if b.HasSelection() {
+		b.snapshot()
 		b.deleteSelectionNoSnap()
 		return
 	}
-	if b.col > 0 {
-		line := b.lines[b.row]
-		copy(line[b.col-1:], line[b.col:])
-		b.lines[b.row] = line[:len(line)-1]
-		b.col--
+	// Joining lines (col == 0) is a distinct, more disruptive edit; force
+	// a break so a run of in-line backspaces doesn't silently swallow the
+	// line-merge into the same undo step.
+	if b.col == 0 {
+		b.snapshot()
+		b.anchorSet = false
+		if b.row == 0 {
+			return
+		}
+		prev := b.lines[b.row-1]
+		cur := b.lines[b.row]
+		newCol := len(prev)
+		b.lines[b.row-1] = append(prev, cur...)
+		b.lines = append(b.lines[:b.row], b.lines[b.row+1:]...)
+		b.row--
+		b.col = newCol
 		return
 	}
-	if b.row == 0 {
-		return
-	}
-	prev := b.lines[b.row-1]
-	cur := b.lines[b.row]
-	newCol := len(prev)
-	b.lines[b.row-1] = append(prev, cur...)
-	b.lines = append(b.lines[:b.row], b.lines[b.row+1:]...)
-	b.row--
-	b.col = newCol
+	b.snapshotKind(editBackspace)
+	b.anchorSet = false
+	line := b.lines[b.row]
+	copy(line[b.col-1:], line[b.col:])
+	b.lines[b.row] = line[:len(line)-1]
+	b.col--
+	b.recordEdit(editBackspace)
 }
 
 // Delete removes the character under the cursor, the active selection,
 // or joins the next line into the current one if at end of line.
 func (b *buffer) Delete() {
-	b.snapshot()
-	if b.anchorSet {
+	if b.HasSelection() {
+		b.snapshot()
 		b.deleteSelectionNoSnap()
 		return
 	}
 	line := b.lines[b.row]
-	if b.col < len(line) {
-		copy(line[b.col:], line[b.col+1:])
-		b.lines[b.row] = line[:len(line)-1]
+	// Line-join case: force a break, same reasoning as Backspace.
+	if b.col >= len(line) {
+		b.snapshot()
+		b.anchorSet = false
+		if b.row == len(b.lines)-1 {
+			return
+		}
+		next := b.lines[b.row+1]
+		b.lines[b.row] = append(line, next...)
+		b.lines = append(b.lines[:b.row+1], b.lines[b.row+2:]...)
 		return
 	}
-	if b.row == len(b.lines)-1 {
-		return
-	}
-	next := b.lines[b.row+1]
-	b.lines[b.row] = append(line, next...)
-	b.lines = append(b.lines[:b.row+1], b.lines[b.row+2:]...)
+	b.snapshotKind(editDelete)
+	b.anchorSet = false
+	copy(line[b.col:], line[b.col+1:])
+	b.lines[b.row] = line[:len(line)-1]
+	b.recordEdit(editDelete)
 }
 
 // --- cursor movement -------------------------------------------------------
@@ -578,9 +614,19 @@ func (b *buffer) normalizedSelection() (int, int, int, int) {
 // ClearSelection drops the active selection without moving the cursor.
 func (b *buffer) ClearSelection() { b.clearSelection() }
 
-func (b *buffer) clearSelection() { b.anchorSet = false }
+func (b *buffer) clearSelection() {
+	b.anchorSet = false
+	// Any explicit cursor move (plain arrow / Home / End / word jump)
+	// breaks undo coalescing so returning to the same position doesn't
+	// silently extend the previous word/backspace run.
+	b.lastEditKind = editNone
+}
 
 func (b *buffer) ensureAnchor() {
+	// Shift-moves also count as cursor repositioning for coalesce
+	// purposes -- break here so a shift-select then type doesn't fold
+	// into the prior word.
+	b.lastEditKind = editNone
 	if b.anchorSet {
 		return
 	}
@@ -592,8 +638,33 @@ func (b *buffer) ensureAnchor() {
 // --- undo / redo -----------------------------------------------------------
 
 // snapshot pushes the current buffer state onto the undo stack and
-// clears the redo stack (a new edit abandons any redo future).
+// clears the redo stack (a new edit abandons any redo future). Always
+// breaks any in-progress coalesce run, so callers of plain snapshot()
+// get a distinct undo step.
 func (b *buffer) snapshot() {
+	b.pushSnapshot()
+	b.lastEditKind = editNone
+}
+
+// snapshotKind is the coalescing variant used by single-rune edits
+// (Insert / Backspace / Delete). If the previous edit was the same
+// kind and the cursor is exactly where that edit left it, no new
+// snapshot is pushed -- the run is still covered by the pre-run
+// snapshot, so Undo rolls back the whole word / whole run of deletes.
+// Callers must call recordEdit after mutating to update the coalesce
+// anchor.
+func (b *buffer) snapshotKind(kind editKind) {
+	if kind != editNone && kind == b.lastEditKind &&
+		b.row == b.lastEditRow && b.col == b.lastEditCol {
+		// Coalesce: reuse the existing top-of-stack snapshot. Still
+		// drop redo because we're extending the current edit forward.
+		b.redo = nil
+		return
+	}
+	b.pushSnapshot()
+}
+
+func (b *buffer) pushSnapshot() {
 	snap := bufferSnapshot{text: b.Text(), row: b.row, col: b.col}
 	b.undo = append(b.undo, snap)
 	if len(b.undo) > maxUndoDepth {
@@ -603,6 +674,12 @@ func (b *buffer) snapshot() {
 		b.undo = append(b.undo[:0], b.undo[n:]...)
 	}
 	b.redo = nil
+}
+
+func (b *buffer) recordEdit(kind editKind) {
+	b.lastEditKind = kind
+	b.lastEditRow = b.row
+	b.lastEditCol = b.col
 }
 
 // Undo reverts the most recent mutation. Pushes the current state
@@ -625,6 +702,7 @@ func (b *buffer) Undo() bool {
 		b.col = len(b.lines[b.row])
 	}
 	b.anchorSet = false
+	b.lastEditKind = editNone
 	return true
 }
 
@@ -647,5 +725,6 @@ func (b *buffer) Redo() bool {
 		b.col = len(b.lines[b.row])
 	}
 	b.anchorSet = false
+	b.lastEditKind = editNone
 	return true
 }

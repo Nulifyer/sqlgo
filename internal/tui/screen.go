@@ -27,6 +27,13 @@ type screen struct {
 	prev      *cellbuf
 
 	emit bytes.Buffer // reused ANSI write buffer
+
+	// view tracks which terminal modes we've told the terminal are
+	// active. applyView diffs a new View against it and emits only
+	// the sequences for flags that changed. viewSet is false until
+	// the first applyView so the initial call always emits.
+	view    View
+	viewSet bool
 }
 
 func newScreen(out io.Writer, w, h int) *screen {
@@ -128,6 +135,15 @@ func (s *screen) composite(bufs []*cellbuf) {
 // in new (the glyph was overwritten by something narrow) emits a
 // clobber automatically -- no forceNext hack needed.
 func (s *screen) flush() error {
+	// Fast-path: if no cell differs and the cursor state is identical
+	// to the previous frame, emit nothing. Without this guard every
+	// idle frame still writes cursorHide + a moveTo + cursorShow,
+	// which some terminals render as a visible cursor flicker and
+	// which pollutes `strace`/recorded sessions with noise.
+	if s.framesEqual() {
+		return nil
+	}
+
 	s.emit.Reset()
 	s.emit.WriteString(cursorHide)
 
@@ -194,6 +210,99 @@ func (s *screen) flush() error {
 	}
 	s.prev, s.final = s.final, s.prev
 	return nil
+}
+
+// applyView brings the terminal's mode state in line with v, emitting
+// only the deltas. Safe to call every frame; a no-op when v matches the
+// last applied view. WindowTitle is re-emitted only when the string
+// changes (OSC 2 is cheap but noisy in recorded terminals).
+//
+// Alt-screen toggles should happen before any cell emission in the
+// same frame -- callers invoke this at the top of flush so the diff
+// loop writes into the correct buffer.
+func (s *screen) applyView(v View) error {
+	var buf bytes.Buffer
+	if !s.viewSet || s.view.AltScreen != v.AltScreen {
+		if v.AltScreen {
+			buf.WriteString(altScreenOn)
+		} else {
+			buf.WriteString(altScreenOff)
+		}
+	}
+	if !s.viewSet || s.view.MouseEnabled != v.MouseEnabled {
+		if v.MouseEnabled {
+			buf.WriteString(mouseOn)
+		} else {
+			buf.WriteString(mouseOff)
+		}
+	}
+	if !s.viewSet || s.view.PasteEnabled != v.PasteEnabled {
+		if v.PasteEnabled {
+			buf.WriteString(pasteOn)
+		} else {
+			buf.WriteString(pasteOff)
+		}
+	}
+	if !s.viewSet || s.view.WindowTitle != v.WindowTitle {
+		if v.WindowTitle != "" {
+			// OSC 2 sets the window title; terminated by BEL for the
+			// broadest terminal support (ST works too but a few
+			// terminals don't recognize it).
+			buf.WriteString(esc + "]2;" + v.WindowTitle + "\x07")
+		}
+	}
+	if buf.Len() > 0 {
+		if _, err := s.out.Write(buf.Bytes()); err != nil {
+			return err
+		}
+	}
+	s.view = v
+	s.viewSet = true
+	return nil
+}
+
+// teardownView restores the terminal modes we turned on during Run so
+// the user's shell doesn't inherit mouse tracking / bracketed paste /
+// alt-screen. Called from Run's defer chain on clean exit; the panic
+// handler does the same work inline.
+func (s *screen) teardownView() {
+	if !s.viewSet {
+		return
+	}
+	var buf bytes.Buffer
+	if s.view.PasteEnabled {
+		buf.WriteString(pasteOff)
+	}
+	if s.view.MouseEnabled {
+		buf.WriteString(mouseOff)
+	}
+	if s.view.AltScreen {
+		buf.WriteString(altScreenOff)
+	}
+	if buf.Len() > 0 {
+		_, _ = s.out.Write(buf.Bytes())
+	}
+	s.viewSet = false
+}
+
+// framesEqual reports whether s.final exactly matches s.prev, cursor
+// state included. Used by flush as an early-exit to skip emitting the
+// cursorHide/cursorShow envelope on idle frames. O(w*h) worst case --
+// on par with the diff loop itself, so the cost is bounded.
+func (s *screen) framesEqual() bool {
+	if s.final.cursorWanted != s.prev.cursorWanted ||
+		s.final.cursorRow != s.prev.cursorRow ||
+		s.final.cursorCol != s.prev.cursorCol {
+		return false
+	}
+	for row := 1; row <= s.h; row++ {
+		for col := 1; col <= s.w; col++ {
+			if !cellsEqual(s.final.at(row, col), s.prev.at(row, col)) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // cellsEqual reports whether two cells render identically. Factored out so

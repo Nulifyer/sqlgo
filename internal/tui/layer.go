@@ -25,6 +25,46 @@ type Layer interface {
 	Hints(a *app) string
 }
 
+// View declares terminal modes a layer wants active while it is on top
+// of the stack. Mode flags with zero values mean "off"; the one
+// exception is AltScreen, whose default is "on" via defaultView() so
+// layers that don't implement ViewProvider get the existing behavior.
+//
+// The screen tracks the last applied View and emits only the sequences
+// for flags that flipped, so per-frame View() calls are cheap when
+// nothing changes.
+type View struct {
+	AltScreen    bool
+	MouseEnabled bool
+	PasteEnabled bool
+	WindowTitle  string
+}
+
+// ViewProvider is implemented by layers that want to override the
+// default terminal modes while they're on top. The topmost
+// implementing layer wins; layers below it don't contribute.
+type ViewProvider interface {
+	View(a *app) View
+}
+
+// defaultView is the baseline used when no layer on the stack
+// implements ViewProvider. Alt-screen on matches the pre-ViewProvider
+// behavior; everything else off.
+func defaultView() View {
+	return View{AltScreen: true}
+}
+
+// effectiveView walks the stack top-down looking for a ViewProvider.
+// The topmost provider wins. If none implement it, defaultView.
+func (a *app) effectiveView() View {
+	for i := len(a.layers) - 1; i >= 0; i-- {
+		if vp, ok := a.layers[i].(ViewProvider); ok {
+			return vp.View(a)
+		}
+	}
+	return defaultView()
+}
+
 func (a *app) pushLayer(l Layer) {
 	a.layers = append(a.layers, l)
 }

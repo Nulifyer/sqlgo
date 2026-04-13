@@ -150,22 +150,140 @@ func TestBufferInsertTextMultiline(t *testing.T) {
 func TestBufferUndoRedo(t *testing.T) {
 	t.Parallel()
 	b := newBuffer()
-	for _, r := range "hello" {
+	// Word-char runs coalesce into a single undo step, so typing two
+	// words separated by a space yields three stops: pre-"hello",
+	// pre-space, pre-"world". (The space itself is a punct edit that
+	// breaks coalesce.)
+	for _, r := range "hello world" {
 		b.Insert(r)
 	}
 	if !b.Undo() {
 		t.Fatal("Undo returned false on non-empty history")
 	}
-	// Undo pops the last Insert; after one undo the buffer should
-	// contain "hell".
-	if got := b.Text(); got != "hell" {
-		t.Errorf("after one undo: %q, want %q", got, "hell")
+	if got := b.Text(); got != "hello " {
+		t.Errorf("after first undo: %q, want %q", got, "hello ")
+	}
+	if !b.Undo() {
+		t.Fatal("second Undo returned false")
+	}
+	if got := b.Text(); got != "hello" {
+		t.Errorf("after second undo: %q, want %q", got, "hello")
+	}
+	if !b.Undo() {
+		t.Fatal("third Undo returned false")
+	}
+	if got := b.Text(); got != "" {
+		t.Errorf("after third undo: %q, want empty", got)
 	}
 	if !b.Redo() {
 		t.Fatal("Redo returned false after undo")
 	}
 	if got := b.Text(); got != "hello" {
-		t.Errorf("after redo: %q", got)
+		t.Errorf("after redo: %q, want %q", got, "hello")
+	}
+}
+
+func TestBufferUndoCoalesceBreaksOnCursorMove(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	for _, r := range "abc" {
+		b.Insert(r)
+	}
+	// SetCursor (or any arrow/jump) must force the next Insert into a
+	// new undo step so returning-to-same-position typing doesn't fold
+	// into the earlier word.
+	b.SetCursor(0, 0)
+	b.Insert('x')
+	if !b.Undo() {
+		t.Fatal("Undo returned false")
+	}
+	if got := b.Text(); got != "abc" {
+		t.Errorf("after undo: %q, want %q", got, "abc")
+	}
+	if !b.Undo() {
+		t.Fatal("second Undo returned false")
+	}
+	if got := b.Text(); got != "" {
+		t.Errorf("after second undo: %q, want empty", got)
+	}
+}
+
+func TestBufferUndoCoalesceBackspaces(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	b.SetText("hello")
+	for i := 0; i < 3; i++ {
+		b.Backspace()
+	}
+	// Three contiguous backspaces coalesce into one undo step.
+	if got := b.Text(); got != "he" {
+		t.Fatalf("pre-undo: %q, want %q", got, "he")
+	}
+	if !b.Undo() {
+		t.Fatal("Undo returned false")
+	}
+	if got := b.Text(); got != "hello" {
+		t.Errorf("after undo: %q, want %q", got, "hello")
+	}
+}
+
+func TestBufferUndoPunctSplitsWord(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	// "ab.cd" should produce three undo stops: pre-"ab", pre-".", pre-"cd".
+	for _, r := range "ab.cd" {
+		b.Insert(r)
+	}
+	if !b.Undo() {
+		t.Fatal("Undo 1 false")
+	}
+	if got := b.Text(); got != "ab." {
+		t.Errorf("undo 1: %q, want %q", got, "ab.")
+	}
+	if !b.Undo() {
+		t.Fatal("Undo 2 false")
+	}
+	if got := b.Text(); got != "ab" {
+		t.Errorf("undo 2: %q, want %q", got, "ab")
+	}
+	if !b.Undo() {
+		t.Fatal("Undo 3 false")
+	}
+	if got := b.Text(); got != "" {
+		t.Errorf("undo 3: %q, want empty", got)
+	}
+}
+
+func TestBufferUndoSelectionReplaceIsOwnStep(t *testing.T) {
+	t.Parallel()
+	b := newBuffer()
+	for _, r := range "hello" {
+		b.Insert(r)
+	}
+	// Select "lo" and replace with "p".
+	b.anchorRow, b.anchorCol, b.anchorSet = 0, 3, true
+	b.row, b.col = 0, 5
+	b.Insert('p')
+	if got := b.Text(); got != "help" {
+		t.Fatalf("pre-undo: %q, want %q", got, "help")
+	}
+	// Typing after replace should be its own undo step, not coalesce
+	// back into the replace.
+	b.Insert('s')
+	if got := b.Text(); got != "helps" {
+		t.Fatalf("after follow-on insert: %q", got)
+	}
+	if !b.Undo() {
+		t.Fatal("Undo 1 false")
+	}
+	if got := b.Text(); got != "help" {
+		t.Errorf("undo 1: %q, want %q", got, "help")
+	}
+	if !b.Undo() {
+		t.Fatal("Undo 2 false")
+	}
+	if got := b.Text(); got != "hello" {
+		t.Errorf("undo 2: %q, want %q", got, "hello")
 	}
 }
 

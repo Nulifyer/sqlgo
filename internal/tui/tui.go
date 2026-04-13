@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/clipboard"
@@ -264,14 +266,20 @@ func Run() error {
 	if err != nil {
 		return err
 	}
+	// Panic handler runs before t.Restore so it can emit the screen-
+	// unsetup sequences while stdout is still ours, then hand back to
+	// cooked mode. It re-panics, so t.Restore below is a no-op on the
+	// panic path but still covers the clean-exit path.
+	defer restoreTerminalOnPanic(t)
 	defer t.Restore()
 
-	fmt.Fprint(os.Stdout, altScreenOn)
+	// Alt-screen and cursor-hide are handled declaratively per-frame
+	// via screen.applyView; the first flush emits both because the
+	// view baseline is the zero value. The defer restores the main
+	// screen on clean exit -- panic path goes through
+	// restoreTerminalOnPanic.
 	fmt.Fprint(os.Stdout, cursorHide)
-	defer func() {
-		fmt.Fprint(os.Stdout, cursorShow)
-		fmt.Fprint(os.Stdout, altScreenOff)
-	}()
+	defer fmt.Fprint(os.Stdout, cursorShow)
 
 	sec := secret.System()
 	secAvail := sec.Available()
@@ -323,6 +331,10 @@ func Run() error {
 			_ = a.tunnel.Close()
 		}
 		_ = a.store.Close()
+		// Emit the off-sequences for whatever terminal modes the last
+		// applied View had on. Panic path skips this (handled inline by
+		// restoreTerminalOnPanic).
+		a.scr.teardownView()
 	}()
 
 	return a.loop()
@@ -330,23 +342,37 @@ func Run() error {
 
 func (a *app) loop() error {
 	keys := newKeyReader(os.Stdin)
-	keyCh := make(chan Key, 8)
+	msgCh := make(chan InputMsg, 8)
 	keyErrCh := make(chan error, 1)
 	go func() {
 		for {
-			k, err := keys.Read()
+			m, err := keys.Read()
 			if err != nil {
 				keyErrCh <- err
-				close(keyCh)
+				close(msgCh)
 				return
 			}
-			keyCh <- k
+			msgCh <- m
 		}
 	}()
+
+	// SIGINT/SIGTERM from outside the terminal (e.g. `kill`) should
+	// exit cleanly through the same path as Ctrl+Q. In raw mode
+	// Ctrl+C is delivered as a 0x03 keystroke, not as SIGINT, so
+	// this channel only fires for external signals.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
 	for !a.quit {
 		if a.term.refreshSize() {
 			a.scr.resize(a.term.width, a.term.height)
+		}
+		// Apply declarative terminal modes (alt-screen, mouse, paste,
+		// title) before the cell-diff flush so the next diff lands in
+		// the right buffer.
+		if err := a.scr.applyView(a.effectiveView()); err != nil {
+			return fmt.Errorf("apply view: %w", err)
 		}
 		a.draw()
 		if err := a.scr.flush(); err != nil {
@@ -354,16 +380,18 @@ func (a *app) loop() error {
 		}
 
 		select {
-		case k, ok := <-keyCh:
+		case m, ok := <-msgCh:
 			if !ok {
 				if err := <-keyErrCh; err != nil && !errors.Is(err, io.EOF) {
 					return fmt.Errorf("read key: %w", err)
 				}
 				return nil
 			}
-			a.handleKey(k)
+			a.handleInput(m)
 		case e := <-a.resultCh:
 			a.handleQueryEvent(e)
+		case <-sigCh:
+			a.quit = true
 		}
 	}
 	return nil
@@ -381,6 +409,23 @@ func (a *app) draw() {
 		bufs[i] = b
 	}
 	a.scr.composite(bufs)
+}
+
+// handleInput routes any InputMsg to the right handler. Key messages
+// go through the long-standing handleKey path so every existing layer
+// keeps working unchanged. Non-Key messages (Mouse, Paste, Focus, Blur)
+// are delivered to the top layer only if it implements InputHandler;
+// otherwise they're dropped silently, which matches the pre-v2 behavior
+// of the terminal ignoring these escape sequences entirely.
+func (a *app) handleInput(m InputMsg) {
+	switch v := m.(type) {
+	case Key:
+		a.handleKey(v)
+	default:
+		if h, ok := a.topLayer().(InputHandler); ok {
+			h.HandleInput(a, m)
+		}
+	}
 }
 
 // handleKey sends the key to the topmost layer, with two global escape
@@ -707,6 +752,7 @@ func (a *app) handleQueryEvent(e queryEvent) {
 		a.running = false
 		a.cancel = nil
 		m.lastRowCount = e.loaded
+		m.lastColCount = m.table.ColCount()
 		m.lastElapsed = e.elapsed
 		m.lastCapped = e.capped
 		m.lastHasResult = true

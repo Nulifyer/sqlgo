@@ -56,10 +56,32 @@ type mainLayer struct {
 	// border. lastHasResult is the gate: zero on startup / after a
 	// disconnect so no stale "0 rows / 0ms" shows up before any query.
 	lastRowCount  int
+	lastColCount  int
 	lastElapsed   time.Duration
 	lastHasResult bool
 	lastCapped    bool
 	lastErr       string
+}
+
+// View turns on bracketed paste so multi-line SQL pasted into the
+// editor arrives as one PasteMsg (and thus one undo snapshot) instead
+// of a flood of KeyRune/KeyEnter events. Alt-screen stays on as usual.
+func (m *mainLayer) View(a *app) View {
+	return View{AltScreen: true, PasteEnabled: true}
+}
+
+// HandleInput routes a PasteMsg into the editor buffer when the Query
+// panel has focus. Other non-Key events are ignored -- we don't use
+// mouse or focus events yet. Returning false is harmless; the caller
+// only reads the return value for consumption tracking.
+func (m *mainLayer) HandleInput(a *app, msg InputMsg) bool {
+	if p, ok := msg.(PasteMsg); ok {
+		if m.focus == FocusQuery && p.Text != "" {
+			m.editor.buf.InsertText(p.Text)
+			return true
+		}
+	}
+	return false
 }
 
 func newMainLayer() *mainLayer {
@@ -405,7 +427,7 @@ func (m *mainLayer) prefillSelectFromExplorer(a *app) {
 	if a.conn != nil {
 		caps = a.conn.Capabilities()
 	}
-	m.editor.buf.SetText(BuildSelect(caps, t, 100))
+	m.editor.buf.SetText(sqltok.Format(BuildSelect(caps, t, 100)))
 	m.focus = FocusQuery
 }
 
@@ -474,7 +496,7 @@ func (m *mainLayer) resultsTitle() string {
 // run. Errors collapse to a short tag so the border doesn't grow.
 func (m *mainLayer) resultsRightInfo(a *app) string {
 	if a.running {
-		return fmt.Sprintf("streaming %d rows", m.table.RowCount())
+		return fmt.Sprintf("streaming %d rows / %d cols", m.table.RowCount(), m.table.ColCount())
 	}
 	if !m.lastHasResult {
 		return ""
@@ -486,7 +508,7 @@ func (m *mainLayer) resultsRightInfo(a *app) string {
 	if m.lastCapped {
 		suffix = " (capped)"
 	}
-	return fmt.Sprintf("%d rows / %s%s", m.lastRowCount, m.lastElapsed.Round(time.Millisecond), suffix)
+	return fmt.Sprintf("%d rows / %d cols / %s%s", m.lastRowCount, m.lastColCount, m.lastElapsed.Round(time.Millisecond), suffix)
 }
 
 // statusText builds the footer line. Layout:

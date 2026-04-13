@@ -17,6 +17,19 @@ const (
 	altScreenOn  = csi + "?1049h"
 	altScreenOff = csi + "?1049l"
 	resetStyle   = csi + "0m"
+
+	// SGR mouse reporting: ?1000 = cell-motion click/release, ?1006 =
+	// SGR extended encoding (coordinates as decimal digits, avoids the
+	// 223-column cap of the legacy X10 encoding). Enable/disable
+	// together so the decoder only has to handle one shape.
+	mouseOn  = csi + "?1000;1006h"
+	mouseOff = csi + "?1000;1006l"
+
+	// Bracketed paste: terminal brackets pasted text with ESC[200~ and
+	// ESC[201~ so the input parser can deliver it as one PasteMsg
+	// instead of a flood of key events.
+	pasteOn  = csi + "?2004h"
+	pasteOff = csi + "?2004l"
 )
 
 // moveTo positions the cursor (1-based row, col).

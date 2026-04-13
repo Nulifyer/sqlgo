@@ -64,11 +64,13 @@ func newKeyReader(r io.Reader) *keyReader {
 	return &keyReader{r: bufio.NewReader(r)}
 }
 
-// Read blocks until the next key is available.
-func (kr *keyReader) Read() (Key, error) {
+// Read blocks until the next input event is available. Returns one of
+// Key, PasteMsg, MouseMsg, FocusMsg, BlurMsg depending on the CSI
+// sequence the terminal emitted.
+func (kr *keyReader) Read() (InputMsg, error) {
 	b, err := kr.r.ReadByte()
 	if err != nil {
-		return Key{}, err
+		return nil, err
 	}
 
 	switch {
@@ -95,7 +97,7 @@ func (kr *keyReader) Read() (Key, error) {
 	return kr.readUTF8(b)
 }
 
-func (kr *keyReader) readUTF8(first byte) (Key, error) {
+func (kr *keyReader) readUTF8(first byte) (InputMsg, error) {
 	var n int
 	switch {
 	case first&0xE0 == 0xC0:
@@ -118,7 +120,7 @@ func (kr *keyReader) readUTF8(first byte) (Key, error) {
 
 // readEscape handles ESC, ESC+[<...>, ESC+O<...>, and ESC+<rune> (Alt+rune)
 // sequences. A bare ESC (no follow-up within a short window) returns KeyEsc.
-func (kr *keyReader) readEscape() (Key, error) {
+func (kr *keyReader) readEscape() (InputMsg, error) {
 	// Peek with a small wait so we can distinguish bare Esc from CSI.
 	if !kr.peekAvailable(8 * time.Millisecond) {
 		return Key{Kind: KeyEsc}, nil
@@ -155,19 +157,186 @@ func (kr *keyReader) readEscape() (Key, error) {
 	return Key{Kind: KeyEsc}, nil
 }
 
-func (kr *keyReader) readCSI() (Key, error) {
+func (kr *keyReader) readCSI() (InputMsg, error) {
 	// CSI: read until a final byte in 0x40..0x7e.
+	//
+	// SGR mouse (CSI <...M|m) has a '<' intermediate byte we need to
+	// detect early so decodeCSI doesn't mis-parse the params. Legacy
+	// X10 mouse (CSI M<b><x><y>) is a fixed 3-byte payload right after
+	// the M with no semicolons -- handled via the sgr=false path.
 	var params []byte
+	sgrMouse := false
 	for {
 		b, err := kr.r.ReadByte()
 		if err != nil {
-			return Key{}, err
+			return nil, err
+		}
+		// SGR mouse introducer: remember it and drop from params so
+		// the numeric parser doesn't trip on the '<'.
+		if len(params) == 0 && b == '<' {
+			sgrMouse = true
+			continue
+		}
+		// Legacy X10 mouse: CSI M <btn> <x> <y>. The M arrives as a
+		// terminator (0x40-0x7e), so we branch here before the final-
+		// byte check swallows it.
+		if len(params) == 0 && !sgrMouse && b == 'M' {
+			return kr.readLegacyMouse()
 		}
 		if b >= 0x40 && b <= 0x7e {
+			if sgrMouse && (b == 'M' || b == 'm') {
+				return decodeSGRMouse(params, b == 'M')
+			}
+			// Bracketed paste start: CSI 200~ -> collect until 201~.
+			if b == '~' && string(params) == "200" {
+				return kr.readPaste()
+			}
+			// Focus in/out: CSI I / CSI O (no params).
+			if len(params) == 0 && b == 'I' {
+				return FocusMsg{}, nil
+			}
+			if len(params) == 0 && b == 'O' {
+				return BlurMsg{}, nil
+			}
 			return decodeCSI(params, b), nil
 		}
 		params = append(params, b)
 	}
+}
+
+// readPaste accumulates bytes until CSI 201~ (paste end) and returns
+// them as a single PasteMsg. Any CSI/escape bytes inside the paste are
+// passed through verbatim -- terminals that escape them do so before
+// bracketing, so the payload is the literal text the user copied.
+func (kr *keyReader) readPaste() (InputMsg, error) {
+	var buf []byte
+	const endSeq = "\x1b[201~"
+	for {
+		b, err := kr.r.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		buf = append(buf, b)
+		// Fast path: check the tail of buf for the terminator.
+		if len(buf) >= len(endSeq) && string(buf[len(buf)-len(endSeq):]) == endSeq {
+			buf = buf[:len(buf)-len(endSeq)]
+			return PasteMsg{Text: string(buf)}, nil
+		}
+		// Safety cap: 16 MB. A paste longer than that is almost
+		// certainly a wedged terminal; drop the partial and return an
+		// empty PasteMsg so the loop doesn't block forever.
+		if len(buf) > 16*1024*1024 {
+			return PasteMsg{}, nil
+		}
+	}
+}
+
+// readLegacyMouse decodes the X10 encoding: three bytes after "CSI M",
+// biased by 32. It's obsolete but still emitted by some terminals when
+// SGR isn't negotiated. Coordinates are 1-based in both encodings.
+func (kr *keyReader) readLegacyMouse() (InputMsg, error) {
+	buf := make([]byte, 3)
+	if _, err := io.ReadFull(kr.r, buf); err != nil {
+		return nil, err
+	}
+	code := int(buf[0]) - 32
+	x := int(buf[1]) - 32
+	y := int(buf[2]) - 32
+	return mouseFromCode(code, x, y, true), nil
+}
+
+// decodeSGRMouse parses "CSI <code;x;y M|m" into a MouseMsg. The final
+// byte tells us press vs release: capital M = press, lowercase m =
+// release. Motion events show up with the motion bit (32) set in code.
+func decodeSGRMouse(params []byte, press bool) (InputMsg, error) {
+	// Three ';'-separated integers.
+	code, x, y, ok := parseThreeInts(params)
+	if !ok {
+		return Key{Kind: KeyEsc}, nil
+	}
+	return mouseFromCode(code, x, y, press), nil
+}
+
+// mouseFromCode extracts button / action / modifiers from an xterm
+// mouse code. Bit layout: 0-1 = button low bits, 2 = shift, 3 = alt,
+// 4 = ctrl, 5 = motion flag, 6+7 = button high bits (wheel & extended).
+func mouseFromCode(code, x, y int, press bool) MouseMsg {
+	shift := code&4 != 0
+	alt := code&8 != 0
+	ctrl := code&16 != 0
+	motion := code&32 != 0
+	btnLow := code & 3
+	btnHigh := code >> 6 // 0, 1 (wheel), 2 (extended)
+
+	var btn MouseButton
+	var act MouseAction
+	switch btnHigh {
+	case 1:
+		// Wheel: low bit 0 = up, 1 = down.
+		if btnLow == 0 {
+			btn = MouseButtonWheelUp
+		} else {
+			btn = MouseButtonWheelDown
+		}
+		act = MouseActionPress
+	default:
+		switch btnLow {
+		case 0:
+			btn = MouseButtonLeft
+		case 1:
+			btn = MouseButtonMiddle
+		case 2:
+			btn = MouseButtonRight
+		case 3:
+			// 3 in SGR = release of whichever button. Legacy X10
+			// reports all releases as 3 (no which-button info).
+			btn = MouseButtonNone
+		}
+		if motion {
+			act = MouseActionMotion
+		} else if !press || btnLow == 3 {
+			act = MouseActionRelease
+		} else {
+			act = MouseActionPress
+		}
+	}
+	return MouseMsg{X: x, Y: y, Button: btn, Action: act, Shift: shift, Alt: alt, Ctrl: ctrl}
+}
+
+// parseThreeInts splits params on ';' and parses three decimals. Used
+// only by SGR mouse decoding; returns ok=false on malformed input.
+func parseThreeInts(params []byte) (a, b, c int, ok bool) {
+	vals := [3]int{}
+	idx := 0
+	cur := 0
+	started := false
+	for _, ch := range params {
+		if ch == ';' {
+			if !started || idx >= 2 {
+				if idx >= 3 {
+					return 0, 0, 0, false
+				}
+			}
+			vals[idx] = cur
+			idx++
+			cur = 0
+			started = false
+			if idx >= 3 {
+				return 0, 0, 0, false
+			}
+			continue
+		}
+		if ch < '0' || ch > '9' {
+			return 0, 0, 0, false
+		}
+		cur = cur*10 + int(ch-'0')
+		started = true
+	}
+	if !started || idx != 2 {
+		return 0, 0, 0, false
+	}
+	vals[2] = cur
+	return vals[0], vals[1], vals[2], true
 }
 
 func decodeCSI(params []byte, final byte) Key {

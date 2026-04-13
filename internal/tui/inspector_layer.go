@@ -25,11 +25,36 @@ func newInspectorLayer(colName, value string) *inspectorLayer {
 	return &inspectorLayer{colName: colName, value: value}
 }
 
-// wrapText hard-wraps s to width w, preserving explicit newlines. Long
-// unbroken tokens are chopped at w rather than overflowing. The result
-// is what the inspector actually draws; the original value is kept
-// separately so the "y" yank copies the untouched cell.
+// sanitizeInspectorText strips or escapes control chars that
+// would wreck terminal layout. \n stays as a line break. \r and
+// \t render as visible \r \t. Other sub-0x20 chars are dropped.
+// NUL (0x00), 0x7f DEL likewise stripped.
+func sanitizeInspectorText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case '\n':
+			b.WriteRune('\n')
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if r < 0x20 || r == 0x7f {
+				continue
+			}
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// wrapText hard-wraps s to width w, preserving explicit newlines.
+// Control chars are sanitized first so \r can't send the terminal
+// cursor back to column 0.
 func wrapText(s string, w int) []string {
+	s = sanitizeInspectorText(s)
 	if w <= 0 {
 		return strings.Split(s, "\n")
 	}

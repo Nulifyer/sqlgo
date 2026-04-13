@@ -196,6 +196,14 @@ func (t *table) RowCount() int {
 	return len(t.rendered)
 }
 
+// ColCount returns the number of columns in the current result set, or 0
+// before Init / after Clear.
+func (t *table) ColCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.cols)
+}
+
 // HasColumns reports whether Init has been called since the last Clear.
 func (t *table) HasColumns() bool {
 	t.mu.Lock()
