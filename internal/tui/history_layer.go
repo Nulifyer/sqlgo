@@ -40,6 +40,13 @@ type historyLayer struct {
 	// arms the confirmation, a second press within the confirmation
 	// window actually wipes. Any other keypress disarms.
 	clearArmed bool
+
+	// lastListTop / lastListH record the last-rendered results-list
+	// geometry so the mouse hit test can map a Y coordinate to an
+	// entry index without recomputing the dialog box layout.
+	lastListTop int
+	lastListH   int
+	clicks      clickTracker
 }
 
 // historyFetchSize scales the row pull with the terminal height so
@@ -175,6 +182,8 @@ func (h *historyLayer) Draw(a *app, c *cellbuf) {
 	if listH < 1 {
 		listH = 1
 	}
+	h.lastListTop = listTop
+	h.lastListH = listH
 
 	if len(h.entries) == 0 {
 		msg := "(no history)"
@@ -361,6 +370,56 @@ func (h *historyLayer) useSelected(a *app) {
 	m.editor.buf.SetText(sql)
 	m.focus = FocusQuery
 	a.popLayer()
+}
+
+// View enables mouse reporting while history is on top.
+func (h *historyLayer) View(a *app) View {
+	return View{AltScreen: true, MouseEnabled: true}
+}
+
+// HandleInput routes mouse events: wheel scrolls the selection; left
+// click selects the row under the pointer; double-click applies it
+// (pastes SQL into the editor and closes).
+func (h *historyLayer) HandleInput(a *app, msg InputMsg) bool {
+	mm, ok := msg.(MouseMsg)
+	if !ok {
+		return false
+	}
+	switch mm.Button {
+	case MouseButtonWheelUp:
+		if h.selected > 0 {
+			h.selected--
+		}
+		return true
+	case MouseButtonWheelDown:
+		if h.selected < len(h.entries)-1 {
+			h.selected++
+		}
+		return true
+	case MouseButtonLeft:
+		if mm.Action != MouseActionPress {
+			return false
+		}
+		if h.lastListH <= 0 {
+			return false
+		}
+		rowIdx := mm.Y - h.lastListTop
+		if rowIdx < 0 || rowIdx >= h.lastListH {
+			return false
+		}
+		entryIdx := h.scroll + rowIdx
+		if entryIdx < 0 || entryIdx >= len(h.entries) {
+			return false
+		}
+		h.selected = entryIdx
+		h.clearArmed = false
+		count := h.clicks.bump(mm)
+		if count >= 2 {
+			h.useSelected(a)
+		}
+		return true
+	}
+	return false
 }
 
 func (h *historyLayer) Hints(a *app) string {

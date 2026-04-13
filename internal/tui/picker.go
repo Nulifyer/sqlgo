@@ -15,6 +15,12 @@ type picker struct {
 	conns    []config.Connection
 	selected int
 	status   string
+
+	// lastListTop / lastVisible record the last-rendered list geometry
+	// so the mouse hit test can map a Y coordinate to a row index
+	// without recomputing the dialog box layout. Populated by draw.
+	lastListTop int
+	lastVisible int
 }
 
 func newPicker(conns []config.Connection) *picker {
@@ -87,6 +93,11 @@ func (p *picker) draw(s *cellbuf, termW, termH int) {
 		if maxRows < 1 {
 			maxRows = 1
 		}
+		p.lastListTop = listTop
+		p.lastVisible = maxRows
+		if p.lastVisible > len(p.conns) {
+			p.lastVisible = len(p.conns)
+		}
 		for i, c := range p.conns {
 			if i >= maxRows {
 				break
@@ -129,7 +140,8 @@ func formatConn(c config.Connection) string {
 // connections from a.confFile on each key so an add/edit through the
 // form reflects immediately on return.
 type pickerLayer struct {
-	p *picker
+	p      *picker
+	clicks clickTracker
 }
 
 func newPickerLayer(conns []config.Connection) *pickerLayer {
@@ -240,6 +252,39 @@ func (pl *pickerLayer) deleteSelected(a *app) {
 	}
 	pl.p.setConns(a.connCache)
 	pl.p.status = "deleted"
+}
+
+// HandleInput routes mouse events: left-click selects the row under
+// the pointer; double-click on a valid row connects. Wheel is a no-op
+// because the visible list is currently capped at maxRows with no
+// scroll -- if scrolling is ever added, route wheel here.
+func (pl *pickerLayer) HandleInput(a *app, msg InputMsg) bool {
+	mm, ok := msg.(MouseMsg)
+	if !ok {
+		return false
+	}
+	if mm.Button != MouseButtonLeft || mm.Action != MouseActionPress {
+		return false
+	}
+	p := pl.p
+	if p.lastVisible <= 0 {
+		return false
+	}
+	rowIdx := mm.Y - p.lastListTop
+	if rowIdx < 0 || rowIdx >= p.lastVisible {
+		return false
+	}
+	p.selected = rowIdx
+	count := pl.clicks.bump(mm)
+	if count >= 2 && len(p.conns) > 0 {
+		a.connectTo(p.conns[p.selected])
+	}
+	return true
+}
+
+// View enables mouse reporting while the picker is on top.
+func (pl *pickerLayer) View(a *app) View {
+	return View{AltScreen: true, MouseEnabled: true}
 }
 
 // setStatus lets the app poke feedback (e.g. "connecting...") at the

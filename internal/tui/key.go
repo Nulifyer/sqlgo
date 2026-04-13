@@ -277,11 +277,16 @@ func mouseFromCode(code, x, y int, press bool) MouseMsg {
 	var act MouseAction
 	switch btnHigh {
 	case 1:
-		// Wheel: low bit 0 = up, 1 = down.
-		if btnLow == 0 {
+		// Wheel: low bits 0=up, 1=down, 2=left (tilt), 3=right (tilt).
+		switch btnLow {
+		case 0:
 			btn = MouseButtonWheelUp
-		} else {
+		case 1:
 			btn = MouseButtonWheelDown
+		case 2:
+			btn = MouseButtonWheelLeft
+		case 3:
+			btn = MouseButtonWheelRight
 		}
 		act = MouseActionPress
 	default:

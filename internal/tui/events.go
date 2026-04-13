@@ -40,6 +40,8 @@ const (
 	MouseButtonRight
 	MouseButtonWheelUp
 	MouseButtonWheelDown
+	MouseButtonWheelLeft
+	MouseButtonWheelRight
 )
 
 // MouseAction separates press/release/motion. SGR mouse encoding

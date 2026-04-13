@@ -8,6 +8,7 @@ const (
 	// Foreground.
 	ansiDefault       = 39 // reset fg to terminal default
 	ansiBrightBlack   = 90 // usually rendered as grey
+	ansiBrightRed     = 91
 	ansiBrightGreen   = 92
 	ansiBrightYellow  = 93
 	ansiBrightBlue    = 94
@@ -83,4 +84,5 @@ const (
 	colorTitleFocused    = ansiBrightCyan
 	colorTitleUnfocused  = ansiDefault
 	colorStatusBar       = ansiBrightBlack
+	colorError           = ansiBrightRed
 )

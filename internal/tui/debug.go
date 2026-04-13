@@ -15,8 +15,8 @@ type debugLayer struct {
 }
 
 type debugEvent struct {
-	key      Key
-	sequence int // 1-based ordinal for display
+	desc     string // pre-formatted one-line summary
+	sequence int    // 1-based ordinal for display
 }
 
 // debugLayerCap returns the ring size for the captured-key log. It
@@ -36,10 +36,7 @@ func debugLayerCap(a *app) int {
 func newDebugLayer() *debugLayer { return &debugLayer{} }
 
 func (d *debugLayer) Draw(a *app, c *cellbuf) {
-	boxW := 60
-	if boxW > a.term.width-4 {
-		boxW = a.term.width - dialogMargin
-	}
+	boxW := a.term.width - dialogMargin
 	if boxW < 30 {
 		boxW = 30
 	}
@@ -81,7 +78,7 @@ func (d *debugLayer) Draw(a *app, c *cellbuf) {
 	n := len(d.log)
 	for i := 0; i < maxRows && i < n; i++ {
 		ev := d.log[n-1-i]
-		line := fmt.Sprintf("%3d  %s", ev.sequence, formatDebugKey(ev.key))
+		line := fmt.Sprintf("%3d  %s", ev.sequence, ev.desc)
 		c.writeAt(listTop+i, innerCol, truncate(line, boxW-4))
 	}
 }
@@ -91,15 +88,34 @@ func (d *debugLayer) HandleKey(a *app, k Key) {
 		a.popLayer()
 		return
 	}
+	d.push(a, formatDebugKey(k))
+}
+
+func (d *debugLayer) View(a *app) View {
+	_ = a
+	return View{AltScreen: true, MouseEnabled: true}
+}
+
+func (d *debugLayer) HandleInput(a *app, msg InputMsg) bool {
+	switch v := msg.(type) {
+	case MouseMsg:
+		d.push(a, formatDebugMouse(v))
+		return true
+	case PasteMsg:
+		d.push(a, fmt.Sprintf("paste len=%d", len(v.Text)))
+		return true
+	}
+	return false
+}
+
+func (d *debugLayer) push(a *app, desc string) {
 	seq := 1
 	if n := len(d.log); n > 0 {
 		seq = d.log[n-1].sequence + 1
 	}
-	d.log = append(d.log, debugEvent{key: k, sequence: seq})
+	d.log = append(d.log, debugEvent{desc: desc, sequence: seq})
 	ringCap := debugLayerCap(a)
 	if len(d.log) > ringCap {
-		// Drop oldest; keep tail. Simple shift -- bounded size keeps this
-		// cheap.
 		d.log = append(d.log[:0], d.log[len(d.log)-ringCap:]...)
 	}
 }
@@ -123,6 +139,47 @@ func formatDebugKey(k Key) string {
 		}
 	}
 	return fmt.Sprintf("kind=%s rune=%s ctrl=%v alt=%v", kind, runeRepr, k.Ctrl, k.Alt)
+}
+
+func formatDebugMouse(m MouseMsg) string {
+	return fmt.Sprintf("mouse %s %s x=%d y=%d shift=%v ctrl=%v alt=%v",
+		debugMouseButtonName(m.Button),
+		debugMouseActionName(m.Action),
+		m.X, m.Y, m.Shift, m.Ctrl, m.Alt)
+}
+
+func debugMouseButtonName(b MouseButton) string {
+	switch b {
+	case MouseButtonNone:
+		return "None"
+	case MouseButtonLeft:
+		return "Left"
+	case MouseButtonMiddle:
+		return "Middle"
+	case MouseButtonRight:
+		return "Right"
+	case MouseButtonWheelUp:
+		return "WheelUp"
+	case MouseButtonWheelDown:
+		return "WheelDown"
+	case MouseButtonWheelLeft:
+		return "WheelLeft"
+	case MouseButtonWheelRight:
+		return "WheelRight"
+	}
+	return fmt.Sprintf("Button(%d)", int(b))
+}
+
+func debugMouseActionName(a MouseAction) string {
+	switch a {
+	case MouseActionPress:
+		return "Press"
+	case MouseActionRelease:
+		return "Release"
+	case MouseActionMotion:
+		return "Motion"
+	}
+	return fmt.Sprintf("Action(%d)", int(a))
 }
 
 func debugKeyKindName(k KeyKind) string {

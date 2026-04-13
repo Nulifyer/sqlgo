@@ -110,6 +110,10 @@ type formatter struct {
 	// a comma-splitting context (so a subquery SELECT list also
 	// wraps on commas).
 	splitStack []bool
+	// closeStack mirrors parenStack: the column ')' should land on when
+	// it closes. -1 means the paren is a function call and ')' stays
+	// inline (no newline). Populated only when parenStack[i] != -1.
+	closeStack []int
 
 	// currentSplit is the outermost split state at paren depth zero.
 	// Flipped on SELECT/FROM/SET/VALUES/GROUP BY/ORDER BY.
@@ -254,16 +258,28 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 				f.writeRaw("(")
 				f.parenStack = append(f.parenStack, -1)
 				f.splitStack = append(f.splitStack, false)
+				f.closeStack = append(f.closeStack, -1)
 			} else {
 				f.writeRaw("(")
-				// Subquery / grouping paren: snapshot the current
-				// baseIndent so ')' can restore it, then bump two
-				// levels so the body sits one indent deeper than the
-				// parent clause's items (where the '(' itself tends
-				// to live). Closing ')' lines up with those items.
+				// Two flavors of multi-line paren:
+				//  - subquery (starts with SELECT / WITH / VALUES):
+				//    bump two levels so the body sits one indent
+				//    deeper than the parent clause's items (where
+				//    the '(' tends to live), and close ')' aligned
+				//    with those items;
+				//  - grouping / value list (IN (...), AND (...)):
+				//    bump one level so the body sits just inside
+				//    the '(', and close ')' back at the '('s column.
+				bump := indentWidth
+				closeAt := f.baseIndent
+				if isSubqueryStart(tokens, i+1) {
+					bump = 2 * indentWidth
+					closeAt = f.baseIndent + indentWidth
+				}
 				f.parenStack = append(f.parenStack, f.baseIndent)
 				f.splitStack = append(f.splitStack, f.currentSplit)
-				f.baseIndent += 2 * indentWidth
+				f.closeStack = append(f.closeStack, closeAt)
+				f.baseIndent += bump
 				f.newlineTo(f.baseIndent)
 				// Reset the child context so the inner clauses can
 				// pick their own state from scratch.
@@ -274,15 +290,14 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 			if n := len(f.parenStack); n > 0 {
 				saved := f.parenStack[n-1]
 				prevSplit := f.splitStack[n-1]
+				closeAt := f.closeStack[n-1]
 				f.parenStack = f.parenStack[:n-1]
 				f.splitStack = f.splitStack[:n-1]
+				f.closeStack = f.closeStack[:n-1]
 				if saved >= 0 {
 					f.baseIndent = saved
 					f.currentSplit = prevSplit
-					// Close ')' at the parent's item indent so it
-					// lines up with the subquery's siblings rather
-					// than jumping back to the clause keyword column.
-					f.newlineTo(f.baseIndent + indentWidth)
+					f.newlineTo(closeAt)
 				}
 			}
 			f.writeRaw(")")
@@ -355,6 +370,28 @@ func (f *formatter) consumeSelectModifiers(tokens []Token, start int) int {
 			return i
 		}
 	}
+}
+
+// isSubqueryStart reports whether the tokens starting at index start
+// begin with a subquery-introducing keyword (SELECT, WITH, VALUES).
+// Used to distinguish parens that wrap a nested query from grouping
+// parens around an expression or an IN value list.
+func isSubqueryStart(tokens []Token, start int) bool {
+	for j := start; j < len(tokens); j++ {
+		t := tokens[j]
+		if t.Kind == Whitespace || t.Kind == Comment {
+			continue
+		}
+		if t.Kind != Keyword {
+			return false
+		}
+		switch strings.ToUpper(t.Text) {
+		case "SELECT", "WITH", "VALUES":
+			return true
+		}
+		return false
+	}
+	return false
 }
 
 // IsFunctionCall looks backward from tokens[i] (an open paren) and

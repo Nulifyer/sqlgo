@@ -18,12 +18,14 @@ const (
 	altScreenOff = csi + "?1049l"
 	resetStyle   = csi + "0m"
 
-	// SGR mouse reporting: ?1000 = cell-motion click/release, ?1006 =
-	// SGR extended encoding (coordinates as decimal digits, avoids the
-	// 223-column cap of the legacy X10 encoding). Enable/disable
-	// together so the decoder only has to handle one shape.
-	mouseOn  = csi + "?1000;1006h"
-	mouseOff = csi + "?1000;1006l"
+	// SGR mouse reporting: ?1002 = button-event tracking (press, release,
+	// and motion only while a button is held — no idle-motion flood),
+	// ?1006 = SGR extended encoding (decimal coordinates, avoids the
+	// 223-column cap of the legacy X10 encoding). Button-event mode is
+	// required for drag-to-select in the editor; the decoder already
+	// preserves the button on motion events.
+	mouseOn  = csi + "?1002;1006h"
+	mouseOff = csi + "?1002;1006l"
 
 	// Bracketed paste: terminal brackets pasted text with ESC[200~ and
 	// ESC[201~ so the input parser can deliver it as one PasteMsg

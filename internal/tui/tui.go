@@ -14,6 +14,7 @@ import (
 	"github.com/Nulifyer/sqlgo/internal/clipboard"
 	"github.com/Nulifyer/sqlgo/internal/config"
 	"github.com/Nulifyer/sqlgo/internal/db"
+	"github.com/Nulifyer/sqlgo/internal/db/errinfo"
 	_ "github.com/Nulifyer/sqlgo/internal/db/mssql"
 	_ "github.com/Nulifyer/sqlgo/internal/db/mysql"
 	_ "github.com/Nulifyer/sqlgo/internal/db/postgres"
@@ -260,9 +261,17 @@ func (a *app) unlinkSecret(ctx context.Context, name string) error {
 	return nil
 }
 
+// Options configures a Run invocation. The zero value is valid and
+// matches the pre-Options behavior.
+type Options struct {
+	// InitialQuery, if non-empty, seeds the query editor with this text
+	// on startup. Used by the CLI `sqlgo file.sql` entry point.
+	InitialQuery string
+}
+
 // Run takes over the terminal and runs until the user quits (Ctrl+Q) or an
 // error occurs. The terminal is always restored before return.
-func Run() error {
+func Run(opts Options) error {
 	t, err := openTerminal()
 	if err != nil {
 		return err
@@ -295,7 +304,11 @@ func Run() error {
 		secrets:          sec,
 		secretsAvailable: secAvail,
 	}
-	a.layers = []Layer{newMainLayer()}
+	ml := newMainLayer()
+	if opts.InitialQuery != "" {
+		ml.editor.buf.SetText(opts.InitialQuery)
+	}
+	a.layers = []Layer{ml}
 
 	// Open the persistent store (connections, history) and migrate it.
 	// Any pre-existing connections.json file in the config dir is
@@ -443,6 +456,14 @@ func (a *app) handleInput(m InputMsg) {
 func (a *app) handleKey(k Key) {
 	if k.Ctrl && k.Rune == 'q' {
 		a.quit = true
+		return
+	}
+	if k.Kind == KeyF1 {
+		if _, ok := a.topLayer().(*helpLayer); ok {
+			a.popLayer()
+			return
+		}
+		a.pushLayer(newHelpLayer())
 		return
 	}
 	if k.Kind == KeyF8 {
@@ -755,6 +776,9 @@ func (a *app) handleQueryEvent(e queryEvent) {
 	switch e.kind {
 	case evtStarted:
 		m.status = "streaming…"
+		m.lastErr = ""
+		m.lastErrLine = 0
+		m.resultsErrScroll = 0
 	case evtProgress:
 		m.status = fmt.Sprintf("streaming… %d row(s)", e.loaded)
 	case evtDone:
@@ -767,6 +791,7 @@ func (a *app) handleQueryEvent(e queryEvent) {
 		m.lastCapReason = e.capReason
 		m.lastHasResult = true
 		m.lastErr = ""
+		m.lastErrLine = 0
 		if e.err != nil {
 			if errors.Is(e.err, context.Canceled) {
 				m.status = fmt.Sprintf("cancelled after %d row(s)", e.loaded)
@@ -774,20 +799,14 @@ func (a *app) handleQueryEvent(e queryEvent) {
 			} else if e.loaded > 0 {
 				m.status = fmt.Sprintf("error after %d row(s): %s", e.loaded, e.err)
 				m.lastErr = e.err.Error()
+				m.lastErrLine = errinfo.Line(e.err, a.lastQuerySQL)
 			} else {
 				m.status = fmt.Sprintf("error: %s", e.err)
 				m.lastErr = e.err.Error()
+				m.lastErrLine = errinfo.Line(e.err, a.lastQuerySQL)
 			}
 		} else {
-			suffix := ""
-			if e.capped {
-				if e.capReason != "" {
-					suffix = " (buffer capped: " + e.capReason + ")"
-				} else {
-					suffix = " (buffer capped)"
-				}
-			}
-			m.status = fmt.Sprintf("%d row(s) in %s%s", e.loaded, e.elapsed.Round(time.Millisecond), suffix)
+			m.status = ""
 		}
 		a.recordHistory(e)
 	}

@@ -1,8 +1,26 @@
 package tui
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/Nulifyer/sqlgo/internal/sqltok"
 )
+
+// gutterWidth is the column count reserved at the left edge of the
+// editor for line numbers. Scales to fit the largest line number plus
+// a one-column separator; floors at 3 (two-digit count + space).
+func (e *editor) gutterWidth() int {
+	n := e.buf.LineCount()
+	if n < 1 {
+		n = 1
+	}
+	digits := len(strconv.Itoa(n))
+	if digits < 2 {
+		digits = 2
+	}
+	return digits + 1
+}
 
 // editor is a text-input widget: buffer + viewport + selection +
 // clipboard + undo. Scrolls to follow cursor.
@@ -363,8 +381,35 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 	if innerW <= 0 || innerH <= 0 {
 		return
 	}
+	gutter := e.gutterWidth()
+	if gutter >= innerW {
+		gutter = 0
+	}
+	bodyCol := innerCol + gutter
+	bodyW := innerW - gutter
 
-	e.ensureCursorVisible(innerW, innerH)
+	e.ensureCursorVisible(bodyW, innerH)
+
+	gutterStyle := Style{FG: ansiBrightBlack, BG: ansiDefaultBG}
+	if gutter > 0 {
+		lineCount := e.buf.LineCount()
+		for i := 0; i < innerH; i++ {
+			lineIdx := e.scrollRow + i
+			var label string
+			if lineIdx < lineCount {
+				num := strconv.Itoa(lineIdx + 1)
+				pad := gutter - 1 - len(num)
+				if pad < 0 {
+					pad = 0
+					num = num[len(num)-(gutter-1):]
+				}
+				label = strings.Repeat(" ", pad) + num + " "
+			} else {
+				label = strings.Repeat(" ", gutter)
+			}
+			s.writeStyled(innerRow+i, innerCol, label, gutterStyle)
+		}
+	}
 
 	selStyle := Style{FG: ansiDefault, BG: ansiDefaultBG, Attrs: attrReverse}
 	hasSel := e.buf.HasSelection()
@@ -396,7 +441,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			if rw == 0 {
 				continue
 			}
-			if colOut >= innerW {
+			if colOut >= bodyW {
 				break
 			}
 			st := styleForCol(tokens, vc)
@@ -414,12 +459,12 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			}
 			// If the wide rune would spill past the right edge,
 			// paint a space instead so no half-glyph leaks.
-			if rw == 2 && colOut+2 > innerW {
-				s.writeStyled(innerRow+i, innerCol+colOut, " ", st)
+			if rw == 2 && colOut+2 > bodyW {
+				s.writeStyled(innerRow+i, bodyCol+colOut, " ", st)
 				colOut++
 				break
 			}
-			s.writeStyled(innerRow+i, innerCol+colOut, string(r), st)
+			s.writeStyled(innerRow+i, bodyCol+colOut, string(r), st)
 			colOut += rw
 		}
 
@@ -430,8 +475,8 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			if colOut < 0 {
 				colOut = 0
 			}
-			for colOut < innerW {
-				s.writeStyled(innerRow+i, innerCol+colOut, " ", selStyle)
+			for colOut < bodyW {
+				s.writeStyled(innerRow+i, bodyCol+colOut, " ", selStyle)
 				colOut++
 			}
 		}
@@ -439,7 +484,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 
 	if cursorVisible {
 		row, col := e.buf.Cursor()
-		s.placeCursor(innerRow+(row-e.scrollRow), innerCol+(col-e.scrollCol))
+		s.placeCursor(innerRow+(row-e.scrollRow), bodyCol+(col-e.scrollCol))
 		// Paint a reverse-video block at each extra cursor so
 		// the user can see where their column-add cursors sit.
 		// The real terminal caret stays on the primary.
@@ -448,10 +493,10 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			if cp.row < e.scrollRow || cp.row >= e.scrollRow+innerH {
 				continue
 			}
-			if cp.col < e.scrollCol || cp.col-e.scrollCol >= innerW {
+			if cp.col < e.scrollCol || cp.col-e.scrollCol >= bodyW {
 				continue
 			}
-			sc := innerCol + (cp.col - e.scrollCol)
+			sc := bodyCol + (cp.col - e.scrollCol)
 			sr := innerRow + (cp.row - e.scrollRow)
 			// Paint a space with the caret style; if there's a
 			// real character there, use it verbatim.
@@ -465,7 +510,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 	}
 
 	if e.complete != nil {
-		e.drawComplete(s, innerRow, innerCol, innerW, innerH)
+		e.drawComplete(s, innerRow, bodyCol, bodyW, innerH)
 	}
 }
 
@@ -582,6 +627,149 @@ func inSelection(row, col, r1, c1, r2, c2 int) bool {
 		return false
 	}
 	return true
+}
+
+// caretFromScreen maps a screen cell (screenRow, screenCol) inside the
+// editor rect r to a buffer (row, col) position. Inverts the walk that
+// draw() uses, so a click lands on the rune the user saw under the
+// pointer even with wide glyphs or horizontal scroll. Returns ok=false
+// when the click is outside the drawable interior; callers then decide
+// whether to ignore or clamp.
+func (e *editor) caretFromScreen(r rect, screenRow, screenCol int) (int, int, bool) {
+	innerRow := r.row + 1
+	innerCol := r.col + 1
+	innerW := r.w - 2
+	innerH := r.h - 2
+	if innerW <= 0 || innerH <= 0 {
+		return 0, 0, false
+	}
+	gutter := e.gutterWidth()
+	if gutter >= innerW {
+		gutter = 0
+	}
+	bodyCol := innerCol + gutter
+	bodyW := innerW - gutter
+	dr := screenRow - innerRow
+	if dr < 0 {
+		dr = 0
+	}
+	if dr >= innerH {
+		dr = innerH - 1
+	}
+	row := e.scrollRow + dr
+	if row < 0 {
+		row = 0
+	}
+	if row >= e.buf.LineCount() {
+		row = e.buf.LineCount() - 1
+	}
+	line := e.buf.Line(row)
+
+	target := screenCol - bodyCol
+	if target < 0 {
+		return row, e.scrollCol, true
+	}
+	if target >= bodyW {
+		target = bodyW - 1
+	}
+	colOut := 0
+	col := e.scrollCol
+	if col > len(line) {
+		col = len(line)
+	}
+	for col < len(line) {
+		w := runeDisplayWidth(line[col])
+		if w == 0 {
+			col++
+			continue
+		}
+		if colOut+w > target {
+			break
+		}
+		colOut += w
+		col++
+	}
+	return row, col, true
+}
+
+// clickAt positions the caret based on a mouse press inside rect r. The
+// click count (1/2/3) drives the selection expansion: 1 collapses any
+// existing selection to a point, 2 selects the word under the caret,
+// 3 selects the whole line.
+func (e *editor) clickAt(r rect, screenRow, screenCol, count int) {
+	row, col, ok := e.caretFromScreen(r, screenRow, screenCol)
+	if !ok {
+		return
+	}
+	e.collapseCursors()
+	e.complete = nil
+	switch {
+	case count >= 3:
+		e.buf.SetCursor(row, 0)
+		e.buf.SetAnchor(row, 0)
+		line := e.buf.Line(row)
+		e.buf.SetCursor(row, len(line))
+	case count == 2:
+		line := e.buf.Line(row)
+		if len(line) == 0 {
+			e.buf.ClearSelection()
+			e.buf.SetCursor(row, 0)
+			return
+		}
+		start, end := wordBoundsAt(line, col)
+		if start == end {
+			e.buf.ClearSelection()
+			e.buf.SetCursor(row, col)
+			return
+		}
+		e.buf.SetCursor(row, start)
+		e.buf.SetAnchor(row, start)
+		e.buf.SetCursor(row, end)
+	default:
+		e.buf.ClearSelection()
+		e.buf.SetCursor(row, col)
+		// Seed the anchor at the press point so a subsequent drag
+		// extends from here without a separate press->anchor step.
+		e.buf.SetAnchor(row, col)
+	}
+}
+
+// dragTo extends the selection to the buffer cell under (screenRow,
+// screenCol). Requires that clickAt (or another anchor-setting path)
+// has already run, so the anchor marks the drag origin.
+func (e *editor) dragTo(r rect, screenRow, screenCol int) {
+	row, col, ok := e.caretFromScreen(r, screenRow, screenCol)
+	if !ok {
+		return
+	}
+	e.buf.SetCursor(row, col)
+}
+
+// wordBoundsAt returns the [start, end) rune range covering the word
+// at col on the given line, using the same isWordChar classifier as
+// Ctrl+Left/Right. If the caret sits on a non-word rune the result
+// collapses to (col, col).
+func wordBoundsAt(line []rune, col int) (int, int) {
+	if col > len(line) {
+		col = len(line)
+	}
+	// A caret sitting past the last rune of a word should still grab it.
+	probe := col
+	if probe == len(line) && probe > 0 && isWordChar(line[probe-1]) {
+		probe--
+	}
+	if probe >= len(line) || !isWordChar(line[probe]) {
+		return col, col
+	}
+	start := probe
+	for start > 0 && isWordChar(line[start-1]) {
+		start--
+	}
+	end := probe + 1
+	for end < len(line) && isWordChar(line[end]) {
+		end++
+	}
+	return start, end
 }
 
 // ensureCursorVisible scrolls the viewport so the cursor sits inside

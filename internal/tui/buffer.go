@@ -114,6 +114,29 @@ func (b *buffer) SetCursor(row, col int) {
 	b.lastEditKind = editNone
 }
 
+// SetAnchor places the selection anchor at (row, col), clamped to the
+// valid range, without touching the cursor. Used by the mouse drag /
+// double-click paths to pin the start of a selection before extending
+// it via SetCursor.
+func (b *buffer) SetAnchor(row, col int) {
+	if row < 0 {
+		row = 0
+	}
+	if row >= len(b.lines) {
+		row = len(b.lines) - 1
+	}
+	if col < 0 {
+		col = 0
+	}
+	if col > len(b.lines[row]) {
+		col = len(b.lines[row])
+	}
+	b.anchorRow = row
+	b.anchorCol = col
+	b.anchorSet = true
+	b.lastEditKind = editNone
+}
+
 // Clear resets the buffer to a single empty line and wipes undo/redo.
 func (b *buffer) Clear() {
 	b.snapshot()

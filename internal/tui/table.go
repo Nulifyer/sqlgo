@@ -708,6 +708,57 @@ func (t *table) ensureCellVisibleLocked(innerW, bodyH int) {
 	}
 }
 
+// CellAt hit-tests a mouse coordinate against the rendered table and
+// moves the cell cursor to the clicked cell. Returns true if the click
+// landed on a data row/column. Wrap mode is not supported because rows
+// have variable heights there; callers should no-op in that case.
+func (t *table) CellAt(r rect, screenRow, screenCol int) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.wrap || len(t.cols) == 0 {
+		return false
+	}
+	innerRow := r.row + 1
+	innerCol := r.col + 1
+	innerW := r.w - 2
+	innerH := r.h - 2
+	if innerW <= 0 || innerH <= 0 {
+		return false
+	}
+	bodyTop := innerRow + 2
+	bodyH := innerH - 2
+	if bodyH <= 0 {
+		return false
+	}
+	dr := screenRow - bodyTop
+	if dr < 0 || dr >= bodyH {
+		return false
+	}
+	rowIdx := t.scrollRow + dr
+	if rowIdx >= t.viewLenLocked() {
+		return false
+	}
+	target := screenCol - innerCol + t.scrollCol
+	if target < 0 {
+		return false
+	}
+	col := -1
+	for i := 0; i < len(t.widths); i++ {
+		left, right := t.cellSpanLocked(i)
+		if target >= left && target <= right {
+			col = i
+			break
+		}
+	}
+	if col < 0 {
+		return false
+	}
+	t.cellRow = rowIdx
+	t.cellCol = col
+	t.clampCursorLocked()
+	return true
+}
+
 // cellSpanLocked returns the [left, right] rune offsets occupied by the
 // given column in a rendered line. Used to auto-scroll so the cursor's
 // cell stays visible when navigating horizontally. Caller must hold t.mu.

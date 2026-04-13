@@ -20,6 +20,12 @@ type rect struct {
 	row, col, w, h int
 }
 
+// contains reports whether the given 1-based (row, col) cell is inside
+// this rect's bounding box (borders included). Used by mouse hit tests.
+func (r rect) contains(row, col int) bool {
+	return row >= r.row && row < r.row+r.h && col >= r.col && col < r.col+r.w
+}
+
 type panels struct {
 	explorer rect
 	query    rect

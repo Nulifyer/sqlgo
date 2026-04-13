@@ -62,13 +62,31 @@ type mainLayer struct {
 	lastCapped    bool
 	lastCapReason string
 	lastErr       string
+	lastErrLine   int
+
+	// resultsErrScroll is the top-line offset into the wrapped error
+	// text when lastErr is rendered in place of the table. Reset when a
+	// new query starts.
+	resultsErrScroll int
+
+	// clicks tracks click counts for double/triple detection across the
+	// three panels. Shared because a click outside the last-clicked panel
+	// naturally resets the count (coordinate differs).
+	clicks clickTracker
+
+	// dragTarget is the panel that is currently tracking a held
+	// left-button drag (FocusQuery today; -1 when idle). Motion events
+	// route to the editor only while this is set so wandering off the
+	// panel mid-drag still extends the selection instead of scrolling
+	// something else.
+	dragTarget FocusTarget
 }
 
 // View turns on bracketed paste so multi-line SQL pasted into the
 // editor arrives as one PasteMsg (and thus one undo snapshot) instead
 // of a flood of KeyRune/KeyEnter events. Alt-screen stays on as usual.
 func (m *mainLayer) View(a *app) View {
-	return View{AltScreen: true, PasteEnabled: true}
+	return View{AltScreen: true, PasteEnabled: true, MouseEnabled: true}
 }
 
 // HandleInput routes a PasteMsg into the editor buffer when the Query
@@ -76,13 +94,181 @@ func (m *mainLayer) View(a *app) View {
 // mouse or focus events yet. Returning false is harmless; the caller
 // only reads the return value for consumption tracking.
 func (m *mainLayer) HandleInput(a *app, msg InputMsg) bool {
-	if p, ok := msg.(PasteMsg); ok {
-		if m.focus == FocusQuery && p.Text != "" {
-			m.editor.buf.InsertText(p.Text)
+	switch v := msg.(type) {
+	case PasteMsg:
+		if m.focus == FocusQuery && v.Text != "" {
+			m.editor.buf.InsertText(v.Text)
+			return true
+		}
+	case MouseMsg:
+		return m.handleMouse(a, v)
+	}
+	return false
+}
+
+// handleMouse routes mouse events to panels via a rect hit test. Left
+// press sets focus to whichever panel the click lands in; wheel scrolls
+// the panel under the pointer without changing focus. Fullscreen mode
+// collapses everything to the Query panel, so clicks there just keep
+// focus on Query and wheel drives the editor.
+func (m *mainLayer) handleMouse(a *app, msg MouseMsg) bool {
+	if m.editorFullscreen {
+		switch msg.Button {
+		case MouseButtonWheelUp:
+			m.wheelQuery(a, -3)
+		case MouseButtonWheelDown:
+			m.wheelQuery(a, 3)
+		case MouseButtonLeft:
+			r := rect{row: 1, col: 1, w: a.term.width, h: a.term.height - statusBarH}
+			if msg.Action == MouseActionPress {
+				count := m.clicks.bump(msg)
+				m.editor.clickAt(r, msg.Y, msg.X, count)
+				m.dragTarget = FocusQuery
+			} else if msg.Action == MouseActionMotion && m.dragTarget == FocusQuery {
+				m.editor.dragTo(r, msg.Y, msg.X)
+			} else if msg.Action == MouseActionRelease {
+				m.dragTarget = -1
+			}
+		}
+		return true
+	}
+	// Drag in progress: route motion directly to the drag target even
+	// when the pointer has left the panel, so the selection grows
+	// instead of stalling at the panel edge.
+	if m.dragTarget == FocusQuery && msg.Button == MouseButtonLeft {
+		switch msg.Action {
+		case MouseActionMotion:
+			p := computeLayout(a.term.width, a.term.height)
+			m.editor.dragTo(p.query, msg.Y, msg.X)
+			return true
+		case MouseActionRelease:
+			m.dragTarget = -1
 			return true
 		}
 	}
-	return false
+	p := computeLayout(a.term.width, a.term.height)
+	var target FocusTarget = -1
+	switch {
+	case p.explorer.contains(msg.Y, msg.X):
+		target = FocusExplorer
+	case p.query.contains(msg.Y, msg.X):
+		target = FocusQuery
+	case p.results.contains(msg.Y, msg.X):
+		target = FocusResults
+	}
+	if target < 0 {
+		return false
+	}
+	switch msg.Button {
+	case MouseButtonLeft:
+		if msg.Action == MouseActionPress {
+			m.focus = target
+			m.pendingSpace = false
+			count := m.clicks.bump(msg)
+			m.handleLeftClick(a, target, msg, count)
+			if target == FocusQuery {
+				m.dragTarget = FocusQuery
+			}
+		} else if msg.Action == MouseActionRelease {
+			m.dragTarget = -1
+		}
+	case MouseButtonWheelUp:
+		m.wheelPanel(a, target, -3, msg.Shift || msg.Alt)
+	case MouseButtonWheelDown:
+		m.wheelPanel(a, target, 3, msg.Shift || msg.Alt)
+	case MouseButtonWheelLeft:
+		m.wheelPanel(a, target, -3, true)
+	case MouseButtonWheelRight:
+		m.wheelPanel(a, target, 3, true)
+	}
+	return true
+}
+
+// handleLeftClick dispatches a left-button press on the named panel.
+// Single-click selects (moves the panel's cursor to the row under the
+// pointer); double-click triggers the panel's "activate" action --
+// expand/drill for Explorer, inspector for Results. Query-panel click
+// is handled separately in a later pass (caret positioning).
+func (m *mainLayer) handleLeftClick(a *app, t FocusTarget, msg MouseMsg, count int) {
+	p := computeLayout(a.term.width, a.term.height)
+	switch t {
+	case FocusExplorer:
+		idx := m.explorer.ItemAt(p.explorer, msg.Y)
+		if idx < 0 {
+			return
+		}
+		m.explorer.SetCursor(idx)
+		if count >= 2 {
+			switch m.explorer.SelectedKind() {
+			case itemSchema, itemSubgroup:
+				m.explorer.Toggle()
+			default:
+				m.prefillSelectFromExplorer(a)
+			}
+		}
+	case FocusQuery:
+		m.editor.clickAt(p.query, msg.Y, msg.X, count)
+	case FocusResults:
+		if m.inErrorView(a) {
+			return
+		}
+		if !m.table.CellAt(p.results, msg.Y, msg.X) {
+			return
+		}
+		if count >= 2 && m.table.HasColumns() {
+			if msg.Shift {
+				row := m.table.CursorRow()
+				line := strings.Join(row, "\t")
+				if err := a.clipboard.Copy(line); err != nil {
+					m.status = "copy: " + err.Error()
+				} else {
+					m.status = fmt.Sprintf("copied row (%d cells)", len(row))
+				}
+				return
+			}
+			a.pushLayer(newInspectorLayer(m.table.CursorColumn().Name, m.table.CursorCell()))
+		}
+	}
+}
+
+func (m *mainLayer) wheelPanel(a *app, t FocusTarget, delta int, shift bool) {
+	switch t {
+	case FocusExplorer:
+		m.explorer.MoveCursor(delta)
+	case FocusQuery:
+		m.wheelQuery(a, delta)
+	case FocusResults:
+		if m.inErrorView(a) {
+			m.resultsErrScroll += delta
+			if m.resultsErrScroll < 0 {
+				m.resultsErrScroll = 0
+			}
+			return
+		}
+		if shift {
+			step := 1
+			if delta < 0 {
+				step = -1
+			}
+			m.table.MoveCellBy(0, step)
+			return
+		}
+		m.table.MoveCellBy(delta, 0)
+	}
+}
+
+func (m *mainLayer) wheelQuery(a *app, delta int) {
+	kind := KeyUp
+	if delta > 0 {
+		kind = KeyDown
+	}
+	n := delta
+	if n < 0 {
+		n = -n
+	}
+	for i := 0; i < n; i++ {
+		m.editor.handleInsert(a, Key{Kind: kind})
+	}
 }
 
 func newMainLayer() *mainLayer {
@@ -105,7 +291,7 @@ func (m *mainLayer) Draw(a *app, c *cellbuf) {
 	}
 	p := computeLayout(a.term.width, a.term.height)
 	drawFrame(c, p.explorer, "Explorer", m.focus == FocusExplorer)
-	drawFrame(c, p.query, "Query", m.focus == FocusQuery)
+	drawFrameInfo(c, p.query, "Query", m.queryRightInfo(), m.focus == FocusQuery)
 	drawFrameInfo(c, p.results, m.resultsTitle(), m.resultsRightInfo(a), m.focus == FocusResults)
 
 	// Show the editor cursor whenever the Query panel is focused. If an
@@ -114,7 +300,11 @@ func (m *mainLayer) Draw(a *app, c *cellbuf) {
 	// discarded automatically.
 	m.explorer.draw(c, p.explorer, m.focus == FocusExplorer)
 	m.editor.draw(c, p.query, m.focus == FocusQuery)
-	m.table.draw(c, p.results)
+	if !a.running && m.lastErr != "" && m.lastErr != "cancelled" {
+		m.drawResultsError(c, p.results)
+	} else {
+		m.table.draw(c, p.results)
+	}
 
 	// Bottom status bar reflects the topmost layer's hints, so modal
 	// overlays can show their own keys here without touching the main
@@ -137,7 +327,7 @@ func (m *mainLayer) drawFullscreen(a *app, c *cellbuf) {
 		bodyH = bodyMinH
 	}
 	queryRect := rect{row: 1, col: 1, w: termW, h: bodyH}
-	drawFrame(c, queryRect, "Query [fullscreen]", true)
+	drawFrameInfo(c, queryRect, "Query [fullscreen]", m.queryRightInfo(), true)
 	m.editor.draw(c, queryRect, true)
 
 	statusRow := bodyH + 1
@@ -156,6 +346,12 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 	}
 	if k.Kind == KeyF5 {
 		a.runQuery()
+		return
+	}
+	// Ctrl+K is the global command-menu prefix. Works from any focus,
+	// including the Query editor where Space is a literal character.
+	if k.Ctrl && k.Rune == 'k' {
+		m.pendingSpace = true
 		return
 	}
 	// F11 toggles fullscreen editor mode. Available from any focus
@@ -289,6 +485,10 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 // prompt; 'y' / 'Y' copy cell / row to the system clipboard; Enter
 // opens the cell inspector.
 func (m *mainLayer) handleResultsKey(a *app, k Key) {
+	if m.inErrorView(a) {
+		m.handleResultsErrorKey(a, k)
+		return
+	}
 	switch k.Kind {
 	case KeyUp:
 		m.table.MoveCellBy(-1, 0)
@@ -399,6 +599,95 @@ func (m *mainLayer) copyAllResults(a *app) {
 	m.status = fmt.Sprintf("copied %d row(s) as TSV", len(rows))
 }
 
+// inErrorView reports whether the Results pane is currently showing the
+// error view instead of the table.
+func (m *mainLayer) inErrorView(a *app) bool {
+	return !a.running && m.lastErr != "" && m.lastErr != "cancelled"
+}
+
+// handleResultsErrorKey processes keys while the results pane is in
+// error-view mode. Up/Dn scroll the wrapped error; 'y' and Alt+A copy
+// the full error string to the clipboard.
+func (m *mainLayer) handleResultsErrorKey(a *app, k Key) {
+	switch k.Kind {
+	case KeyUp:
+		if m.resultsErrScroll > 0 {
+			m.resultsErrScroll--
+		}
+		return
+	case KeyDown:
+		m.resultsErrScroll++
+		return
+	case KeyPgUp:
+		m.resultsErrScroll -= 10
+		if m.resultsErrScroll < 0 {
+			m.resultsErrScroll = 0
+		}
+		return
+	case KeyPgDn:
+		m.resultsErrScroll += 10
+		return
+	case KeyHome:
+		m.resultsErrScroll = 0
+		return
+	}
+	if k.Alt && k.Kind == KeyRune && (k.Rune == 'a' || k.Rune == 'A') {
+		m.copyErrorText(a)
+		return
+	}
+	if k.Kind == KeyRune && !k.Ctrl && !k.Alt && (k.Rune == 'y' || k.Rune == 'Y') {
+		m.copyErrorText(a)
+	}
+}
+
+func (m *mainLayer) copyErrorText(a *app) {
+	if err := a.clipboard.Copy(m.lastErr); err != nil {
+		m.status = "copy: " + err.Error()
+		return
+	}
+	m.status = fmt.Sprintf("copied error (%d chars)", len(m.lastErr))
+}
+
+// drawResultsError renders the last query error in place of the table.
+// The error text is hard-wrapped to the inner width and scrolled by
+// resultsErrScroll. Up/Dn adjust the scroll; 'y' and Alt+A copy the
+// full error string to the clipboard.
+func (m *mainLayer) drawResultsError(c *cellbuf, r rect) {
+	innerRow := r.row + 1
+	innerCol := r.col + 1
+	innerW := r.w - 2
+	innerH := r.h - 2
+	if innerW <= 0 || innerH <= 0 {
+		return
+	}
+	header := "Query error:"
+	if m.lastErrLine > 0 {
+		header = fmt.Sprintf("Query error (line %d):", m.lastErrLine)
+	}
+	c.setFg(colorError)
+	c.writeAt(innerRow, innerCol, truncate(header, innerW))
+	c.resetStyle()
+	bodyRow := innerRow + 2
+	bodyH := innerH - 2
+	if bodyH <= 0 {
+		return
+	}
+	lines := wrapText(m.lastErr, innerW)
+	if m.resultsErrScroll > len(lines)-1 {
+		m.resultsErrScroll = len(lines) - 1
+	}
+	if m.resultsErrScroll < 0 {
+		m.resultsErrScroll = 0
+	}
+	visible := lines[m.resultsErrScroll:]
+	if len(visible) > bodyH {
+		visible = visible[:bodyH]
+	}
+	for i, line := range visible {
+		c.writeAt(bodyRow+i, innerCol, truncate(line, innerW))
+	}
+}
+
 // formatQuery reformats the editor's current buffer using the
 // sqltok heuristic formatter. The buffer's SetText path pushes a
 // snapshot for undo, so Ctrl+Z restores the original text if the
@@ -461,6 +750,8 @@ func (m *mainLayer) handleSpace(a *app, k Key) {
 		hl := newHistoryLayer()
 		hl.reload(a)
 		a.pushLayer(hl)
+	case 'o':
+		a.pushLayer(newOpenLayer(""))
 	case 'p':
 		// Explain plan for current editor SQL.
 		sql := strings.TrimSpace(m.editor.buf.Text())
@@ -494,6 +785,14 @@ func (m *mainLayer) resultsTitle() string {
 // While a query is running it streams the live row count; once a query
 // finishes the final row count + elapsed time stays pinned until the next
 // run. Errors collapse to a short tag so the border doesn't grow.
+// queryRightInfo returns the "Ln N, Col M" label shown in the top-right
+// corner of the Query frame. Values are 1-based to match common editor
+// conventions (VS Code, vim status line).
+func (m *mainLayer) queryRightInfo() string {
+	row, col := m.editor.buf.Cursor()
+	return fmt.Sprintf("Ln %d, Col %d", row+1, col+1)
+}
+
 func (m *mainLayer) resultsRightInfo(a *app) string {
 	if a.running {
 		return fmt.Sprintf("streaming %d rows / %d cols", m.table.RowCount(), m.table.ColCount())
@@ -607,6 +906,7 @@ func (m *mainLayer) explorerHints(a *app) string {
 	}
 	return joinHints(
 		"Ctrl+Q=quit",
+		"Ctrl+K=menu",
 		hintAlwaysFocus(),
 		hintIf(len(m.explorer.items) > 0, "Up/Dn/PgUp/PgDn=move"),
 		selectHint,
@@ -622,6 +922,7 @@ func (m *mainLayer) queryHints(a *app) string {
 	hasSel := m.editor.buf.HasSelection()
 	return joinHints(
 		"Ctrl+Q=quit",
+		"Ctrl+K=menu",
 		hintAlwaysFocus(),
 		hintIf(connected && !running, "F5=run"),
 		hintIf(running, "Ctrl+C=cancel"),
@@ -638,11 +939,20 @@ func (m *mainLayer) queryHints(a *app) string {
 }
 
 func (m *mainLayer) resultsHints(a *app) string {
-	_ = a
+	if m.inErrorView(a) {
+		return joinHints(
+			"Ctrl+Q=quit",
+			hintAlwaysFocus(),
+			"Up/Dn=scroll",
+			"y=copy error",
+			"Space=menu",
+		)
+	}
 	hasRows := m.table.RowCount() > 0
 	hasCols := m.table.HasColumns()
 	return joinHints(
 		"Ctrl+Q=quit",
+		"Ctrl+K=menu",
 		hintAlwaysFocus(),
 		hintIf(hasRows, "Up/Dn/Lt/Rt=cell"),
 		hintIf(hasRows, "Enter=inspect"),
@@ -659,6 +969,7 @@ func (m *mainLayer) spaceMenuHints(a *app) string {
 	return joinHints(
 		"c=connect",
 		hintIf(a.conn != nil, "x=disconnect"),
+		"o=open",
 		hintIf(m.table.HasColumns(), "e=export"),
 		"h=history",
 		hintIf(a.conn != nil && hasText, "p=explain"),

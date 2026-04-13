@@ -156,6 +156,39 @@ func (e *explorer) SelectedSchema() string {
 	return e.items[e.cursor].schemaName
 }
 
+// ItemAt maps a screen row (1-based) inside the drawn rect r to an item
+// index, or -1 if the row is outside the visible list. Used by the
+// mouse hit test in mainLayer.
+func (e *explorer) ItemAt(r rect, screenRow int) int {
+	innerRow := r.row + 1
+	innerH := r.h - 2
+	if screenRow < innerRow || screenRow >= innerRow+innerH {
+		return -1
+	}
+	idx := e.scroll + (screenRow - innerRow)
+	if idx < 0 || idx >= len(e.items) {
+		return -1
+	}
+	return idx
+}
+
+// SetCursor positions the cursor on the given index (clamped to valid
+// range). Used by the mouse click path so it doesn't have to reach into
+// MoveCursor deltas.
+func (e *explorer) SetCursor(i int) {
+	if len(e.items) == 0 {
+		e.cursor = 0
+		return
+	}
+	if i < 0 {
+		i = 0
+	}
+	if i >= len(e.items) {
+		i = len(e.items) - 1
+	}
+	e.cursor = i
+}
+
 // MoveCursor shifts the cursor by delta, clamped to valid range.
 func (e *explorer) MoveCursor(delta int) {
 	if len(e.items) == 0 {
