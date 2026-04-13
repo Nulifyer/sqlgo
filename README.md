@@ -29,7 +29,7 @@ No mouse required. No Electron. No cgo. One static binary.
 - **Multi-connection** -- saved connections switch at runtime from the command menu.
 
 ### Editor
-- Multi-line with **undo/redo** (`Alt+Z` / `Alt+Y`)
+- Multi-line with **undo/redo** (`Ctrl+Z` / `Ctrl+Y`)
 - **Find / replace** (`Ctrl+F`)
 - **Autocomplete** on column names cached per-connection (`Ctrl+Space`)
 - **Multi-cursor** (`Ctrl+Alt+Up/Down`)
@@ -119,7 +119,7 @@ From the command menu (`Space`) you can connect, disconnect, export, view histor
 | | `Ctrl+C` | Cancel running query |
 | | `F11` | Toggle fullscreen editor |
 | | `Alt+F` | Format SQL |
-| | `Alt+Z` / `Alt+Y` | Undo / Redo |
+| | `Ctrl+Z` / `Ctrl+Y` | Undo / Redo |
 | | `Ctrl+Space` | Autocomplete |
 | | `Ctrl+F` | Find / replace |
 | | `Ctrl+Alt+Up/Dn` | Add multi-cursor line |

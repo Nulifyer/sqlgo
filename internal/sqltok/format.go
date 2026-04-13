@@ -66,6 +66,19 @@ var joinHead = map[string]struct{}{
 	"JOIN": {}, "INNER": {}, "LEFT": {}, "RIGHT": {}, "FULL": {}, "CROSS": {},
 }
 
+// isJoinModifier reports whether kw is a JOIN-phrase modifier that a
+// following bare JOIN should stay inline with ("INNER JOIN", "LEFT
+// OUTER JOIN"). OUTER isn't a joinHead itself -- it falls through the
+// default keyword path and lands inline, and this keeps the JOIN that
+// follows it on the same line as LEFT / RIGHT / FULL.
+func isJoinModifier(kw string) bool {
+	switch kw {
+	case "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "OUTER":
+		return true
+	}
+	return false
+}
+
 // commaSplitters are clause keywords whose comma-separated lists
 // should wrap onto separate lines at the item indent.
 var commaSplitters = map[string]bool{
@@ -186,8 +199,16 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 		}
 
 		// JOIN phrase: wraps to itemIndent so joined tables line up
-		// with the tables they join against.
+		// with the tables they join against. Bare JOIN stays on the
+		// same line as any preceding modifier (INNER / LEFT OUTER /
+		// etc.) so multi-word joins don't split across two lines.
 		if _, ok := joinHead[upper]; ok {
+			if upper == "JOIN" && isJoinModifier(prevKeyword(tokens, i)) {
+				f.writeRaw("JOIN")
+				f.writeRaw(" ")
+				f.currentSplit = false
+				return i + 1
+			}
 			f.newlineTo(f.itemIndent())
 			f.writeRaw(upper)
 			f.writeRaw(" ")
@@ -228,7 +249,7 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 				f.writeRaw(" ")
 			}
 		case "(":
-			if isFunctionCall(tokens, i) {
+			if IsFunctionCall(tokens, i) {
 				f.trimTrailingSpace()
 				f.writeRaw("(")
 				f.parenStack = append(f.parenStack, -1)
@@ -236,11 +257,13 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 			} else {
 				f.writeRaw("(")
 				// Subquery / grouping paren: snapshot the current
-				// baseIndent so ')' can restore it, then bump to the
-				// next indent level and drop onto a fresh line.
+				// baseIndent so ')' can restore it, then bump two
+				// levels so the body sits one indent deeper than the
+				// parent clause's items (where the '(' itself tends
+				// to live). Closing ')' lines up with those items.
 				f.parenStack = append(f.parenStack, f.baseIndent)
 				f.splitStack = append(f.splitStack, f.currentSplit)
-				f.baseIndent += indentWidth
+				f.baseIndent += 2 * indentWidth
 				f.newlineTo(f.baseIndent)
 				// Reset the child context so the inner clauses can
 				// pick their own state from scratch.
@@ -256,7 +279,10 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 				if saved >= 0 {
 					f.baseIndent = saved
 					f.currentSplit = prevSplit
-					f.newlineTo(f.baseIndent)
+					// Close ')' at the parent's item indent so it
+					// lines up with the subquery's siblings rather
+					// than jumping back to the clause keyword column.
+					f.newlineTo(f.baseIndent + indentWidth)
 				}
 			}
 			f.writeRaw(")")
@@ -331,12 +357,12 @@ func (f *formatter) consumeSelectModifiers(tokens []Token, start int) int {
 	}
 }
 
-// isFunctionCall looks backward from tokens[i] (an open paren) and
+// IsFunctionCall looks backward from tokens[i] (an open paren) and
 // returns true if the preceding non-whitespace token is an identifier
 // or a keyword that's conventionally followed by a function call
 // (CAST, COUNT, etc). This keeps `COUNT(*)` and `CAST(x AS INT)`
 // inline while `SELECT ... FROM (SELECT ...)` still indents.
-func isFunctionCall(tokens []Token, i int) bool {
+func IsFunctionCall(tokens []Token, i int) bool {
 	for j := i - 1; j >= 0; j-- {
 		t := tokens[j]
 		if t.Kind == Whitespace || t.Kind == Comment {

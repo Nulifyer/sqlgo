@@ -8,8 +8,8 @@ import (
 // clipboard + undo. Scrolls to follow cursor.
 //
 // Keys: Shift+arrows select, Ctrl+C/X/V clipboard, Ctrl+A all,
-// Alt+Z/Y undo/redo (Ctrl+Z/Y eaten by shell job control / BSD
-// VDSUSP), Ctrl+Space autocomplete, Ctrl+L clear (via main_layer).
+// Ctrl+Z/Y undo/redo, Ctrl+Space autocomplete, Ctrl+L clear (via
+// main_layer).
 type editor struct {
 	buf       *buffer
 	scrollRow int
@@ -210,24 +210,18 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 			e.collapseCursors()
 			e.buf.SelectAll()
 			return true
-		}
-	}
-
-	// Alt+<letter> shortcuts. Alt keys arrive as ESC-prefixed byte
-	// sequences and aren't eligible for shell signal interception,
-	// so they're safe homes for undo/redo. Any other Alt combo is
-	// swallowed here so the raw letter doesn't end up inserted into
-	// the buffer on a miss.
-	if k.Alt && k.Kind == KeyRune {
-		switch k.Rune {
-		case 'z', 'Z':
+		case 'z':
+			// term.MakeRaw disables ISIG on posix and ReadConsoleW
+			// on Windows delivers ^Z as a raw byte, so Ctrl+Z is
+			// safe to use for undo.
 			e.collapseCursors()
 			e.buf.Undo()
-		case 'y', 'Y':
+			return true
+		case 'y':
 			e.collapseCursors()
 			e.buf.Redo()
+			return true
 		}
-		return true
 	}
 
 	switch k.Kind {
@@ -488,15 +482,67 @@ func isPrintable(r rune) bool {
 // innerW. Whitespace between tokens and anything past the last token
 // fall back to the default style.
 func styleForCol(tokens []sqltok.Token, col int) Style {
-	for _, t := range tokens {
+	for i, t := range tokens {
 		if col < t.StartCol {
 			return defaultStyle()
 		}
 		if col < t.EndCol {
+			if isFunctionToken(tokens, i) {
+				return currentTheme.SQLFunction
+			}
 			return styleForKind(t.Kind)
 		}
 	}
 	return defaultStyle()
+}
+
+// isFunctionToken reports whether tokens[i] should paint with the
+// function style: either an identifier/keyword that is immediately
+// followed by '(', or the '(' or matching ')' of such a call.
+func isFunctionToken(tokens []sqltok.Token, i int) bool {
+	t := tokens[i]
+	switch t.Kind {
+	case sqltok.Ident, sqltok.Keyword:
+		for j := i + 1; j < len(tokens); j++ {
+			if tokens[j].Kind == sqltok.Whitespace || tokens[j].Kind == sqltok.Comment {
+				continue
+			}
+			if tokens[j].Kind != sqltok.Punct || tokens[j].Text != "(" {
+				return false
+			}
+			// The paren must itself qualify as a function call.
+			if !sqltok.IsFunctionCall(tokens, j) {
+				return false
+			}
+			// Only identifiers automatically qualify; keywords must
+			// be in the function whitelist, which IsFunctionCall
+			// already checks against the token preceding '('.
+			return true
+		}
+		return false
+	case sqltok.Punct:
+		if t.Text == "(" {
+			return sqltok.IsFunctionCall(tokens, i)
+		}
+		if t.Text == ")" {
+			depth := 0
+			for j := i - 1; j >= 0; j-- {
+				if tokens[j].Kind != sqltok.Punct {
+					continue
+				}
+				switch tokens[j].Text {
+				case ")":
+					depth++
+				case "(":
+					if depth == 0 {
+						return sqltok.IsFunctionCall(tokens, j)
+					}
+					depth--
+				}
+			}
+		}
+	}
+	return false
 }
 
 // styleForKind maps a tokenizer kind to the current theme's

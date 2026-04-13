@@ -529,11 +529,23 @@ func (m *mainLayer) statusText(a *app, width int) string {
 		conn = "● " + a.activeConn.Name
 	}
 	hints := a.topLayer().Hints(a)
-	s := fmt.Sprintf(" [%s]  %s  │  %s", m.focus, conn, hints)
+	prefix := fmt.Sprintf(" [%s]  %s  │  ", m.focus, conn)
+	suffix := ""
 	if m.status != "" {
-		s += "    (" + m.status + ")"
+		suffix = "    (" + m.status + ")"
 	}
-	return truncate(s, width)
+	// Drop trailing hint entries (two-space separated) until the whole
+	// line fits. Earlier entries are higher priority so this preserves
+	// critical keys like Ctrl+Q and focus switches.
+	for displayWidth(prefix+hints+suffix) > width && hints != "" {
+		idx := strings.LastIndex(hints, "  ")
+		if idx < 0 {
+			hints = ""
+			break
+		}
+		hints = hints[:idx]
+	}
+	return truncate(prefix+hints+suffix, width)
 }
 
 // Hints is the Layer interface entry point for mainLayer. It dispatches on
@@ -615,7 +627,7 @@ func (m *mainLayer) queryHints(a *app) string {
 		hintIf(running, "Ctrl+C=cancel"),
 		hintIf(hasSel, "Ctrl+C/X=copy/cut"),
 		hintIf(!hasSel, "Ctrl+V=paste"),
-		"Alt+Z/Y=undo/redo",
+		"Ctrl+Z/Y=undo/redo",
 		hintIf(hasText, "Alt+F=format"),
 		"Ctrl+Space=complete",
 		hintIf(hasText, "Ctrl+F=find"),
