@@ -4,6 +4,8 @@ package tui
 
 import "time"
 
+const resizePollWindows = 250 * time.Millisecond
+
 // watchResize polls the terminal size on a ticker. Windows has no
 // SIGWINCH equivalent that is usable alongside stream-based stdin
 // reads, so a short tick is the pragmatic cross-terminal approach

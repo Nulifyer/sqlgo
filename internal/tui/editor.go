@@ -137,10 +137,18 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 			e.buf.SelectDown()
 			return true
 		case KeyHome:
-			e.buf.SelectHome()
+			if k.Ctrl {
+				e.buf.SelectBufferStart()
+			} else {
+				e.buf.SelectHome()
+			}
 			return true
 		case KeyEnd:
-			e.buf.SelectEnd()
+			if k.Ctrl {
+				e.buf.SelectBufferEnd()
+			} else {
+				e.buf.SelectEnd()
+			}
 			return true
 		}
 	}
@@ -161,6 +169,14 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		case KeyDelete:
 			e.collapseCursors()
 			e.buf.DeleteWordRight()
+			return true
+		case KeyHome:
+			e.collapseCursors()
+			e.buf.MoveBufferStart()
+			return true
+		case KeyEnd:
+			e.collapseCursors()
+			e.buf.MoveBufferEnd()
 			return true
 		}
 	}

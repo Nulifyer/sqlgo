@@ -17,8 +17,9 @@ type clauseKind int
 const (
 	clauseGeneric clauseKind = iota
 	clauseSelectList
-	clauseFromTarget // after FROM or JOIN
-	clauseWhereish   // WHERE / ON / HAVING / GROUP BY / ORDER BY
+	clauseFromTarget    // after FROM or JOIN, cursor expects a table
+	clauseAfterTableRef // FROM has a satisfied table ref; next up is JOIN/WHERE/GROUP/...
+	clauseWhereish      // WHERE / ON / HAVING / GROUP BY / ORDER BY
 )
 
 func (k clauseKind) String() string {
@@ -27,6 +28,8 @@ func (k clauseKind) String() string {
 		return "select"
 	case clauseFromTarget:
 		return "from"
+	case clauseAfterTableRef:
+		return "afterTable"
 	case clauseWhereish:
 		return "where"
 	}
@@ -103,11 +106,11 @@ func analyzeCursorContext(text string, cursorOffset int) completionCtx {
 	// Classify at the cursor's own paren depth so an inner SELECT
 	// in a subquery body classifies locally, not against the outer.
 	pre := cursorLocalPreTokens(stmt, cursorOffset)
-	ctx.clause = classifyClause(pre)
+	ctx.clause = classifyClause(pre, cursorOffset)
 
 	// Scope extraction walks depth-0 tokens so subquery FROMs
 	// don't leak into the outer scope.
-	ctx.inScope = extractFromScope(stmt)
+	ctx.inScope = extractFromScope(stmt, cursorOffset)
 	ctx.ctes = extractCTEs(stmt)
 	return ctx
 }
@@ -154,7 +157,12 @@ func terminatedComment(s string) bool {
 }
 
 // classifyClause walks pre backwards for the last clause keyword.
-func classifyClause(pre []sqltok.Token) clauseKind {
+// cursorOffset lets us tell a table-name-being-typed
+// (`FROM prod|`) from a cursor past a complete table reference
+// (`FROM products <ws> |` or `FROM products <ws> w|`) -- the latter
+// reports clauseAfterTableRef so JOIN/WHERE/GROUP/... keywords
+// show up in the popup.
+func classifyClause(pre []sqltok.Token, cursorOffset int) clauseKind {
 	if len(pre) == 0 {
 		return clauseGeneric
 	}
@@ -178,12 +186,47 @@ func classifyClause(pre []sqltok.Token) clauseKind {
 				return clauseWhereish
 			}
 		case "FROM", "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS":
+			if isAfterTableRef(pre[i+1:], cursorOffset) {
+				return clauseAfterTableRef
+			}
 			return clauseFromTarget
 		case "INSERT", "UPDATE", "DELETE", "SET", "VALUES":
 			return clauseGeneric
 		}
 	}
 	return clauseGeneric
+}
+
+// isAfterTableRef reports whether the tokens following a FROM/JOIN
+// keyword form a satisfied table reference -- i.e. the cursor has
+// moved past the table name into "what comes next" territory (JOIN,
+// WHERE, GROUP BY, ...). The ident being actively typed is
+// recognized by its EndCol matching the cursor; it doesn't count
+// as "committed". A trailing comma or AS keeps us in FROM-target
+// mode (new table coming / alias slot).
+func isAfterTableRef(tail []sqltok.Token, cursorOffset int) bool {
+	if len(tail) > 0 {
+		last := tail[len(tail)-1]
+		if last.Kind == sqltok.Ident && last.EndCol == cursorOffset {
+			tail = tail[:len(tail)-1]
+		}
+	}
+	if len(tail) == 0 {
+		return false
+	}
+	last := tail[len(tail)-1]
+	if last.Kind == sqltok.Punct && last.Text == "," {
+		return false
+	}
+	if last.Kind == sqltok.Keyword && strings.EqualFold(last.Text, "AS") {
+		return false
+	}
+	for _, t := range tail {
+		if t.Kind == sqltok.Ident {
+			return true
+		}
+	}
+	return false
 }
 
 // cursorLocalPreTokens returns pre-cursor tokens at the cursor's
@@ -461,7 +504,7 @@ func selectItemColName(g []sqltok.Token) string {
 // aliases (with or without AS), comma-separated lists, and
 // `(subquery) alias` derived refs whose columns come from the
 // inner SELECT list.
-func extractFromScope(stmt []sqltok.Token) []tableScope {
+func extractFromScope(stmt []sqltok.Token, cursorOffset int) []tableScope {
 	var out []tableScope
 	seen := map[string]struct{}{}
 	addRef := func(ref tableScope) {
@@ -572,7 +615,7 @@ func extractFromScope(stmt []sqltok.Token) []tableScope {
 			// table-ref parser (it wants a contiguous ident/
 			// punct sequence without paren noise).
 			run := collectDepthZeroRun(stmt[i:])
-			ref, consumed := parseTableRef(run)
+			ref, consumed := parseTableRef(run, cursorOffset)
 			if consumed == 0 {
 				i++
 				continue
@@ -631,7 +674,7 @@ func collectDepthZeroRun(stmt []sqltok.Token) []sqltok.Token {
 //	tableName AS alias
 //	schema.tableName alias
 //	schema.tableName AS alias
-func parseTableRef(tokens []sqltok.Token) (tableScope, int) {
+func parseTableRef(tokens []sqltok.Token, cursorOffset int) (tableScope, int) {
 	var ref tableScope
 	if len(tokens) == 0 || tokens[0].Kind != sqltok.Ident {
 		return ref, 0
@@ -646,20 +689,39 @@ func parseTableRef(tokens []sqltok.Token) (tableScope, int) {
 		ref.name = tokens[consumed+1].Text
 		consumed += 2
 	}
-	// Optional alias: bare ident OR "AS" <ident>.
+	// Optional alias: bare ident OR "AS" <ident>. Skip if the candidate
+	// alias is the token being typed at the cursor: that's the user's
+	// completion prefix, not a real alias, and emitting it as an alias
+	// floats it to the top of the popup before it exists in the query.
 	if consumed < len(tokens) {
 		t := tokens[consumed]
 		if t.Kind == sqltok.Keyword && strings.EqualFold(t.Text, "AS") && consumed+1 < len(tokens) && tokens[consumed+1].Kind == sqltok.Ident {
-			ref.alias = tokens[consumed+1].Text
+			aliasTok := tokens[consumed+1]
+			if !isBeingTyped(aliasTok, cursorOffset) {
+				ref.alias = aliasTok.Text
+			}
 			consumed += 2
 		} else if t.Kind == sqltok.Ident {
 			// Bare ident after a table ref is an alias
 			// ("FROM a b" = "FROM a AS b" per SQL standard).
-			ref.alias = t.Text
+			// Consume it either way so the caller doesn't re-enter
+			// parseTableRef on the being-typed prefix and register
+			// it as a phantom table.
+			if !isBeingTyped(t, cursorOffset) {
+				ref.alias = t.Text
+			}
 			consumed++
 		}
 	}
 	return ref, consumed
+}
+
+// isBeingTyped reports whether tok is the identifier currently under
+// the cursor -- i.e. the user's completion prefix. Such tokens must
+// not be promoted to aliases, because the query does not yet contain
+// them as a committed reference.
+func isBeingTyped(tok sqltok.Token, cursorOffset int) bool {
+	return cursorOffset > tok.StartCol && cursorOffset <= tok.EndCol
 }
 
 // columnCache is the per-connection column store, populated
@@ -720,6 +782,13 @@ func (a *app) gatherCompletionsCtx(ctx completionCtx) []completionItem {
 		for _, c := range ctx.ctes {
 			items = append(items, completionItem{text: c.name, kind: completeTable})
 		}
+	case clauseAfterTableRef:
+		// Past a complete table ref: offer the keywords that can
+		// legally follow (JOIN family, WHERE, GROUP/ORDER BY,
+		// HAVING, UNION/INTERSECT/EXCEPT, LIMIT/OFFSET) plus
+		// aliases so qualifier dots still work.
+		items = append(items, afterTableKeywordCandidates()...)
+		items = append(items, a.aliasCandidates(ctx)...)
 	case clauseSelectList:
 		items = append(items, a.inScopeColumnCandidates(ctx)...)
 		items = append(items, a.aliasCandidates(ctx)...)
@@ -817,6 +886,25 @@ func (a *app) gatherQualified(ctx completionCtx) []completionItem {
 		return nil
 	}
 	return items
+}
+
+// afterTableKeywords is the set a user is likely to type next when
+// the cursor sits past a complete table ref in a FROM/JOIN list.
+var afterTableKeywords = []string{
+	"WHERE",
+	"JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "OUTER", "ON", "USING",
+	"GROUP", "ORDER", "BY", "HAVING",
+	"UNION", "INTERSECT", "EXCEPT", "ALL",
+	"LIMIT", "OFFSET", "FETCH",
+	"AS",
+}
+
+func afterTableKeywordCandidates() []completionItem {
+	out := make([]completionItem, 0, len(afterTableKeywords))
+	for _, kw := range afterTableKeywords {
+		out = append(out, completionItem{text: kw, kind: completeKeyword})
+	}
+	return out
 }
 
 func (a *app) keywordCandidates() []completionItem {

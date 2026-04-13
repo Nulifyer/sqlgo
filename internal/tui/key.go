@@ -457,23 +457,14 @@ func parseModifier(s string) csiModifier {
 }
 
 // peekAvailable returns true if at least one byte is buffered or arrives
-// within d. We can only check the buffered side without dragging in select(2),
-// so on cold buffers we do a tiny blocking read with a goroutine.
+// within d. The cold-buffer path is delegated to stdinPeekReadable, which
+// has a platform-specific implementation so we never race another
+// goroutine against the main reader on the same bufio.Reader.
 func (kr *keyReader) peekAvailable(d time.Duration) bool {
 	if kr.r.Buffered() > 0 {
 		return true
 	}
-	ch := make(chan bool, 1)
-	go func() {
-		_, err := kr.r.Peek(1)
-		ch <- err == nil
-	}()
-	select {
-	case ok := <-ch:
-		return ok
-	case <-time.After(d):
-		return false
-	}
+	return stdinPeekReadable(d)
 }
 
 func decodeUTF8(b []byte) (rune, int) {

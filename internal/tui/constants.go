@@ -21,8 +21,7 @@ const (
 
 // UI cadence.
 const (
-	progressThrottle  = 50 * time.Millisecond
-	resizePollWindows = 250 * time.Millisecond
+	progressThrottle = 50 * time.Millisecond
 )
 
 // Layout geometry shared across the main view.

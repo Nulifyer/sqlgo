@@ -367,6 +367,20 @@ func (b *buffer) MoveEnd() {
 	b.col = len(b.lines[b.row])
 }
 
+// MoveBufferStart jumps to (0, 0).
+func (b *buffer) MoveBufferStart() {
+	b.clearSelection()
+	b.row = 0
+	b.col = 0
+}
+
+// MoveBufferEnd jumps to the end of the last line.
+func (b *buffer) MoveBufferEnd() {
+	b.clearSelection()
+	b.row = len(b.lines) - 1
+	b.col = len(b.lines[b.row])
+}
+
 // MoveWordLeft jumps backward over one word boundary. Skips any run
 // of non-word characters at the cursor, then skips the preceding run
 // of word characters. Crosses line boundaries when at the start of a
@@ -530,6 +544,20 @@ func (b *buffer) SelectHome() {
 // SelectEnd extends the selection to the end of the line.
 func (b *buffer) SelectEnd() {
 	b.ensureAnchor()
+	b.col = len(b.lines[b.row])
+}
+
+// SelectBufferStart extends the selection to (0, 0).
+func (b *buffer) SelectBufferStart() {
+	b.ensureAnchor()
+	b.row = 0
+	b.col = 0
+}
+
+// SelectBufferEnd extends the selection to the end of the last line.
+func (b *buffer) SelectBufferEnd() {
+	b.ensureAnchor()
+	b.row = len(b.lines) - 1
 	b.col = len(b.lines[b.row])
 }
 

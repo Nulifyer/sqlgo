@@ -386,27 +386,6 @@ func kindBonus(k completionKind) int {
 	return 0
 }
 
-// kindRank: lower = higher in popup. Columns/aliases outrank
-// everything in SELECT/WHERE contexts; functions above keywords.
-func kindRank(k completionKind) int {
-	switch k {
-	case completeColumn:
-		return 0
-	case completeAlias:
-		return 1
-	case completeSchema:
-		return 2
-	case completeTable:
-		return 3
-	case completeView:
-		return 4
-	case completeFunction:
-		return 5
-	case completeKeyword:
-		return 6
-	}
-	return 7
-}
 
 // wordBeforeCursor returns the ident chars ending at col. A
 // leading '.' is not consumed ("dbo.use|" → "use", col 4).
