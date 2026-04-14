@@ -17,41 +17,79 @@ builds:
     goarch:
       - amd64
       - arm64
+    # goreleaser-cross has no aarch64 mingw toolchain, so windows/arm64
+    # is unbuildable with cgo. Skip it.
+    ignore:
+      - goos: windows
+        goarch: arm64
     flags:
       - -tags=sqlite_fts5
+      - -trimpath
+      - -buildvcs=false
     ldflags:
       - -s -w
+    # Per-target overrides set the cross compiler and apply OS-specific
+    # hardening / perf flags. See docs/db-support-plan.md and the goreleaser
+    # build for rationale on each flag (FORTIFY_SOURCE, CET, BTI, RELRO, etc).
     overrides:
+      # linux/amd64: full hardening + PIE via external linker (cgo requires it).
       - goos: linux
         goarch: amd64
         env:
           - CC=x86_64-linux-gnu-gcc
           - CXX=x86_64-linux-gnu-g++
+          - CGO_CFLAGS=-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fcf-protection=full -fstack-clash-protection
+          - CGO_LDFLAGS=-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
+        flags:
+          - -tags=sqlite_fts5
+          - -trimpath
+          - -buildvcs=false
+          - -buildmode=pie
+        ldflags:
+          - -s -w -linkmode=external
+
+      # linux/arm64: same as amd64 but PAC+BTI instead of CET.
       - goos: linux
         goarch: arm64
         env:
           - CC=aarch64-linux-gnu-gcc
           - CXX=aarch64-linux-gnu-g++
+          - CGO_CFLAGS=-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -mbranch-protection=standard -fstack-clash-protection
+          - CGO_LDFLAGS=-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
+        flags:
+          - -tags=sqlite_fts5
+          - -trimpath
+          - -buildvcs=false
+          - -buildmode=pie
+        ldflags:
+          - -s -w -linkmode=external
+
+      # windows/amd64: Go linker handles PIE/ASLR/DEP. -lssp links libssp for
+      # the stack protector. FORTIFY_SOURCE skipped (no glibc on mingw).
       - goos: windows
         goarch: amd64
         env:
           - CC=x86_64-w64-mingw32-gcc
           - CXX=x86_64-w64-mingw32-g++
-      - goos: windows
-        goarch: arm64
-        env:
-          - CC=aarch64-w64-mingw32-gcc
-          - CXX=aarch64-w64-mingw32-g++
+          - CGO_CFLAGS=-O2 -fstack-protector-strong -fcf-protection=full
+          - CGO_LDFLAGS=-lssp
+
+      # darwin/amd64: PIE is automatic. clang silently ignores -fcf-protection
+      # and -fstack-clash-protection, so omit them.
       - goos: darwin
         goarch: amd64
         env:
           - CC=o64-clang
           - CXX=o64-clang++
+          - CGO_CFLAGS=-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2
+
+      # darwin/arm64: PAC+BTI on Apple Silicon.
       - goos: darwin
         goarch: arm64
         env:
           - CC=oa64-clang
           - CXX=oa64-clang++
+          - CGO_CFLAGS=-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -mbranch-protection=standard
 
 archives:
   - formats: [tar.gz]
