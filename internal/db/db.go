@@ -17,11 +17,18 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"sync"
 )
+
+// ErrPermissionDenied is returned (or wrapped) by an adapter when the
+// current user lacks rights to list a particular object kind. The TUI
+// treats this as "render the group greyed with a (denied) hint" rather
+// than a hard error.
+var ErrPermissionDenied = errors.New("permission denied")
 
 // Config is an engine-agnostic connection description. Options carries
 // driver-specific knobs (e.g. "encrypt", "trustServerCertificate" for MSSQL)
@@ -193,11 +200,55 @@ type TableRef struct {
 	System bool
 }
 
-// SchemaInfo is a flat list of tables+views. The explorer groups by Schema
-// at render time; keeping the storage flat makes it trivial to sort and to
-// compute counts.
+// RoutineKind distinguishes stored procedures, functions, and aggregates.
+type RoutineKind int
+
+const (
+	RoutineKindProcedure RoutineKind = iota
+	RoutineKindFunction
+	RoutineKindAggregate
+)
+
+// RoutineRef is a stored procedure, function, or aggregate.
+type RoutineRef struct {
+	Schema   string
+	Name     string
+	Kind     RoutineKind
+	Language string // optional (pg: "plpgsql"/"sql"; mssql: "SQL"/"CLR"; mysql: "SQL")
+	System   bool
+}
+
+// TriggerRef is a table-bound trigger.
+type TriggerRef struct {
+	Schema string
+	Table  string
+	Name   string
+	Timing string // BEFORE/AFTER/INSTEAD OF
+	Event  string // INSERT/UPDATE/DELETE (engines may return a joined list)
+	System bool
+}
+
+// ObjectKindStatus records whether a listing query for one object kind
+// succeeded, was denied, or is unsupported by the engine. The explorer
+// shows a (denied)/(unsupported) hint next to empty groups.
+type ObjectKindStatus int
+
+const (
+	ObjectKindOK ObjectKindStatus = iota
+	ObjectKindDenied
+	ObjectKindUnsupported
+)
+
+// SchemaInfo is a flat, per-kind listing of visible objects. The explorer
+// groups by Schema and kind at render time.
 type SchemaInfo struct {
-	Tables []TableRef
+	Tables   []TableRef
+	Routines []RoutineRef
+	Triggers []TriggerRef
+
+	// Status tracks per-kind listing results. Absent key == OK.
+	// Keys: "tables", "routines", "triggers".
+	Status map[string]ObjectKindStatus
 }
 
 // Column describes a single column in a query result.

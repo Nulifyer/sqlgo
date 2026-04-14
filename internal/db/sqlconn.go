@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 )
@@ -27,6 +28,18 @@ type SQLOptions struct {
 	SchemaQuery    string
 	ColumnsQuery   string
 	ColumnsBuilder func(t TableRef) (string, []any)
+
+	// RoutinesQuery, if set, must return (schema, name, kind, language, is_system)
+	// where kind is 'P' (procedure), 'F' (function), or 'A' (aggregate).
+	RoutinesQuery string
+	// TriggersQuery, if set, must return (schema, table, name, timing, event, is_system).
+	TriggersQuery string
+
+	// IsPermissionDenied classifies a driver error as "user lacks rights"
+	// (MSSQL 229/297, Postgres SQLSTATE 42501, MySQL 1142/1044). When set
+	// and it returns true, the Schema loader marks that object kind as
+	// denied and continues instead of failing the whole refresh.
+	IsPermissionDenied func(error) bool
 }
 
 // OpenSQL wraps a *sql.DB as a db.Conn. Takes ownership of sqlDB.
@@ -48,15 +61,70 @@ func (c *sqlConn) Driver() string { return c.opts.DriverName }
 func (c *sqlConn) Capabilities() Capabilities { return c.opts.Capabilities }
 
 func (c *sqlConn) Schema(ctx context.Context) (*SchemaInfo, error) {
+	info := &SchemaInfo{Status: map[string]ObjectKindStatus{}}
 	if c.opts.SchemaQuery == "" {
-		return &SchemaInfo{}, nil
+		info.Status["tables"] = ObjectKindUnsupported
+	} else {
+		tables, err := c.loadTables(ctx)
+		switch {
+		case err == nil:
+			info.Tables = tables
+		case c.isDenied(err):
+			info.Status["tables"] = ObjectKindDenied
+		default:
+			return nil, err
+		}
 	}
+
+	if c.opts.RoutinesQuery == "" {
+		info.Status["routines"] = ObjectKindUnsupported
+	} else {
+		routines, err := c.loadRoutines(ctx)
+		switch {
+		case err == nil:
+			info.Routines = routines
+		case c.isDenied(err):
+			info.Status["routines"] = ObjectKindDenied
+		default:
+			return nil, err
+		}
+	}
+
+	if c.opts.TriggersQuery == "" {
+		info.Status["triggers"] = ObjectKindUnsupported
+	} else {
+		triggers, err := c.loadTriggers(ctx)
+		switch {
+		case err == nil:
+			info.Triggers = triggers
+		case c.isDenied(err):
+			info.Status["triggers"] = ObjectKindDenied
+		default:
+			return nil, err
+		}
+	}
+	return info, nil
+}
+
+func (c *sqlConn) isDenied(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrPermissionDenied) {
+		return true
+	}
+	if c.opts.IsPermissionDenied != nil && c.opts.IsPermissionDenied(err) {
+		return true
+	}
+	return false
+}
+
+func (c *sqlConn) loadTables(ctx context.Context) ([]TableRef, error) {
 	rows, err := c.db.QueryContext(ctx, c.opts.SchemaQuery)
 	if err != nil {
 		return nil, fmt.Errorf("schema query: %w", err)
 	}
 	defer rows.Close()
-
 	var out []TableRef
 	for rows.Next() {
 		var (
@@ -81,7 +149,78 @@ func (c *sqlConn) Schema(ctx context.Context) (*SchemaInfo, error) {
 		}
 		return out[i].Name < out[j].Name
 	})
-	return &SchemaInfo{Tables: out}, nil
+	return out, nil
+}
+
+func (c *sqlConn) loadRoutines(ctx context.Context) ([]RoutineRef, error) {
+	rows, err := c.db.QueryContext(ctx, c.opts.RoutinesQuery)
+	if err != nil {
+		return nil, fmt.Errorf("routines query: %w", err)
+	}
+	defer rows.Close()
+	var out []RoutineRef
+	for rows.Next() {
+		var (
+			schema, name, language string
+			kindCode               string
+			isSystem               int
+		)
+		var langNull sql.NullString
+		if err := rows.Scan(&schema, &name, &kindCode, &langNull, &isSystem); err != nil {
+			return nil, fmt.Errorf("routines scan: %w", err)
+		}
+		language = langNull.String
+		rk := RoutineKindFunction
+		switch kindCode {
+		case "P", "p":
+			rk = RoutineKindProcedure
+		case "A", "a":
+			rk = RoutineKindAggregate
+		}
+		out = append(out, RoutineRef{Schema: schema, Name: name, Kind: rk, Language: language, System: isSystem != 0})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("routines rows: %w", err)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Schema != out[j].Schema {
+			return out[i].Schema < out[j].Schema
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
+func (c *sqlConn) loadTriggers(ctx context.Context) ([]TriggerRef, error) {
+	rows, err := c.db.QueryContext(ctx, c.opts.TriggersQuery)
+	if err != nil {
+		return nil, fmt.Errorf("triggers query: %w", err)
+	}
+	defer rows.Close()
+	var out []TriggerRef
+	for rows.Next() {
+		var (
+			schema, table, name, timing, event string
+			isSystem                           int
+		)
+		if err := rows.Scan(&schema, &table, &name, &timing, &event, &isSystem); err != nil {
+			return nil, fmt.Errorf("triggers scan: %w", err)
+		}
+		out = append(out, TriggerRef{Schema: schema, Table: table, Name: name, Timing: timing, Event: event, System: isSystem != 0})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("triggers rows: %w", err)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Schema != out[j].Schema {
+			return out[i].Schema < out[j].Schema
+		}
+		if out[i].Table != out[j].Table {
+			return out[i].Table < out[j].Table
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
 }
 
 // Columns runs ColumnsQuery or ColumnsBuilder. Returns nil when

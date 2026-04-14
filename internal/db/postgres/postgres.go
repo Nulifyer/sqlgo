@@ -4,14 +4,25 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 )
+
+// isPermissionDenied returns true for SQLSTATE 42501 (insufficient_privilege).
+func isPermissionDenied(err error) bool {
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) {
+		return pe.Code == "42501"
+	}
+	return false
+}
 
 const driverName = "postgres"
 
@@ -41,10 +52,13 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		return nil, fmt.Errorf("postgres open: %w", err)
 	}
 	conn, err := db.OpenSQL(ctx, sqlDB, db.SQLOptions{
-		DriverName:   driverName,
-		Capabilities: capabilities,
-		SchemaQuery:  schemaQuery,
-		ColumnsQuery: columnsQuery,
+		DriverName:         driverName,
+		Capabilities:       capabilities,
+		SchemaQuery:        schemaQuery,
+		ColumnsQuery:       columnsQuery,
+		RoutinesQuery:      routinesQuery,
+		TriggersQuery:      triggersQuery,
+		IsPermissionDenied: isPermissionDenied,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: %w", err)
@@ -66,6 +80,48 @@ FROM information_schema.tables
 WHERE table_schema NOT LIKE 'pg_toast%'
   AND table_schema NOT LIKE 'pg_temp_%'
 ORDER BY table_schema, table_name;
+`
+
+// routinesQuery: functions, procedures, aggregates from pg_proc.
+// prokind: f=function, p=procedure, a=aggregate, w=window.
+const routinesQuery = `
+SELECT
+    n.nspname AS schema_name,
+    p.proname AS name,
+    CASE p.prokind
+        WHEN 'p' THEN 'P'
+        WHEN 'a' THEN 'A'
+        ELSE 'F'
+    END AS kind,
+    l.lanname AS language,
+    CASE WHEN n.nspname IN ('pg_catalog', 'information_schema') THEN 1 ELSE 0 END AS is_system
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+JOIN pg_language l ON l.oid = p.prolang
+WHERE p.prokind IN ('f', 'p', 'a')
+ORDER BY n.nspname, p.proname;
+`
+
+// triggersQuery: user triggers from pg_trigger (skip internal).
+const triggersQuery = `
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    t.tgname  AS name,
+    CASE WHEN (t.tgtype & 2) = 2 THEN 'BEFORE' ELSE 'AFTER' END AS timing,
+    trim(
+        both ' ' FROM
+        CASE WHEN (t.tgtype & 4)  = 4  THEN ' INSERT' ELSE '' END ||
+        CASE WHEN (t.tgtype & 8)  = 8  THEN ' DELETE' ELSE '' END ||
+        CASE WHEN (t.tgtype & 16) = 16 THEN ' UPDATE' ELSE '' END ||
+        CASE WHEN (t.tgtype & 32) = 32 THEN ' TRUNCATE' ELSE '' END
+    ) AS event,
+    CASE WHEN n.nspname IN ('pg_catalog', 'information_schema') THEN 1 ELSE 0 END AS is_system
+FROM pg_trigger t
+JOIN pg_class c ON c.oid = t.tgrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE NOT t.tgisinternal
+ORDER BY n.nspname, c.relname, t.tgname;
 `
 
 // columnsQuery uses $1/$2 (pgx bind placeholders).

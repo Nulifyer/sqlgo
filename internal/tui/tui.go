@@ -322,9 +322,6 @@ func Run(opts Options) error {
 	a.layers = []Layer{ml}
 
 	// Open the persistent store (connections, history) and migrate it.
-	// Any pre-existing connections.json file in the config dir is
-	// imported on first boot so users upgrading from the JSON-only build
-	// keep their saved connections.
 	bootCtx, cancelBoot := context.WithTimeout(context.Background(), storeBootTimeout)
 	st, err := store.Open(bootCtx)
 	cancelBoot()
@@ -332,14 +329,6 @@ func Run(opts Options) error {
 		return fmt.Errorf("open store: %w", err)
 	}
 	a.store = st
-
-	bootCtx, cancelBoot = context.WithTimeout(context.Background(), storeBootTimeout)
-	if _, err := a.store.BootstrapFromLegacyConfig(bootCtx); err != nil {
-		// Non-fatal: log to stderr and continue with whatever the store
-		// has (possibly empty).
-		fmt.Fprintf(os.Stderr, "sqlgo: legacy config import: %v\n", err)
-	}
-	cancelBoot()
 
 	if err := a.refreshConnections(); err != nil {
 		return fmt.Errorf("load connections: %w", err)

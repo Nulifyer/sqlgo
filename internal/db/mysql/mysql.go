@@ -4,6 +4,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -13,6 +14,21 @@ import (
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 )
+
+// isPermissionDenied returns true for MySQL access errors:
+// 1044 (access denied for db), 1142 (command denied on table),
+// 1143 (column denied), 1227 (specific privilege required).
+func isPermissionDenied(err error) bool {
+	var me *gomysql.MySQLError
+	if !errors.As(err, &me) {
+		return false
+	}
+	switch me.Number {
+	case 1044, 1142, 1143, 1227:
+		return true
+	}
+	return false
+}
 
 const driverName = "mysql"
 
@@ -42,10 +58,13 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		return nil, fmt.Errorf("mysql open: %w", err)
 	}
 	conn, err := db.OpenSQL(ctx, sqlDB, db.SQLOptions{
-		DriverName:   driverName,
-		Capabilities: capabilities,
-		SchemaQuery:  schemaQuery,
-		ColumnsQuery: columnsQuery,
+		DriverName:         driverName,
+		Capabilities:       capabilities,
+		SchemaQuery:        schemaQuery,
+		ColumnsQuery:       columnsQuery,
+		RoutinesQuery:      routinesQuery,
+		TriggersQuery:      triggersQuery,
+		IsPermissionDenied: isPermissionDenied,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mysql: %w", err)
@@ -64,6 +83,31 @@ SELECT
     CASE WHEN TABLE_SCHEMA IN ('mysql', 'information_schema', 'performance_schema', 'sys') THEN 1 ELSE 0 END AS is_system
 FROM information_schema.tables
 ORDER BY TABLE_SCHEMA, TABLE_NAME;
+`
+
+// routinesQuery: procedures and functions via information_schema.ROUTINES.
+const routinesQuery = `
+SELECT
+    ROUTINE_SCHEMA AS schema_name,
+    ROUTINE_NAME   AS name,
+    CASE ROUTINE_TYPE WHEN 'PROCEDURE' THEN 'P' ELSE 'F' END AS kind,
+    'SQL'          AS language,
+    CASE WHEN ROUTINE_SCHEMA IN ('mysql','information_schema','performance_schema','sys') THEN 1 ELSE 0 END AS is_system
+FROM information_schema.ROUTINES
+ORDER BY ROUTINE_SCHEMA, ROUTINE_NAME;
+`
+
+// triggersQuery: user triggers via information_schema.TRIGGERS.
+const triggersQuery = `
+SELECT
+    TRIGGER_SCHEMA         AS schema_name,
+    EVENT_OBJECT_TABLE     AS table_name,
+    TRIGGER_NAME           AS name,
+    ACTION_TIMING          AS timing,
+    EVENT_MANIPULATION     AS event,
+    CASE WHEN TRIGGER_SCHEMA IN ('mysql','information_schema','performance_schema','sys') THEN 1 ELSE 0 END AS is_system
+FROM information_schema.TRIGGERS
+ORDER BY TRIGGER_SCHEMA, EVENT_OBJECT_TABLE, TRIGGER_NAME;
 `
 
 // columnsQuery uses ? (positional mysql placeholders).

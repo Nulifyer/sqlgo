@@ -52,6 +52,12 @@ func Run(ctx context.Context, conn db.Conn, opts Options) error {
 	logf("dialect: %s", d.name)
 
 	if opts.Drop {
+		logf("dropping existing extras")
+		for _, stmt := range d.dropExtras {
+			if err := conn.Exec(ctx, stmt); err != nil {
+				return fmt.Errorf("drop extra: %w\n%s", err, stmt)
+			}
+		}
 		logf("dropping existing tables")
 		// Reverse order: children before parents. FKs aren't declared but
 		// the order still matters if the user later adds them by hand.
@@ -109,6 +115,15 @@ func Run(ctx context.Context, conn db.Conn, opts Options) error {
 	logf("inserting test_notes: %d", len(data.testNotes))
 	if err := insertRows(ctx, conn, d, tables[8], data.testNoteRows()); err != nil {
 		return err
+	}
+
+	if len(d.extras) > 0 {
+		logf("creating extras: %d statements", len(d.extras))
+		for _, stmt := range d.extras {
+			if err := conn.Exec(ctx, stmt); err != nil {
+				return fmt.Errorf("extra: %w\n%s", err, stmt)
+			}
+		}
 	}
 
 	logf("done")
@@ -266,6 +281,12 @@ type dialect struct {
 	// maxParams is the hard cap on bound parameters per statement. Batched
 	// multi-row INSERTs are sized so colCount * batchRows stays below this.
 	maxParams int
+	// extras is run after base tables+rows are inserted: views, routines,
+	// triggers. Each entry is a single statement. Populated per dialect.
+	extras []string
+	// dropExtras is run before dropping tables, in the order given (already
+	// reverse of extras). Used to clear prior objects on reseed.
+	dropExtras []string
 }
 
 var dialects = map[string]*dialect{
@@ -389,6 +410,82 @@ var sqliteDialect = &dialect{
 	quoteIdent:   func(s string) string { return `"` + s + `"` },
 	dropIfExists: func(name string) string { return fmt.Sprintf(`DROP TABLE IF EXISTS "%s"`, name) },
 	maxParams:    900, // SQLite default SQLITE_MAX_VARIABLE_NUMBER is 999.
+}
+
+// extras DDL: a view, a scalar function, a stored procedure, and a trigger.
+// Kept intentionally minimal — their purpose is to surface each object kind
+// in the TUI explorer, not to exercise database features.
+func init() {
+	mssqlDialect.extras = []string{
+		`CREATE VIEW dbo.active_employees AS
+SELECT id, first_name, last_name, department_id FROM dbo.employees`,
+		`CREATE FUNCTION dbo.employee_full_name(@id INT) RETURNS NVARCHAR(90) AS
+BEGIN
+    DECLARE @n NVARCHAR(90);
+    SELECT @n = first_name + N' ' + last_name FROM dbo.employees WHERE id = @id;
+    RETURN @n;
+END`,
+		`CREATE PROCEDURE dbo.list_departments AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT id, name, location FROM dbo.departments ORDER BY id;
+END`,
+		`CREATE TRIGGER dbo.trg_test_notes_touch ON dbo.test_notes AFTER INSERT AS
+BEGIN SET NOCOUNT ON; END`,
+	}
+	mssqlDialect.dropExtras = []string{
+		`IF OBJECT_ID(N'dbo.trg_test_notes_touch', N'TR') IS NOT NULL DROP TRIGGER dbo.trg_test_notes_touch`,
+		`IF OBJECT_ID(N'dbo.list_departments', N'P') IS NOT NULL DROP PROCEDURE dbo.list_departments`,
+		`IF OBJECT_ID(N'dbo.employee_full_name', N'FN') IS NOT NULL DROP FUNCTION dbo.employee_full_name`,
+		`IF OBJECT_ID(N'dbo.active_employees', N'V') IS NOT NULL DROP VIEW dbo.active_employees`,
+	}
+
+	postgresDialect.extras = []string{
+		`CREATE VIEW active_employees AS
+SELECT id, first_name, last_name, department_id FROM employees`,
+		`CREATE FUNCTION employee_full_name(eid INT) RETURNS TEXT AS $$
+    SELECT first_name || ' ' || last_name FROM employees WHERE id = eid
+$$ LANGUAGE SQL`,
+		`CREATE PROCEDURE list_departments() LANGUAGE plpgsql AS $$
+BEGIN PERFORM 1; END
+$$`,
+		`CREATE FUNCTION trg_test_notes_touch_fn() RETURNS TRIGGER AS $$
+BEGIN RETURN NEW; END
+$$ LANGUAGE plpgsql`,
+		`CREATE TRIGGER trg_test_notes_touch AFTER INSERT ON test_notes
+FOR EACH ROW EXECUTE FUNCTION trg_test_notes_touch_fn()`,
+	}
+	postgresDialect.dropExtras = []string{
+		`DROP TRIGGER IF EXISTS trg_test_notes_touch ON test_notes`,
+		`DROP FUNCTION IF EXISTS trg_test_notes_touch_fn()`,
+		`DROP PROCEDURE IF EXISTS list_departments()`,
+		`DROP FUNCTION IF EXISTS employee_full_name(INT)`,
+		`DROP VIEW IF EXISTS active_employees`,
+	}
+
+	mysqlDialect.extras = []string{
+		"CREATE VIEW `active_employees` AS\nSELECT id, first_name, last_name, department_id FROM `employees`",
+		"CREATE FUNCTION `employee_full_name`(eid INT) RETURNS VARCHAR(90) DETERMINISTIC READS SQL DATA\nRETURN (SELECT CONCAT(first_name, ' ', last_name) FROM `employees` WHERE id = eid)",
+		"CREATE PROCEDURE `list_departments`()\nSELECT id, name, location FROM `departments` ORDER BY id",
+		"CREATE TRIGGER `trg_test_notes_touch` AFTER INSERT ON `test_notes`\nFOR EACH ROW SET @last_note_id = NEW.id",
+	}
+	mysqlDialect.dropExtras = []string{
+		"DROP TRIGGER IF EXISTS `trg_test_notes_touch`",
+		"DROP PROCEDURE IF EXISTS `list_departments`",
+		"DROP FUNCTION IF EXISTS `employee_full_name`",
+		"DROP VIEW IF EXISTS `active_employees`",
+	}
+
+	sqliteDialect.extras = []string{
+		`CREATE VIEW "active_employees" AS
+SELECT id, first_name, last_name, department_id FROM "employees"`,
+		`CREATE TRIGGER "trg_test_notes_touch" AFTER INSERT ON "test_notes"
+BEGIN SELECT 1; END`,
+	}
+	sqliteDialect.dropExtras = []string{
+		`DROP TRIGGER IF EXISTS "trg_test_notes_touch"`,
+		`DROP VIEW IF EXISTS "active_employees"`,
+	}
 }
 
 // createDDL renders CREATE TABLE for a single table using d's type map.
@@ -536,7 +633,7 @@ type user struct {
 	email      string
 	employeeID *int
 	role       string
-	isActive   int
+	isActive   bool
 	createdAt  time.Time
 }
 
@@ -670,7 +767,7 @@ func generate(r *rand.Rand, scale int) *dataset {
 			email:      e.email,
 			employeeID: &empID,
 			role:       pick(r, userRoles),
-			isActive:   boolInt(r.IntN(100) < 92), // ~92% active
+			isActive:   r.IntN(100) < 92, // ~92% active
 			createdAt:  e.hireDate.Add(time.Duration(r.IntN(30)) * 24 * time.Hour),
 		})
 	}
@@ -680,7 +777,7 @@ func generate(r *rand.Rand, scale int) *dataset {
 			username:  fmt.Sprintf("svc_%s_%d", strings.ToLower(pick(r, supplierWords)), i),
 			email:     fmt.Sprintf("svc%d@acmewidgets.example", i),
 			role:      "service",
-			isActive:  1,
+			isActive:  true,
 			createdAt: epoch.AddDate(0, 0, -r.IntN(365*3)),
 		})
 	}

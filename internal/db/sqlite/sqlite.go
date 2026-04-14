@@ -52,9 +52,10 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		return nil, fmt.Errorf("sqlite open: %w", err)
 	}
 	conn, err := db.OpenSQL(ctx, sqlDB, db.SQLOptions{
-		DriverName:   driverName,
-		Capabilities: capabilities,
-		SchemaQuery:  schemaQuery,
+		DriverName:    driverName,
+		Capabilities:  capabilities,
+		SchemaQuery:   schemaQuery,
+		TriggersQuery: triggersQuery,
 		ColumnsBuilder: func(t db.TableRef) (string, []any) {
 			q := "SELECT name, type FROM pragma_table_info(" + quoteSQLiteLiteral(t.Name) + ");"
 			return q, nil
@@ -77,6 +78,30 @@ SELECT
     CASE WHEN name LIKE 'sqlite_%' THEN 1 ELSE 0 END AS is_system
 FROM sqlite_master
 WHERE type IN ('table','view')
+ORDER BY name;
+`
+
+// triggersQuery: user triggers via sqlite_master. SQL body is parsed
+// loosely for timing (BEFORE/AFTER/INSTEAD OF) and event (INSERT/UPDATE/DELETE).
+const triggersQuery = `
+SELECT
+    'main' AS schema_name,
+    IFNULL(tbl_name, '') AS table_name,
+    name   AS name,
+    CASE
+        WHEN UPPER(sql) LIKE '%INSTEAD OF%' THEN 'INSTEAD OF'
+        WHEN UPPER(sql) LIKE '%BEFORE%'     THEN 'BEFORE'
+        ELSE 'AFTER'
+    END AS timing,
+    CASE
+        WHEN UPPER(sql) LIKE '%INSERT%' THEN 'INSERT'
+        WHEN UPPER(sql) LIKE '%UPDATE%' THEN 'UPDATE'
+        WHEN UPPER(sql) LIKE '%DELETE%' THEN 'DELETE'
+        ELSE ''
+    END AS event,
+    CASE WHEN name LIKE 'sqlite_%' THEN 1 ELSE 0 END AS is_system
+FROM sqlite_master
+WHERE type = 'trigger'
 ORDER BY name;
 `
 

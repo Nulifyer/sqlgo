@@ -15,10 +15,11 @@ import (
 // explorer's `expanded` map keyed by expansionKey(item).
 type explorerItem struct {
 	kind       explorerItemKind
-	label      string      // display text WITHOUT the indent/marker
-	schemaName string      // owning schema (set for all kinds)
+	label      string       // display text WITHOUT the indent/marker
+	schemaName string       // owning schema (set for all kinds)
 	subgroup   subgroupKind // valid for itemSubgroup; also set on leaves so Toggle knows which group they belong to
-	table      db.TableRef // valid only for itemTable / itemView
+	table      db.TableRef  // valid only for itemTable / itemView
+	suffix     string       // optional trailing hint (e.g. "(denied)", "AFTER INSERT on foo")
 }
 
 type explorerItemKind int
@@ -28,15 +29,21 @@ const (
 	itemSubgroup
 	itemTable
 	itemView
+	itemProcedure
+	itemFunction
+	itemTrigger
 )
 
-// subgroupKind distinguishes the two children a schema can have.
+// subgroupKind distinguishes the children a schema can have.
 type subgroupKind int
 
 const (
 	subgroupNone subgroupKind = iota
 	subgroupTables
 	subgroupViews
+	subgroupProcedures
+	subgroupFunctions
+	subgroupTriggers
 )
 
 func (s subgroupKind) label() string {
@@ -45,8 +52,24 @@ func (s subgroupKind) label() string {
 		return "Tables"
 	case subgroupViews:
 		return "Views"
+	case subgroupProcedures:
+		return "Procedures"
+	case subgroupFunctions:
+		return "Functions"
+	case subgroupTriggers:
+		return "Triggers"
 	}
 	return ""
+}
+
+// allSubgroups lists the subgroups in the render order used by rebuild
+// and SetSchema (for seeding expansion state).
+var allSubgroups = []subgroupKind{
+	subgroupTables,
+	subgroupViews,
+	subgroupProcedures,
+	subgroupFunctions,
+	subgroupTriggers,
 }
 
 // sysSchemaSentinel is the synthetic schema name used for the top-level
@@ -85,40 +108,38 @@ func (e *explorer) SetSchema(info *db.SchemaInfo, depth db.SchemaDepth) {
 	e.cursor = 0
 	e.scroll = 0
 	if info != nil {
-		for _, t := range info.Tables {
-			schemaKey := t.Schema
-			if _, seen := e.expanded[schemaKey]; !seen {
-				e.expanded[schemaKey] = true
+		defaultExpandedSubgroups := []subgroupKind{subgroupTables, subgroupViews}
+		seedSchema := func(s string) {
+			if _, seen := e.expanded[s]; !seen {
+				e.expanded[s] = true
 			}
-			for _, sg := range []subgroupKind{subgroupTables, subgroupViews} {
-				k := subgroupExpansionKey(t.Schema, sg)
+			for _, sg := range defaultExpandedSubgroups {
+				k := subgroupExpansionKey(s, sg)
 				if _, seen := e.expanded[k]; !seen {
 					e.expanded[k] = true
 				}
 			}
 		}
-		// Flat mode uses a synthetic empty-string schema name for its
-		// subgroups; seed those expansion keys too so the Tables/Views
-		// groups start expanded instead of rendering collapsed.
+		for _, t := range info.Tables {
+			seedSchema(t.Schema)
+		}
+		for _, r := range info.Routines {
+			seedSchema(r.Schema)
+		}
+		for _, tr := range info.Triggers {
+			seedSchema(tr.Schema)
+		}
 		if depth == db.SchemaDepthFlat {
-			for _, sg := range []subgroupKind{subgroupTables, subgroupViews} {
+			for _, sg := range defaultExpandedSubgroups {
 				k := subgroupExpansionKey("", sg)
 				if _, seen := e.expanded[k]; !seen {
 					e.expanded[k] = true
 				}
 			}
 		}
-		// Sys pseudo-schema starts collapsed — noisy and rarely what the
-		// user wants. Seed its subgroup expansion keys so reopening Sys
-		// later surfaces Tables/Views already expanded.
+		// Sys pseudo-schema and all its subgroups start collapsed.
 		if _, seen := e.expanded[sysSchemaSentinel]; !seen {
 			e.expanded[sysSchemaSentinel] = false
-		}
-		for _, sg := range []subgroupKind{subgroupTables, subgroupViews} {
-			k := subgroupExpansionKey(sysSchemaSentinel, sg)
-			if _, seen := e.expanded[k]; !seen {
-				e.expanded[k] = true
-			}
 		}
 	}
 	e.rebuild()
@@ -280,47 +301,70 @@ func (e *explorer) rebuild() {
 	if e.info == nil {
 		return
 	}
-	// Group tables+views by schema (info.Tables is already sorted by
-	// schema+name). Splitting into tables/views buckets is driven off
-	// the TableKind so the source ordering doesn't have to care.
 	type schemaBucket struct {
-		tables []db.TableRef
-		views  []db.TableRef
+		tables     []db.TableRef
+		views      []db.TableRef
+		procedures []db.RoutineRef
+		functions  []db.RoutineRef
+		triggers   []db.TriggerRef
 	}
 	buckets := map[string]*schemaBucket{}
 	var schemas []string
 	sysBucket := &schemaBucket{}
-	for _, t := range e.info.Tables {
-		target := sysBucket
-		if !t.System {
-			b := buckets[t.Schema]
-			if b == nil {
-				b = &schemaBucket{}
-				buckets[t.Schema] = b
-				schemas = append(schemas, t.Schema)
-			}
-			target = b
+	touch := func(s string, system bool) *schemaBucket {
+		if system {
+			return sysBucket
 		}
+		b := buckets[s]
+		if b == nil {
+			b = &schemaBucket{}
+			buckets[s] = b
+			schemas = append(schemas, s)
+		}
+		return b
+	}
+
+	for _, t := range e.info.Tables {
+		target := touch(t.Schema, t.System)
 		if t.Kind == db.TableKindView {
 			target.views = append(target.views, t)
 		} else {
 			target.tables = append(target.tables, t)
 		}
 	}
+	for _, r := range e.info.Routines {
+		target := touch(r.Schema, r.System)
+		if r.Kind == db.RoutineKindProcedure {
+			target.procedures = append(target.procedures, r)
+		} else {
+			target.functions = append(target.functions, r)
+		}
+	}
+	for _, tr := range e.info.Triggers {
+		target := touch(tr.Schema, tr.System)
+		target.triggers = append(target.triggers, tr)
+	}
 	sort.Strings(schemas)
 
+	emit := func(schema string, b *schemaBucket) {
+		e.appendTableSubgroup(schema, subgroupTables, b.tables)
+		e.appendTableSubgroup(schema, subgroupViews, b.views)
+		e.appendRoutineSubgroup(schema, subgroupProcedures, b.procedures)
+		e.appendRoutineSubgroup(schema, subgroupFunctions, b.functions)
+		e.appendTriggerSubgroup(schema, b.triggers)
+	}
+
 	if e.depth == db.SchemaDepthFlat {
-		// Merge every user bucket into one synthetic "" schema so the
-		// Tables/Views subgroups contain everything. sqlite normally
-		// reports a single "main" schema, but we join across any rogue
-		// buckets defensively.
-		var allTables, allViews []db.TableRef
+		merged := &schemaBucket{}
 		for _, s := range schemas {
-			allTables = append(allTables, buckets[s].tables...)
-			allViews = append(allViews, buckets[s].views...)
+			b := buckets[s]
+			merged.tables = append(merged.tables, b.tables...)
+			merged.views = append(merged.views, b.views...)
+			merged.procedures = append(merged.procedures, b.procedures...)
+			merged.functions = append(merged.functions, b.functions...)
+			merged.triggers = append(merged.triggers, b.triggers...)
 		}
-		e.appendSubgroup("", subgroupTables, allTables)
-		e.appendSubgroup("", subgroupViews, allViews)
+		emit("", merged)
 	} else {
 		for _, s := range schemas {
 			e.items = append(e.items, explorerItem{
@@ -331,26 +375,21 @@ func (e *explorer) rebuild() {
 			if !e.expanded[s] {
 				continue
 			}
-			b := buckets[s]
-			e.appendSubgroup(s, subgroupTables, b.tables)
-			e.appendSubgroup(s, subgroupViews, b.views)
+			emit(s, buckets[s])
 		}
 	}
 
-	// Sys pseudo-schema: rendered at the same level as user schemas
-	// (Schemas mode) or as a top-level peer to Tables/Views (Flat
-	// mode). The sentinel schema name is non-empty so renderExplorerLine
-	// uses the schemas-mode indent for its subgroups/leaves, giving a
-	// consistent look across both depth modes.
-	if len(sysBucket.tables) > 0 || len(sysBucket.views) > 0 {
+	sysNonEmpty := len(sysBucket.tables)+len(sysBucket.views)+
+		len(sysBucket.procedures)+len(sysBucket.functions)+
+		len(sysBucket.triggers) > 0
+	if sysNonEmpty {
 		e.items = append(e.items, explorerItem{
 			kind:       itemSchema,
 			label:      "Sys",
 			schemaName: sysSchemaSentinel,
 		})
 		if e.expanded[sysSchemaSentinel] {
-			e.appendSubgroup(sysSchemaSentinel, subgroupTables, sysBucket.tables)
-			e.appendSubgroup(sysSchemaSentinel, subgroupViews, sysBucket.views)
+			emit(sysSchemaSentinel, sysBucket)
 		}
 	}
 
@@ -362,9 +401,7 @@ func (e *explorer) rebuild() {
 	}
 }
 
-// appendSubgroup emits the "Tables"/"Views" header and, if expanded, its
-// entries. Called from rebuild under a schema that's already expanded.
-func (e *explorer) appendSubgroup(schema string, sg subgroupKind, entries []db.TableRef) {
+func (e *explorer) appendTableSubgroup(schema string, sg subgroupKind, entries []db.TableRef) {
 	if len(entries) == 0 {
 		return
 	}
@@ -390,6 +427,89 @@ func (e *explorer) appendSubgroup(schema string, sg subgroupKind, entries []db.T
 			table:      t,
 		})
 	}
+}
+
+func (e *explorer) appendRoutineSubgroup(schema string, sg subgroupKind, entries []db.RoutineRef) {
+	if len(entries) == 0 {
+		return
+	}
+	e.items = append(e.items, explorerItem{
+		kind:       itemSubgroup,
+		label:      sg.label(),
+		schemaName: schema,
+		subgroup:   sg,
+	})
+	if !e.expanded[subgroupExpansionKey(schema, sg)] {
+		return
+	}
+	leafKind := itemFunction
+	if sg == subgroupProcedures {
+		leafKind = itemProcedure
+	}
+	for _, r := range entries {
+		suffix := ""
+		if r.Language != "" && r.Language != "SQL" {
+			suffix = "(" + r.Language + ")"
+		}
+		e.items = append(e.items, explorerItem{
+			kind:       leafKind,
+			label:      r.Name,
+			schemaName: schema,
+			subgroup:   sg,
+			suffix:     suffix,
+		})
+	}
+}
+
+func (e *explorer) appendTriggerSubgroup(schema string, entries []db.TriggerRef) {
+	if len(entries) == 0 {
+		return
+	}
+	e.items = append(e.items, explorerItem{
+		kind:       itemSubgroup,
+		label:      subgroupTriggers.label(),
+		schemaName: schema,
+		subgroup:   subgroupTriggers,
+	})
+	if !e.expanded[subgroupExpansionKey(schema, subgroupTriggers)] {
+		return
+	}
+	for _, tr := range entries {
+		suffix := ""
+		if tr.Timing != "" || tr.Event != "" || tr.Table != "" {
+			suffix = "(" + trimSpace(tr.Timing+" "+tr.Event) + " on " + tr.Table + ")"
+		}
+		e.items = append(e.items, explorerItem{
+			kind:       itemTrigger,
+			label:      tr.Name,
+			schemaName: schema,
+			subgroup:   subgroupTriggers,
+			suffix:     suffix,
+		})
+	}
+}
+
+// trimSpace collapses consecutive spaces and trims ends without pulling in strings.
+func trimSpace(s string) string {
+	out := make([]byte, 0, len(s))
+	prevSpace := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == ' ' {
+			if prevSpace {
+				continue
+			}
+			prevSpace = true
+			out = append(out, c)
+			continue
+		}
+		prevSpace = false
+		out = append(out, c)
+	}
+	if n := len(out); n > 0 && out[n-1] == ' ' {
+		out = out[:n-1]
+	}
+	return string(out)
 }
 
 // draw renders the tree inside r (caller has already drawn the border).
@@ -465,15 +585,26 @@ func renderExplorerLine(it explorerItem, expanded map[string]bool) string {
 			return marker + " " + it.label
 		}
 		return "  " + marker + " " + it.label
-	case itemTable, itemView:
+	case itemTable, itemView, itemProcedure, itemFunction, itemTrigger:
 		leaf := "· "
-		if it.kind == itemView {
+		switch it.kind {
+		case itemView:
 			leaf = "◇ "
+		case itemProcedure:
+			leaf = "λ "
+		case itemFunction:
+			leaf = "ƒ "
+		case itemTrigger:
+			leaf = "! "
+		}
+		body := leaf + it.label
+		if it.suffix != "" {
+			body += " " + it.suffix
 		}
 		if it.schemaName == "" {
-			return "    " + leaf + it.label
+			return "    " + body
 		}
-		return "      " + leaf + it.label
+		return "      " + body
 	}
 	return it.label
 }

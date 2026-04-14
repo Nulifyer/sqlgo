@@ -5,14 +5,36 @@ package mssql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
 
-	_ "github.com/microsoft/go-mssqldb"
+	mssqldb "github.com/microsoft/go-mssqldb"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 )
+
+// isPermissionDenied returns true for MSSQL permission error numbers:
+// 229 (SELECT/EXECUTE denied), 230 (column denied), 297 (user lacks rights),
+// 300 (VIEW SERVER STATE), 916 (cross-DB denied).
+func isPermissionDenied(err error) bool {
+	var me mssqldb.Error
+	if !errors.As(err, &me) {
+		return false
+	}
+	switch me.Number {
+	case 229, 230, 297, 300, 916:
+		return true
+	}
+	for _, e := range me.All {
+		switch e.Number {
+		case 229, 230, 297, 300, 916:
+			return true
+		}
+	}
+	return false
+}
 
 const driverName = "mssql"
 
@@ -41,10 +63,13 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		return nil, fmt.Errorf("mssql open: %w", err)
 	}
 	conn, err := db.OpenSQL(ctx, sqlDB, db.SQLOptions{
-		DriverName:   driverName,
-		Capabilities: capabilities,
-		SchemaQuery:  schemaQuery,
-		ColumnsQuery: columnsQuery,
+		DriverName:         driverName,
+		Capabilities:       capabilities,
+		SchemaQuery:        schemaQuery,
+		ColumnsQuery:       columnsQuery,
+		RoutinesQuery:      routinesQuery,
+		TriggersQuery:      triggersQuery,
+		IsPermissionDenied: isPermissionDenied,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mssql: %w", err)
@@ -71,6 +96,47 @@ FROM sys.objects o
 JOIN sys.schemas s ON s.schema_id = o.schema_id
 WHERE o.type IN ('U','V')
 ORDER BY s.name, o.name;
+`
+
+// routinesQuery: procedures, scalar/inline/table-valued functions via sys.objects.
+// type codes: P=procedure, FN=scalar fn, IF=inline TVF, TF=multi-stmt TVF, AF=aggregate.
+const routinesQuery = `
+SELECT
+    s.name AS [schema],
+    o.name AS name,
+    CASE o.type
+        WHEN 'P'  THEN 'P'
+        WHEN 'AF' THEN 'A'
+        ELSE 'F'
+    END AS kind,
+    CASE WHEN o.type = 'AF' THEN 'CLR' ELSE 'SQL' END AS language,
+    CASE WHEN o.is_ms_shipped = 1 OR s.name IN ('sys','INFORMATION_SCHEMA') THEN 1 ELSE 0 END AS is_system
+FROM sys.objects o
+JOIN sys.schemas s ON s.schema_id = o.schema_id
+WHERE o.type IN ('P','FN','IF','TF','AF')
+ORDER BY s.name, o.name;
+`
+
+// triggersQuery: DML triggers via sys.triggers joined to parent table.
+// type_desc values combine timing + events; normalize to AFTER/INSTEAD OF.
+const triggersQuery = `
+SELECT
+    s.name AS [schema],
+    t.name AS table_name,
+    tr.name AS name,
+    CASE WHEN tr.is_instead_of_trigger = 1 THEN 'INSTEAD OF' ELSE 'AFTER' END AS timing,
+    STUFF((
+        SELECT ',' + te.type_desc
+        FROM sys.trigger_events te
+        WHERE te.object_id = tr.object_id
+        FOR XML PATH('')
+    ), 1, 1, '') AS event,
+    CASE WHEN tr.is_ms_shipped = 1 OR s.name IN ('sys','INFORMATION_SCHEMA') THEN 1 ELSE 0 END AS is_system
+FROM sys.triggers tr
+JOIN sys.tables t ON t.object_id = tr.parent_id
+JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE tr.parent_class = 1
+ORDER BY s.name, t.name, tr.name;
 `
 
 // columnsQuery uses @p1/@p2 (go-mssqldb named placeholders).
