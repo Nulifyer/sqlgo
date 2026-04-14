@@ -14,6 +14,7 @@ import (
 	mssqldb "github.com/microsoft/go-mssqldb"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
+	"github.com/Nulifyer/sqlgo/internal/sqltok"
 )
 
 // isPermissionDenied returns true for MSSQL permission error numbers:
@@ -53,6 +54,7 @@ var capabilities = db.Capabilities{
 	IdentifierQuote: '[',
 	SupportsCancel:  true,
 	SupportsTLS:     true,
+	Dialect:         sqltok.DialectMSSQL,
 }
 
 func (driver) Capabilities() db.Capabilities { return capabilities }

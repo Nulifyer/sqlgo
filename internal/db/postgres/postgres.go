@@ -14,6 +14,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
+	"github.com/Nulifyer/sqlgo/internal/sqltok"
 )
 
 // isPermissionDenied returns true for SQLSTATE 42501 (insufficient_privilege).
@@ -42,6 +43,7 @@ var capabilities = db.Capabilities{
 	SupportsCancel:  true,
 	SupportsTLS:     true,
 	ExplainFormat:   db.ExplainFormatPostgresJSON,
+	Dialect:         sqltok.DialectPostgres,
 }
 
 func (driver) Capabilities() db.Capabilities { return capabilities }

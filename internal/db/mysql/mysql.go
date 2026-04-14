@@ -13,6 +13,7 @@ import (
 	gomysql "github.com/go-sql-driver/mysql"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
+	"github.com/Nulifyer/sqlgo/internal/sqltok"
 )
 
 // isPermissionDenied returns true for MySQL access errors:
@@ -47,6 +48,7 @@ var capabilities = db.Capabilities{
 	SupportsCancel:  true,
 	SupportsTLS:     true,
 	ExplainFormat:   db.ExplainFormatMySQLJSON,
+	Dialect:         sqltok.DialectMySQL,
 }
 
 func (driver) Capabilities() db.Capabilities { return capabilities }

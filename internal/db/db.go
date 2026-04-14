@@ -22,6 +22,8 @@ import (
 	"io"
 	"sort"
 	"sync"
+
+	"github.com/Nulifyer/sqlgo/internal/sqltok"
 )
 
 // ErrPermissionDenied is returned (or wrapped) by an adapter when the
@@ -87,6 +89,11 @@ type Capabilities struct {
 	// ExplainFormat describes how this engine returns EXPLAIN output.
 	// None means the feature is unsupported for this driver.
 	ExplainFormat ExplainFormat
+
+	// Dialect selects the keyword overlay used by autocomplete so each
+	// engine only suggests syntax it actually accepts (TOP for MSSQL,
+	// RETURNING for Postgres/SQLite, PRAGMA for SQLite, ...).
+	Dialect sqltok.Dialect
 }
 
 // SchemaDepth describes the object hierarchy the explorer should render

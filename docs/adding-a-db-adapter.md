@@ -38,6 +38,7 @@ import (
     _ "github.com/example/foo-driver"
 
     "github.com/Nulifyer/sqlgo/internal/db"
+    "github.com/Nulifyer/sqlgo/internal/sqltok"
 )
 
 const driverName = "foo"
@@ -55,6 +56,7 @@ var capabilities = db.Capabilities{
     SupportsCancel:  true,
     SupportsTLS:     true,
     ExplainFormat:   db.ExplainFormatNone,
+    Dialect:         sqltok.DialectPostgres,
 }
 
 func (driver) Capabilities() db.Capabilities { return capabilities }
@@ -174,6 +176,11 @@ outside the adapter.
   `ExplainFormatNone` hides the feature. Existing shapes:
   `ExplainFormatPostgresJSON`, `ExplainFormatMySQLJSON`,
   `ExplainFormatSQLiteRows`.
+- **`Dialect`** -- which keyword overlay autocomplete should suggest.
+  One of `sqltok.DialectMSSQL`, `DialectMySQL`, `DialectPostgres`,
+  `DialectSQLite`. Keeps `TOP` out of Postgres suggestions and
+  `RETURNING` out of MSSQL. Unset (zero) falls back to the full
+  cross-engine set, which is almost never what you want.
 
 ## buildDSN
 
@@ -206,6 +213,8 @@ Hermetic tests (no network) go next to the adapter:
 - [ ] Package under `internal/db/<name>/`.
 - [ ] `init()` calls `db.Register(driver{})`.
 - [ ] `Capabilities` set for all fields.
+- [ ] `Capabilities.Dialect` set so autocomplete uses the right
+      keyword overlay.
 - [ ] `SchemaQuery` returns the 4-column contract.
 - [ ] System-object detection covers engine-shipped objects in user
       schemas (not only objects in obviously-named system schemas).

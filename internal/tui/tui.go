@@ -734,6 +734,11 @@ func (a *app) runQueryUnsafe() {
 		defer cancel()
 		rows, err := conn.Query(ctx, sql)
 		if err != nil {
+			// Attach the error to the seeded placeholder tab so it renders
+			// in the results pane (same path as mid-stream errors) rather
+			// than only flashing on the status line.
+			firstTab.table.Done(err)
+			resultCh <- queryEvent{kind: evtResultSetDone, sess: sess, tab: firstTab, err: err, elapsed: time.Since(start)}
 			resultCh <- queryEvent{kind: evtDone, sess: sess, err: err, elapsed: time.Since(start)}
 			return
 		}
@@ -871,12 +876,13 @@ func (a *app) handleQueryEvent(e queryEvent) {
 		sess.running = false
 		sess.cancel = nil
 		if e.err != nil {
+			// Errors render in the active result tab's results pane via
+			// the evtResultSetDone path. Keep the footer quiet on errors
+			// so the user has one place to look, not two.
 			if errors.Is(e.err, context.Canceled) {
 				sess.status = fmt.Sprintf("cancelled after %d row(s)", e.loaded)
-			} else if e.loaded > 0 {
-				sess.status = fmt.Sprintf("error after %d row(s): %s", e.loaded, e.err)
 			} else {
-				sess.status = fmt.Sprintf("error: %s", e.err)
+				sess.status = ""
 			}
 		} else if len(sess.results) > 1 {
 			sess.status = fmt.Sprintf("%d result set(s) / %d row(s) in %s",

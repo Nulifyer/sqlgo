@@ -66,16 +66,36 @@ func TokenizeText(text string) []Token {
 	return TokenizeLine([]rune(text))
 }
 
+// Dialect is a bitmask identifying which SQL engines recognize a given
+// keyword. A keyword tagged with multiple bits is accepted by each of
+// those engines; DialectAll is the convenience union for keywords every
+// engine supports.
+type Dialect uint8
+
+const (
+	DialectMSSQL Dialect = 1 << iota
+	DialectMySQL
+	DialectPostgres
+	DialectSQLite
+
+	// DialectAll tags keywords supported by every engine sqlgo speaks.
+	// Use this for ANSI/universal keywords so KeywordsFor(anyDialect)
+	// always includes them.
+	DialectAll = DialectMSSQL | DialectMySQL | DialectPostgres | DialectSQLite
+)
+
 // IsKeyword reports whether s (case-insensitive) is one of the
-// recognized SQL keywords.
+// recognized SQL keywords in any dialect. Highlighting is intentionally
+// over-inclusive -- a MySQL keyword lighting up in a Postgres buffer is
+// strictly better than missing it.
 func IsKeyword(s string) bool {
 	_, ok := keywordSet[strings.ToUpper(s)]
 	return ok
 }
 
-// Keywords returns the full list of recognized SQL keywords, sorted
-// alphabetically and already uppercase. Exposed for the editor's
-// autocomplete provider so it doesn't have to reach into keywordSet.
+// Keywords returns every recognized SQL keyword (all dialects), sorted
+// alphabetically and uppercase. Used by help/tests and as the
+// autocomplete fallback when no connection is active.
 func Keywords() []string {
 	out := make([]string, 0, len(keywordSet))
 	for k := range keywordSet {
@@ -85,33 +105,168 @@ func Keywords() []string {
 	return out
 }
 
-// keywordSet is the recognized-keyword lookup table. Deliberately
-// narrow: enough to make most queries light up without pulling in a
-// dialect-specific vocabulary that would mark random identifiers.
-var keywordSet = map[string]struct{}{
-	"ADD": {}, "ALL": {}, "ALTER": {}, "AND": {}, "AS": {}, "ASC": {},
-	"BEGIN": {}, "BETWEEN": {}, "BY": {},
-	"CASE": {}, "CAST": {}, "COMMIT": {}, "CREATE": {}, "CROSS": {},
-	"DATABASE": {}, "DEFAULT": {}, "DELETE": {}, "DESC": {}, "DISTINCT": {},
-	"DROP": {},
-	"ELSE": {}, "END": {}, "EXCEPT": {}, "EXISTS": {},
-	"FALSE": {}, "FOR": {}, "FOREIGN": {}, "FROM": {}, "FULL": {},
-	"GROUP": {},
-	"HAVING": {},
-	"IF": {}, "IN": {}, "INDEX": {}, "INNER": {}, "INSERT": {},
-	"INTERSECT": {}, "INTO": {}, "IS": {},
-	"JOIN": {},
-	"KEY": {},
-	"LEFT": {}, "LIKE": {}, "LIMIT": {},
-	"NATURAL": {}, "NOT": {}, "NULL": {},
-	"OFFSET": {}, "ON": {}, "OR": {}, "ORDER": {}, "OUTER": {}, "OVER": {},
-	"PARTITION": {}, "PERCENT": {}, "PRIMARY": {}, "PROCEDURE": {},
-	"REFERENCES": {}, "RETURNING": {}, "RIGHT": {}, "ROLLBACK": {},
-	"SELECT": {}, "SET": {},
-	"TABLE": {}, "THEN": {}, "TIES": {}, "TO": {}, "TOP": {}, "TRUE": {},
-	"UNION": {}, "UNIQUE": {}, "UPDATE": {}, "USING": {},
-	"VALUES": {}, "VIEW": {},
-	"WHEN": {}, "WHERE": {}, "WITH": {},
+// KeywordsFor returns the keywords whose dialect mask intersects d,
+// sorted alphabetically and uppercase. Autocomplete uses this so the
+// user only sees completions valid for the engine they're connected to.
+// A zero Dialect returns nothing; pass DialectAll (or the fallback
+// Keywords()) to get everything.
+func KeywordsFor(d Dialect) []string {
+	out := make([]string, 0, len(keywordSet))
+	for k, mask := range keywordSet {
+		if mask&d != 0 {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// keywordSet maps each recognized keyword to the Dialect bitmask of
+// engines that accept it. Entries are grouped by semantic area -- core
+// ANSI grammar first, then each engine's overlay. When adding a
+// keyword, prefer DialectAll unless you've verified it's engine-
+// specific; over-highlighting is cheaper than under-highlighting.
+var keywordSet = map[string]Dialect{
+	// Core ANSI-ish grammar accepted everywhere.
+	"ADD": DialectAll, "ALL": DialectAll, "ALTER": DialectAll,
+	"AND": DialectAll, "AS": DialectAll, "ASC": DialectAll,
+	"BEGIN": DialectAll, "BETWEEN": DialectAll, "BY": DialectAll,
+	"CALL": DialectAll, "CASE": DialectAll, "CAST": DialectAll,
+	"COMMIT": DialectAll, "CREATE": DialectAll, "CROSS": DialectAll,
+	"CUBE": DialectAll,
+	"DATABASE":  DialectAll,
+	"DECLARE":   DialectAll,
+	"DEFAULT":   DialectAll,
+	"DELETE":    DialectAll,
+	"DESC":      DialectAll,
+	"DISTINCT":  DialectAll,
+	"DROP":      DialectAll,
+	"ELSE":      DialectAll,
+	"END":       DialectAll,
+	"EXCEPT":    DialectAll,
+	"EXISTS":    DialectAll,
+	"FALSE":     DialectAll,
+	"FETCH":     DialectAll,
+	"FOR":       DialectAll,
+	"FOREIGN":   DialectAll,
+	"FROM":      DialectAll,
+	"FULL":      DialectAll,
+	"GROUP":     DialectAll,
+	"GROUPING":  DialectAll,
+	"HAVING":    DialectAll,
+	"IF":        DialectAll,
+	"IN":        DialectAll,
+	"INDEX":     DialectAll,
+	"INNER":     DialectAll,
+	"INSERT":    DialectAll,
+	"INTERSECT": DialectAll,
+	"INTO":      DialectAll,
+	"IS":        DialectAll,
+	"JOIN":      DialectAll,
+	"KEY":       DialectAll,
+	"LEFT":      DialectAll,
+	"LIKE":      DialectAll,
+	"MERGE":     DialectAll,
+	"NATURAL":   DialectAll,
+	"NOT":       DialectAll,
+	"NULL":      DialectAll,
+	"ON":        DialectAll,
+	"OR":        DialectAll,
+	"ORDER":     DialectAll,
+	"OUTER":     DialectAll,
+	"OVER":      DialectAll,
+	"PARTITION": DialectAll,
+	"PRIMARY":   DialectAll,
+	"PROCEDURE": DialectAll,
+	"REFERENCES": DialectAll,
+	"RIGHT":     DialectAll,
+	"ROLLBACK":  DialectAll,
+	"ROLLUP":    DialectAll,
+	"SELECT":    DialectAll,
+	"SET":       DialectAll,
+	"TABLE":     DialectAll,
+	"THEN":      DialectAll,
+	"TO":        DialectAll,
+	"TRUE":      DialectAll,
+	"TRUNCATE":  DialectAll,
+	"UNION":     DialectAll,
+	"UNIQUE":    DialectAll,
+	"UPDATE":    DialectAll,
+	"USING":     DialectAll,
+	"VALUES":    DialectAll,
+	"VIEW":      DialectAll,
+	"WHEN":      DialectAll,
+	"WHERE":     DialectAll,
+	"WITH":      DialectAll,
+
+	// LIMIT/OFFSET shape -- everyone except MSSQL uses these.
+	"LIMIT":  DialectMySQL | DialectPostgres | DialectSQLite,
+	"OFFSET": DialectMSSQL | DialectMySQL | DialectPostgres | DialectSQLite, // MSSQL supports OFFSET/FETCH.
+
+	// MSSQL: TOP-style row cap, flow control, CTE/query hints.
+	"TOP":             DialectMSSQL,
+	"PERCENT":         DialectMSSQL,
+	"TIES":            DialectMSSQL | DialectPostgres,
+	"OUTPUT":          DialectMSSQL,
+	"APPLY":           DialectMSSQL,
+	"NOLOCK":          DialectMSSQL,
+	"CLUSTERED":       DialectMSSQL,
+	"NONCLUSTERED":    DialectMSSQL,
+	"IDENTITY":        DialectMSSQL,
+	"PRINT":           DialectMSSQL,
+	"RAISERROR":       DialectMSSQL,
+	"THROW":           DialectMSSQL,
+	"GO":              DialectMSSQL,
+	"TRY":             DialectMSSQL,
+	"CATCH":           DialectMSSQL,
+	"PERSISTED":       DialectMSSQL,
+	"SCHEMABINDING":   DialectMSSQL,
+
+	// Postgres: returning clause, CTE modifiers, admin verbs, joins.
+	"RETURNING":    DialectPostgres | DialectSQLite,
+	"ILIKE":        DialectPostgres,
+	"ONLY":         DialectPostgres,
+	"MATERIALIZED": DialectPostgres,
+	"CONCURRENTLY": DialectPostgres,
+	"COPY":         DialectPostgres,
+	"VACUUM":       DialectPostgres | DialectSQLite,
+	"ANALYZE":      DialectPostgres | DialectSQLite,
+	"TABLESAMPLE":  DialectPostgres,
+	"DO":           DialectPostgres,
+	"LANGUAGE":     DialectPostgres,
+	"LATERAL":      DialectPostgres | DialectMySQL,
+	"WINDOW":       DialectPostgres | DialectMySQL | DialectSQLite,
+	"RANGE":        DialectPostgres | DialectMySQL,
+	"ROWS":         DialectPostgres | DialectMSSQL | DialectMySQL | DialectSQLite,
+	"GROUPS":       DialectPostgres | DialectSQLite,
+
+	// MySQL: storage/engine knobs, DDL vocabulary, server-side quirks.
+	"ENGINE":         DialectMySQL,
+	"AUTO_INCREMENT": DialectMySQL,
+	"UNSIGNED":       DialectMySQL,
+	"ZEROFILL":       DialectMySQL,
+	"CHARSET":        DialectMySQL,
+	"COLLATE":        DialectMySQL | DialectPostgres | DialectMSSQL | DialectSQLite,
+	"SHOW":           DialectMySQL,
+	"USE":            DialectMySQL | DialectMSSQL,
+	"DELIMITER":      DialectMySQL,
+	"STRAIGHT_JOIN":  DialectMySQL,
+	"IGNORE":         DialectMySQL | DialectSQLite,
+	"REPLACE":        DialectMySQL | DialectSQLite,
+	"DUPLICATE":      DialectMySQL,
+	"LOCK":           DialectMySQL | DialectPostgres,
+	"UNLOCK":         DialectMySQL,
+
+	// SQLite: PRAGMA, virtual tables, admin verbs.
+	"PRAGMA":    DialectSQLite,
+	"VIRTUAL":   DialectSQLite,
+	"TEMPORARY": DialectSQLite | DialectPostgres | DialectMySQL,
+	"WITHOUT":   DialectSQLite,
+	"ROWID":     DialectSQLite,
+	"ATTACH":    DialectSQLite,
+	"DETACH":    DialectSQLite,
+	"REINDEX":   DialectSQLite | DialectPostgres,
+	"INDEXED":   DialectSQLite,
 }
 
 // lexer is a scratch-pad scanner over a rune slice. The zero value is

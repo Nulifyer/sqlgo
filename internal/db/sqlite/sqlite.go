@@ -12,6 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
+	"github.com/Nulifyer/sqlgo/internal/sqltok"
 )
 
 // quoteSQLiteLiteral escapes s for PRAGMA table_info, which takes
@@ -41,6 +42,7 @@ var capabilities = db.Capabilities{
 	SupportsCancel:  true,
 	SupportsTLS:     false,
 	ExplainFormat:   db.ExplainFormatSQLiteRows,
+	Dialect:         sqltok.DialectSQLite,
 }
 
 func (driver) Capabilities() db.Capabilities { return capabilities }

@@ -908,8 +908,20 @@ func afterTableKeywordCandidates() []completionItem {
 }
 
 func (a *app) keywordCandidates() []completionItem {
-	out := make([]completionItem, 0, 128)
-	for _, kw := range sqltok.Keywords() {
+	// Use the connected engine's dialect overlay so we don't suggest
+	// TOP on Postgres or RETURNING on MSSQL. Disconnected editors fall
+	// back to the full cross-engine set.
+	var kws []string
+	if a.conn != nil {
+		if d := a.conn.Capabilities().Dialect; d != 0 {
+			kws = sqltok.KeywordsFor(d)
+		}
+	}
+	if kws == nil {
+		kws = sqltok.Keywords()
+	}
+	out := make([]completionItem, 0, len(kws))
+	for _, kw := range kws {
 		out = append(out, completionItem{text: kw, kind: completeKeyword})
 	}
 	return out
