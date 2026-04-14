@@ -44,17 +44,21 @@ No mouse required. No Electron. No cgo. One static binary.
 ### Results
 - **Arrow-key cell nav**, `PgUp/PgDn`, `Home/End`
 - **Sort** -- `s` cycles sort on the focused column
-- **Filter** -- `/` for an inline row filter
+- **Filter** -- `/` for an inline row filter. Three syntaxes:
+    - `foo` -- substring match across all columns
+    - `col:foo` -- substring match against a specific column
+    - `/regex/` -- regex match across all columns
 - **Word-wrap** toggle -- `w`
 - **Cell inspector** -- `Enter` opens an overlay for the focused cell
-- **Clipboard** -- `y` copies cell, `Y` copies row, `Alt+A` copies the whole result set
-- **Export** -- CSV export via the command menu
+- **Clipboard** -- `y` copies cell, `Y` copies row, `Alt+A` copies the whole result set as TSV
+- **Export** -- CSV, TSV, JSON, and Markdown. Format is chosen from the output path extension.
 
 ### Power Features
-- **SSH tunneling** -- optional jump host per connection with password or key-file auth and TOFU host-key prompts
+- **SSH tunneling** -- optional jump host per connection with password or key-file auth and TOFU host-key prompts. `ssh-agent` is not supported; supply a key file or password.
 - **OS keyring** -- passwords are stored in the system keychain when available (falls back to plain store with a warning)
-- **Query history** -- last 1000 queries per connection, retrievable from the history overlay
-- **EXPLAIN overlay** -- run the current query through its engine's explain path
+- **Query history** -- last 1000 queries per connection, FTS5-indexed, retrievable from the history overlay
+- **EXPLAIN overlay** -- run the current query through its engine's explain path (Postgres, MySQL, SQLite; MSSQL is not supported)
+- **Open file** -- `o` opens a workspace file picker rooted at the current directory; honors a `.sqlgoignore` file for directory skips
 
 ### Companion Tools
 - **`sqlgoseed`** -- populates any supported engine with a fictional-company dataset. `-scale` multiplies row counts (scale=1 gives ~3-5k rows; scale=100 gives hundreds of thousands).
@@ -115,7 +119,7 @@ From the command menu (`Space`) you can connect, disconnect, export, view histor
 | **Global** | `Ctrl+Q` | Quit |
 | | `Alt+1` / `Alt+2` / `Alt+3` | Focus Explorer / Query / Results |
 | | `F8` | Key-debug overlay |
-| **Query editor** | `F5` | Run query |
+| **Query editor** | `F5` / `Ctrl+Enter` | Run query |
 | | `Ctrl+C` | Cancel running query |
 | | `F11` | Toggle fullscreen editor |
 | | `Alt+F` | Format SQL |
@@ -132,6 +136,7 @@ From the command menu (`Space`) you can connect, disconnect, export, view histor
 | | `w` | Toggle word-wrap |
 | | `Enter` | Inspect cell |
 | **Command menu** (`Space`) | `c` / `x` | Connect / Disconnect |
+| | `o` | Open SQL file |
 | | `e` | Export results |
 | | `h` | Query history |
 | | `p` | EXPLAIN current query |
@@ -147,6 +152,14 @@ sqlgo keeps per-user state under `~/.sqlgo/`:
 - `connections.json` -- legacy JSON file, auto-imported once on first run
 
 Passwords go to the OS keyring when one is available (macOS Keychain, Windows Credential Manager, libsecret on Linux). SSH passwords are stored under their own keyring entry.
+
+### Environment Variables
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SQLGO_ROW_CAP` | `100000` | Max rows buffered per result set |
+| `SQLGO_BYTE_CAP` | `268435456` (256 MiB) | Max bytes buffered per result set |
+| `SQLGO_DEBUG` | unset | When set to `1`, panics dump a stack trace to `sqlgo-panic-<unix>.log` in the working directory |
 
 ---
 
