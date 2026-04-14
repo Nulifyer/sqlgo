@@ -706,8 +706,7 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		}
 	}
 
-	// Ctrl+K is the global command-menu prefix. Works from any focus,
-	// including the Query editor where Space is a literal character.
+	// Ctrl+K is the global command-menu prefix. Works from any focus.
 	if k.Ctrl && k.Rune == 'k' {
 		m.pendingSpace = true
 		return
@@ -785,13 +784,6 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		if m.editor.buf.Text() != before {
 			m.promoteActiveIfPreview()
 		}
-		return
-	}
-
-	// Explorer/Results focus: space opens the command menu. The footer
-	// hint line flips to spaceMenuHints() automatically via Hints().
-	if k.Kind == KeyRune && !k.Ctrl && !k.Alt && k.Rune == ' ' {
-		m.pendingSpace = true
 		return
 	}
 

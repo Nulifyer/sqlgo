@@ -145,8 +145,11 @@ short-lived contexts so a slow disk never hangs the UI.
   sqlgo keyring placeholder.
 - Query history is kept per connection, capped at 1000 entries,
   retrievable via an FTS5 match.
-- The store file lives at `~/.sqlgo/sqlgo.db` (WAL mode). The legacy
-  `connections.json` is imported once on first run.
+- The store file lives at `<data dir>/sqlgo.db` (WAL mode), where
+  `<data dir>` is `$XDG_DATA_HOME/sqlgo` on Linux,
+  `~/Library/Application Support/sqlgo` on macOS, or
+  `%LocalAppData%\sqlgo` on Windows. Legacy `~/.sqlgo/sqlgo.db` is
+  migrated on first run.
 
 The OS keyring ([internal/secret/](../internal/secret/)) is best-effort:
 if the backend is available, new passwords go there and the store row

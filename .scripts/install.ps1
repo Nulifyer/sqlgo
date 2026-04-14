@@ -4,7 +4,8 @@
 $ErrorActionPreference = "Stop"
 
 $repo = "Nulifyer/sqlgo"
-$installDir = "$env:LOCALAPPDATA\sqlgo"
+$installDir = "$env:LOCALAPPDATA\Programs\sqlgo"
+$dataDir = "$env:LOCALAPPDATA\sqlgo"
 $exe = "$installDir\sqlgo.exe"
 
 # Detect architecture
@@ -93,6 +94,22 @@ if ($userPath -notlike "*$installDir*") {
     Write-Host "  Added to PATH" -ForegroundColor Green
 } else {
     Write-Host "  Already in PATH" -ForegroundColor Green
+}
+
+# 7. Migrate legacy data dir (~/.sqlgo) into %LocalAppData%\sqlgo
+$legacyDir = Join-Path $env:USERPROFILE ".sqlgo"
+$legacyDb = Join-Path $legacyDir "sqlgo.db"
+$newDb = Join-Path $dataDir "sqlgo.db"
+if ((Test-Path $legacyDb) -and (-not (Test-Path $newDb))) {
+    Write-Host "  Migrating $legacyDir -> $dataDir" -ForegroundColor Cyan
+    New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+    foreach ($f in @("sqlgo.db", "sqlgo.db-wal", "sqlgo.db-shm")) {
+        $src = Join-Path $legacyDir $f
+        if (Test-Path $src) { Move-Item $src (Join-Path $dataDir $f) -Force }
+    }
+    if ((Test-Path $legacyDir) -and (-not (Get-ChildItem $legacyDir -Force))) {
+        Remove-Item $legacyDir -Force
+    }
 }
 
 Write-Host "`nsqlgo $tag installed!" -ForegroundColor Cyan

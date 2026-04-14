@@ -1,16 +1,18 @@
-// Package config owns sqlgo's on-disk config directory and the shared
-// Connection/SSHTunnel types used by the store and its JSON export/import
-// shape. Connections themselves are persisted by internal/store in
-// sqlgo.db; this package no longer reads or writes connections.json.
+// Package config owns sqlgo's on-disk locations and the shared
+// Connection/SSHTunnel types used by the store and its JSON
+// export/import shape. Connections themselves are persisted by
+// internal/store in sqlgo.db; this package no longer reads or writes
+// connections.json.
 //
-// Passwords are stored in plaintext for now. OS keyring integration is a
-// future concern.
+// Passwords are stored in plaintext for now. OS keyring integration is
+// a future concern.
 package config
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // Connection mirrors db.Config but carries a display name and driver name.
@@ -49,16 +51,56 @@ type File struct {
 	Connections []Connection `json:"connections"`
 }
 
-// Dir returns the sqlgo config directory, creating it if missing.
-func Dir() (string, error) {
-	home, err := os.UserHomeDir()
+// appName is the per-OS subdirectory name placed under each platform
+// data root. Kept lowercase to match XDG conventions on Linux; AppData
+// and Application Support tolerate the same casing fine.
+const appName = "sqlgo"
+
+// DataDir returns the per-user data directory for sqlgo, creating it
+// if missing. Resolution is platform-native and respects XDG on Linux:
+//
+//	Linux:   $XDG_DATA_HOME/sqlgo  (default ~/.local/share/sqlgo)
+//	macOS:   ~/Library/Application Support/sqlgo
+//	Windows: %LocalAppData%\sqlgo
+//
+// Migration of legacy state from ~/.sqlgo/ is handled by the install
+// scripts, not at runtime.
+func DataDir() (string, error) {
+	root, err := dataRoot()
 	if err != nil {
-		return "", fmt.Errorf("home dir: %w", err)
+		return "", err
 	}
-	dir := filepath.Join(home, ".sqlgo")
+	dir := filepath.Join(root, appName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	return dir, nil
+}
+
+func dataRoot() (string, error) {
+	switch runtime.GOOS {
+	case "windows":
+		if v := os.Getenv("LocalAppData"); v != "" {
+			return v, nil
+		}
+		// UserConfigDir on Windows returns %AppData% (Roaming) which
+		// is an acceptable fallback when LocalAppData is unset.
+		return os.UserConfigDir()
+	case "darwin":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("home dir: %w", err)
+		}
+		return filepath.Join(home, "Library", "Application Support"), nil
+	default:
+		if v := os.Getenv("XDG_DATA_HOME"); v != "" {
+			return v, nil
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("home dir: %w", err)
+		}
+		return filepath.Join(home, ".local", "share"), nil
+	}
 }
 

@@ -46,7 +46,7 @@ func (s *Store) SetHistoryRingMax(n int) {
 // Open opens the default sqlgo store at <config dir>/sqlgo.db, creating
 // the file and applying any pending migrations.
 func Open(ctx context.Context) (*Store, error) {
-	dir, err := config.Dir()
+	dir, err := config.DataDir()
 	if err != nil {
 		return nil, err
 	}

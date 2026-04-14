@@ -1,9 +1,17 @@
 # sqlgo Uninstaller for Windows
-# Usage: irm https://raw.githubusercontent.com/Nulifyer/sqlgo/main/.scripts/uninstall.ps1 | iex
+# Usage:
+#   irm https://raw.githubusercontent.com/Nulifyer/sqlgo/main/.scripts/uninstall.ps1 | iex
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nulifyer/sqlgo/main/.scripts/uninstall.ps1))) -Purge
+
+param(
+    [switch]$Purge
+)
 
 $ErrorActionPreference = "Stop"
 
-$installDir = "$env:LOCALAPPDATA\sqlgo"
+$installDir = "$env:LOCALAPPDATA\Programs\sqlgo"
+$dataDir = "$env:LOCALAPPDATA\sqlgo"
+$legacyDir = Join-Path $env:USERPROFILE ".sqlgo"
 
 Write-Host "Uninstalling sqlgo..." -ForegroundColor Cyan
 
@@ -21,10 +29,27 @@ if ($userPath -like "*$installDir*") {
     Write-Host "  Removed from PATH" -ForegroundColor Green
 }
 
-# 3. Remove install directory
+# 3. Remove install directory (binary only)
 if (Test-Path $installDir) {
     Remove-Item $installDir -Recurse -Force
     Write-Host "  Removed $installDir" -ForegroundColor Green
+}
+
+# 4. User data: purge only when asked
+if ($Purge) {
+    foreach ($d in @($dataDir, $legacyDir)) {
+        if (Test-Path $d) {
+            Remove-Item $d -Recurse -Force
+            Write-Host "  Purged $d" -ForegroundColor Green
+        }
+    }
+} else {
+    $remaining = @($dataDir, $legacyDir) | Where-Object { Test-Path $_ }
+    if ($remaining.Count -gt 0) {
+        Write-Host ""
+        Write-Host "User data preserved. Re-run with -Purge to delete:" -ForegroundColor Yellow
+        foreach ($d in $remaining) { Write-Host "  $d" -ForegroundColor Yellow }
+    }
 }
 
 Write-Host "`nsqlgo uninstalled." -ForegroundColor Cyan

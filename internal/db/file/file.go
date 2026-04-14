@@ -12,18 +12,34 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 	"github.com/Nulifyer/sqlgo/internal/db/fileimport"
+	"github.com/Nulifyer/sqlgo/internal/limits"
 	"github.com/Nulifyer/sqlgo/internal/sqltok"
 )
 
 const driverName = "file"
 
-func init() { db.Register(driver{}) }
+// tempPrefix is used for spill-to-disk SQLite files. The pid is baked
+// into the name so a startup sweep can distinguish files belonging to
+// dead processes (orphaned by crash / SIGKILL) from files held by
+// other live sqlgo instances.
+const tempPrefix = "sqlgo-file"
+
+func init() {
+	db.Register(driver{})
+	go sweepOrphans()
+}
 
 type driver struct{}
 
@@ -49,22 +65,36 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("file: no paths in Database")
 	}
-	sqlDB, err := sql.Open("sqlite3", sharedMemoryDSN(cfg))
+
+	dsn, tempPath, err := backingDSN(cfg, paths)
 	if err != nil {
+		return nil, err
+	}
+	cleanup := func() error { return nil }
+	if tempPath != "" {
+		cleanup = func() error { return os.Remove(tempPath) }
+	}
+
+	sqlDB, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		if tempPath != "" {
+			_ = os.Remove(tempPath)
+		}
 		return nil, fmt.Errorf("file: open sqlite: %w", err)
 	}
-	// cache=shared lets multiple connections see the same in-memory
-	// db, but pinning to a single conn is simpler and avoids any
-	// driver-specific sharing semantics.
+	// Pin to a single conn: in-memory needs it to share state, and on
+	// disk it keeps the import path single-writer (no SQLITE_BUSY).
 	sqlDB.SetMaxOpenConns(1)
 
 	if err := sqlDB.PingContext(ctx); err != nil {
 		_ = sqlDB.Close()
+		_ = cleanup()
 		return nil, fmt.Errorf("file: ping: %w", err)
 	}
 	for _, p := range paths {
 		if _, err := fileimport.Load(ctx, sqlDB, p); err != nil {
 			_ = sqlDB.Close()
+			_ = cleanup()
 			return nil, fmt.Errorf("file: load %q: %w", p, err)
 		}
 	}
@@ -77,7 +107,87 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 				strings.ReplaceAll(t.Name, "'", "''") + "');"
 			return q, nil
 		},
+		OnClose: cleanup,
 	})
+}
+
+// backingDSN picks between :memory: and an on-disk temp file based on
+// the combined size of the input files. Returns the DSN and, when a
+// temp file was created, its path so the caller can delete it on close.
+// Files that can't be stat'd (e.g. missing) don't trigger spill -- the
+// subsequent fileimport.Load will surface the real error.
+func backingDSN(cfg db.Config, paths []string) (string, string, error) {
+	var total int64
+	for _, p := range paths {
+		st, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		total += st.Size()
+	}
+	if total <= limits.ByteCap() {
+		return sharedMemoryDSN(cfg), "", nil
+	}
+	pattern := fmt.Sprintf("%s-%d-*.db", tempPrefix, os.Getpid())
+	f, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", "", fmt.Errorf("file: create temp db: %w", err)
+	}
+	path := f.Name()
+	_ = f.Close()
+	// SQLite will create/overwrite the file on open; remove the empty
+	// placeholder so it starts clean.
+	_ = os.Remove(path)
+	return diskDSN(cfg, path), path, nil
+}
+
+// orphanRE matches the pid in tempPrefix-<pid>-<rand>.db.
+var orphanRE = regexp.MustCompile(`^` + regexp.QuoteMeta(tempPrefix) + `-(\d+)-`)
+
+// sweepOrphans removes spill files left behind by sqlgo processes that
+// are no longer running. Called once at package init in a goroutine so
+// it never blocks startup. Best-effort: any error (permission, race
+// with another sweeper) is silently skipped.
+func sweepOrphans() {
+	entries, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		return
+	}
+	self := os.Getpid()
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		m := orphanRE.FindStringSubmatch(e.Name())
+		if m == nil {
+			continue
+		}
+		pid, err := strconv.Atoi(m[1])
+		if err != nil || pid == self {
+			continue
+		}
+		if processAlive(pid) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(os.TempDir(), e.Name()))
+	}
+}
+
+// processAlive reports whether pid is a running process. Uses
+// signal-0 on unix; on windows os.FindProcess opens a real handle and
+// returns an error for dead pids, which is the cheapest portable check.
+func processAlive(pid int) bool {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		// Handle was opened successfully; assume the process exists.
+		// (No syscall.Signal(0) equivalent without x/sys.)
+		_ = p.Release()
+		return true
+	}
+	return p.Signal(syscall.Signal(0)) == nil
 }
 
 const schemaQuery = `
@@ -121,5 +231,20 @@ func sharedMemoryDSN(cfg db.Config) string {
 		q.Set(k, v)
 	}
 	u := url.URL{Scheme: "file", Opaque: ":memory:", RawQuery: q.Encode()}
+	return u.String()
+}
+
+// diskDSN builds a sqlite DSN for an on-disk temp file used as the
+// spill target when total input exceeds diskSpillBytes. cfg.Options
+// pass through the same as sharedMemoryDSN.
+func diskDSN(cfg db.Config, path string) string {
+	if len(cfg.Options) == 0 {
+		return path
+	}
+	q := url.Values{}
+	for k, v := range cfg.Options {
+		q.Set(k, v)
+	}
+	u := url.URL{Scheme: "file", Opaque: path, RawQuery: q.Encode()}
 	return u.String()
 }

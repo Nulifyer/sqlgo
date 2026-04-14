@@ -54,6 +54,11 @@ type SQLOptions struct {
 	// can pin a *sql.Conn across `SET SHOWPLAN_XML ON` + the target
 	// statement.
 	ExplainRunner func(ctx context.Context, db *sql.DB, sql string) ([][]any, error)
+
+	// OnClose, if set, runs after the underlying *sql.DB is closed.
+	// Used by the file driver to delete a temp on-disk SQLite database
+	// once the connection is torn down.
+	OnClose func() error
 }
 
 // OpenSQL wraps a *sql.DB as a db.Conn. Takes ownership of sqlDB.
@@ -328,7 +333,13 @@ func (c *sqlConn) Explain(ctx context.Context, query string) ([][]any, error) {
 }
 
 func (c *sqlConn) Close() error {
-	return c.db.Close()
+	err := c.db.Close()
+	if c.opts.OnClose != nil {
+		if cerr := c.opts.OnClose(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}
+	return err
 }
 
 func (c *sqlConn) Ping(ctx context.Context) error {

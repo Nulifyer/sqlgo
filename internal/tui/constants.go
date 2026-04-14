@@ -47,10 +47,6 @@ const (
 	maxTCPPort     = 65535
 )
 
-// Result buffer byte cap (hybrid with maxBufferedRows in table.go).
-// Whichever limit trips first stops streaming. 256 MiB is a generous
-// default that still protects against wide-row OOMs on small VMs.
-const defaultMaxBufferedBytes int64 = 256 << 20
 
 // Overlay sizing guard. Every modal dialog caps its width/height at
 // (term - dialogMargin) so there's always a couple of rows/cols of

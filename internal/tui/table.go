@@ -2,14 +2,13 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
+	"github.com/Nulifyer/sqlgo/internal/limits"
 )
 
 // table renders a streamed query result as a scrollable aligned grid. Rows
@@ -76,45 +75,11 @@ type table struct {
 	wrap bool
 }
 
-const (
-	sampleRows             = 200
-	defaultMaxBufferedRows = 100_000
-)
+const sampleRows = 200
 
-// maxBufferedRows is the live row cap, overridable via the
-// SQLGO_ROW_CAP env var at startup. Invalid values fall back to
-// the default. Evaluated once per process (package var, not a
-// const) so tests can poke it directly.
-var maxBufferedRows = loadRowCap()
-
-// maxBufferedBytes is the hybrid byte cap, overridable via
-// SQLGO_BYTE_CAP (value in bytes). Zero or invalid falls back to
-// defaultMaxBufferedBytes.
-var maxBufferedBytes = loadByteCap()
-
-func loadRowCap() int {
-	v := strings.TrimSpace(os.Getenv("SQLGO_ROW_CAP"))
-	if v == "" {
-		return defaultMaxBufferedRows
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		return defaultMaxBufferedRows
-	}
-	return n
-}
-
-func loadByteCap() int64 {
-	v := strings.TrimSpace(os.Getenv("SQLGO_BYTE_CAP"))
-	if v == "" {
-		return defaultMaxBufferedBytes
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil || n <= 0 {
-		return defaultMaxBufferedBytes
-	}
-	return n
-}
+// maxBufferedBytes is the result-set byte cap, sourced from the
+// shared limits package (env: SQLGO_BYTE_CAP, default 2 GiB).
+var maxBufferedBytes = limits.ByteCap()
 
 func newTable() *table { return &table{sortCol: -1} }
 
@@ -186,11 +151,6 @@ func (t *table) Append(row []any) bool {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(t.rendered) >= maxBufferedRows {
-		t.capped = true
-		t.capReason = fmt.Sprintf("%d rows", maxBufferedRows)
-		return false
-	}
 	if t.bytes+rowBytes > maxBufferedBytes {
 		t.capped = true
 		t.capReason = formatByteSize(maxBufferedBytes)

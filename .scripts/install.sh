@@ -78,7 +78,26 @@ mv "${TMP_DIR}/sqlgo" "${INSTALL_DIR}/sqlgo"
 rm -rf "$TMP_DIR"
 echo "  Installed to ${INSTALL_DIR}/sqlgo"
 
-# 5. Check PATH
+# 5. Migrate legacy data dir (~/.sqlgo) into XDG data home
+LEGACY_DIR="${HOME}/.sqlgo"
+if [ "$OS" = "darwin" ]; then
+    DATA_DIR="${HOME}/Library/Application Support/sqlgo"
+else
+    DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/sqlgo"
+fi
+if [ -f "${LEGACY_DIR}/sqlgo.db" ] && [ ! -f "${DATA_DIR}/sqlgo.db" ]; then
+    echo "  Migrating ${LEGACY_DIR} -> ${DATA_DIR}"
+    mkdir -p "$DATA_DIR"
+    for f in sqlgo.db sqlgo.db-wal sqlgo.db-shm; do
+        if [ -f "${LEGACY_DIR}/${f}" ]; then
+            mv "${LEGACY_DIR}/${f}" "${DATA_DIR}/${f}"
+        fi
+    done
+    # Remove the legacy dir only if it's now empty.
+    rmdir "$LEGACY_DIR" 2>/dev/null || true
+fi
+
+# 6. Check PATH
 case ":$PATH:" in
     *":${INSTALL_DIR}:"*) ;;
     *)
