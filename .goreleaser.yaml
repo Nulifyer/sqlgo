@@ -2,12 +2,14 @@ version: 2
 
 project_name: sqlgo
 
+# cgo is required for mattn/go-sqlite3. CC/CXX per target are provided
+# by the goreleaser-cross docker image used in CI.
 builds:
   - id: sqlgo
     binary: sqlgo
     main: ./cmd/sqlgo
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
     goos:
       - linux
       - windows
@@ -15,8 +17,41 @@ builds:
     goarch:
       - amd64
       - arm64
+    flags:
+      - -tags=sqlite_fts5
     ldflags:
       - -s -w
+    overrides:
+      - goos: linux
+        goarch: amd64
+        env:
+          - CC=x86_64-linux-gnu-gcc
+          - CXX=x86_64-linux-gnu-g++
+      - goos: linux
+        goarch: arm64
+        env:
+          - CC=aarch64-linux-gnu-gcc
+          - CXX=aarch64-linux-gnu-g++
+      - goos: windows
+        goarch: amd64
+        env:
+          - CC=x86_64-w64-mingw32-gcc
+          - CXX=x86_64-w64-mingw32-g++
+      - goos: windows
+        goarch: arm64
+        env:
+          - CC=aarch64-w64-mingw32-gcc
+          - CXX=aarch64-w64-mingw32-g++
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CC=o64-clang
+          - CXX=o64-clang++
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CC=oa64-clang
+          - CXX=oa64-clang++
 
 archives:
   - formats: [tar.gz]

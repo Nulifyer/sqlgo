@@ -6,7 +6,7 @@ $ErrorActionPreference = "Stop"
 $installDir = "$env:LOCALAPPDATA\sqlgo"
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
-$cmds = @("sqlgo", "sqlgocheck", "sqlgoseed")
+$cmds = @("sqlgo", "sqlgocheck", "sqlgoseed", "sqlgotree")
 
 # Kill any running sqlgo processes
 foreach ($name in $cmds) {
