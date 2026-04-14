@@ -2,7 +2,7 @@
 
 # sqlgo
 
-**A fast, keyboard-driven TUI SQL client for PostgreSQL, MySQL, SQL Server, SQLite, Oracle, Firebird, Turso/libSQL, Cloudflare D1, and flat files.**
+**A fast, keyboard-driven TUI SQL client for PostgreSQL, MySQL, SQL Server, SQLite,  flat files, and more.**
 
 [![Release](https://img.shields.io/github/v/release/Nulifyer/sqlgo?style=flat-square)](https://github.com/Nulifyer/sqlgo/releases)
 [![Go](https://img.shields.io/github/go-mod/go-version/Nulifyer/sqlgo?style=flat-square&logo=go)](go.mod)
