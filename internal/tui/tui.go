@@ -20,6 +20,7 @@ import (
 	_ "github.com/Nulifyer/sqlgo/internal/db/postgres"
 	_ "github.com/Nulifyer/sqlgo/internal/db/sqlite"
 	"github.com/Nulifyer/sqlgo/internal/secret"
+	"github.com/Nulifyer/sqlgo/internal/sqltok"
 	"github.com/Nulifyer/sqlgo/internal/sshtunnel"
 	"github.com/Nulifyer/sqlgo/internal/store"
 )
@@ -670,11 +671,39 @@ func (a *app) loadSchema() {
 
 // --- query execution -------------------------------------------------------
 
-// runQuery kicks off the current editor SQL on a background goroutine that
-// streams rows into the table widget as they arrive. Cancelling the ctx
-// (Ctrl+C) aborts in-flight queries at the driver level; closing the Rows
-// cursor throws away any buffered rows the driver hasn't handed us yet.
+// runQuery is the user-facing entry point. It guards against common
+// destructive typos (UPDATE/DELETE without WHERE, TRUNCATE, DROP) by
+// pushing a confirmation layer; runQueryUnsafe then does the actual work
+// once the user confirms (or immediately if nothing looks dangerous).
 func (a *app) runQuery() {
+	m := a.mainLayerPtr()
+	sess := m.session
+	if sess.running {
+		return
+	}
+	if a.conn == nil {
+		sess.status = "no connection: press space then c to connect"
+		return
+	}
+	sql := strings.TrimSpace(sess.editor.buf.Text())
+	if sql == "" {
+		sess.status = "nothing to run"
+		return
+	}
+	if findings := sqltok.UnsafeMutations(sql); len(findings) > 0 {
+		a.pushLayer(newConfirmRunLayer(findings))
+		return
+	}
+	a.runQueryUnsafe()
+}
+
+// runQueryUnsafe kicks off the current editor SQL on a background
+// goroutine that streams rows into the table widget as they arrive.
+// Cancelling the ctx (Ctrl+C) aborts in-flight queries at the driver
+// level; closing the Rows cursor throws away any buffered rows the
+// driver hasn't handed us yet. Skips the destructive-statement guard —
+// call runQuery for the guarded path.
+func (a *app) runQueryUnsafe() {
 	m := a.mainLayerPtr()
 	sess := m.session
 	if sess.running {

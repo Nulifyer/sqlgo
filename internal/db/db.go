@@ -148,9 +148,20 @@ type Conn interface {
 	// Columns returns ordered columns for one table. Callers
 	// should cache -- the editor hits this on every trigger.
 	Columns(ctx context.Context, t TableRef) ([]Column, error)
+	// Definition returns runnable DDL for a single object.
+	// kind is one of "view", "procedure", "function", "trigger".
+	// The returned text is an engine-appropriate re-creatable form:
+	// mssql uses CREATE OR ALTER, postgres uses CREATE OR REPLACE
+	// (or DROP + CREATE for triggers), mysql/sqlite use DROP + CREATE.
+	// Returns an error for unsupported kinds or drivers.
+	Definition(ctx context.Context, kind, schema, name string) (string, error)
 	Driver() string
 	Capabilities() Capabilities
 }
+
+// ErrDefinitionUnsupported is returned by Conn.Definition when the
+// driver or object kind doesn't support fetching a runnable DDL body.
+var ErrDefinitionUnsupported = errors.New("definition retrieval unsupported")
 
 // Rows is a forward-only query cursor. Rows are pulled lazily
 // on Next(); Close() is idempotent and aborts the query.

@@ -89,4 +89,5 @@ const (
 	colorTitleUnfocused  = ansiDefault
 	colorStatusBar       = ansiBrightBlack
 	colorError           = ansiBrightRed
+	colorOK              = ansiBrightGreen
 )

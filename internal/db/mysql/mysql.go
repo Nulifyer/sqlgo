@@ -65,6 +65,7 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		RoutinesQuery:      routinesQuery,
 		TriggersQuery:      triggersQuery,
 		IsPermissionDenied: isPermissionDenied,
+		DefinitionFetcher:  fetchDefinition,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mysql: %w", err)
@@ -117,6 +118,65 @@ FROM information_schema.columns
 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 ORDER BY ORDINAL_POSITION;
 `
+
+// fetchDefinition runs SHOW CREATE {VIEW|PROCEDURE|FUNCTION|TRIGGER} and
+// prepends a DROP ... IF EXISTS so the result is runnable as an edit. MySQL
+// has no CREATE OR REPLACE for these kinds.
+func fetchDefinition(ctx context.Context, sqlDB *sql.DB, kind, schema, name string) (string, error) {
+	var kw, createCol, dropKw, dropTarget string
+	qualified := mysqlQuoteIdent(schema) + "." + mysqlQuoteIdent(name)
+	switch kind {
+	case "view":
+		kw, createCol, dropKw, dropTarget = "VIEW", "Create View", "VIEW", qualified
+	case "procedure":
+		kw, createCol, dropKw, dropTarget = "PROCEDURE", "Create Procedure", "PROCEDURE", qualified
+	case "function":
+		kw, createCol, dropKw, dropTarget = "FUNCTION", "Create Function", "FUNCTION", qualified
+	case "trigger":
+		kw, createCol, dropKw, dropTarget = "TRIGGER", "SQL Original Statement", "TRIGGER", qualified
+	default:
+		return "", db.ErrDefinitionUnsupported
+	}
+	rows, err := sqlDB.QueryContext(ctx, "SHOW CREATE "+kw+" "+qualified)
+	if err != nil {
+		return "", fmt.Errorf("show create %s: %w", kw, err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return "", fmt.Errorf("show create columns: %w", err)
+	}
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return "", fmt.Errorf("show create next: %w", err)
+		}
+		return "", fmt.Errorf("no definition for %s %s.%s", kind, schema, name)
+	}
+	vals := make([]sql.NullString, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	if err := rows.Scan(ptrs...); err != nil {
+		return "", fmt.Errorf("show create scan: %w", err)
+	}
+	var body string
+	for i, c := range cols {
+		if c == createCol {
+			body = vals[i].String
+			break
+		}
+	}
+	if strings.TrimSpace(body) == "" {
+		return "", fmt.Errorf("empty definition for %s %s.%s", kind, schema, name)
+	}
+	drop := fmt.Sprintf("DROP %s IF EXISTS %s;\n", dropKw, dropTarget)
+	return drop + strings.TrimRight(body, "\r\n\t ;") + ";", nil
+}
+
+func mysqlQuoteIdent(s string) string {
+	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
+}
 
 // buildDSN uses gomysql.Config for escaping + parseTime handling.
 // Known knobs (tls, parseTime, allowNativePasswords) get lifted

@@ -19,6 +19,8 @@ type explorerItem struct {
 	schemaName string       // owning schema (set for all kinds)
 	subgroup   subgroupKind // valid for itemSubgroup; also set on leaves so Toggle knows which group they belong to
 	table      db.TableRef  // valid only for itemTable / itemView
+	routine    db.RoutineRef // valid only for itemProcedure / itemFunction
+	trigger    db.TriggerRef // valid only for itemTrigger
 	suffix     string       // optional trailing hint (e.g. "(denied)", "AFTER INSERT on foo")
 }
 
@@ -174,6 +176,32 @@ func (e *explorer) Selected() (db.TableRef, bool) {
 		return db.TableRef{}, false
 	}
 	return it.table, true
+}
+
+// SelectedRoutine returns the currently highlighted routine (procedure or
+// function). ok==false unless the cursor is on a routine leaf.
+func (e *explorer) SelectedRoutine() (db.RoutineRef, bool) {
+	if e.cursor < 0 || e.cursor >= len(e.items) {
+		return db.RoutineRef{}, false
+	}
+	it := e.items[e.cursor]
+	if it.kind != itemProcedure && it.kind != itemFunction {
+		return db.RoutineRef{}, false
+	}
+	return it.routine, true
+}
+
+// SelectedTrigger returns the currently highlighted trigger. ok==false
+// unless the cursor is on a trigger leaf.
+func (e *explorer) SelectedTrigger() (db.TriggerRef, bool) {
+	if e.cursor < 0 || e.cursor >= len(e.items) {
+		return db.TriggerRef{}, false
+	}
+	it := e.items[e.cursor]
+	if it.kind != itemTrigger {
+		return db.TriggerRef{}, false
+	}
+	return it.trigger, true
 }
 
 // SelectedKind returns the kind of the currently highlighted row (or -1 if
@@ -456,6 +484,7 @@ func (e *explorer) appendRoutineSubgroup(schema string, sg subgroupKind, entries
 			label:      r.Name,
 			schemaName: schema,
 			subgroup:   sg,
+			routine:    r,
 			suffix:     suffix,
 		})
 	}
@@ -484,6 +513,7 @@ func (e *explorer) appendTriggerSubgroup(schema string, entries []db.TriggerRef)
 			label:      tr.Name,
 			schemaName: schema,
 			subgroup:   subgroupTriggers,
+			trigger:    tr,
 			suffix:     suffix,
 		})
 	}

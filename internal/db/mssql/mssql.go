@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 
 	mssqldb "github.com/microsoft/go-mssqldb"
 
@@ -70,6 +71,7 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		RoutinesQuery:      routinesQuery,
 		TriggersQuery:      triggersQuery,
 		IsPermissionDenied: isPermissionDenied,
+		DefinitionFetcher:  fetchDefinition,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mssql: %w", err)
@@ -146,6 +148,44 @@ FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2
 ORDER BY ORDINAL_POSITION;
 `
+
+// fetchDefinition returns runnable DDL for a view/procedure/function/trigger.
+// Uses OBJECT_DEFINITION(OBJECT_ID(...)) to retrieve the original CREATE text,
+// then rewrites the leading `CREATE` keyword to `CREATE OR ALTER` so the text
+// is directly runnable as an edit.
+func fetchDefinition(ctx context.Context, sqlDB *sql.DB, kind, schema, name string) (string, error) {
+	switch kind {
+	case "view", "procedure", "function", "trigger":
+	default:
+		return "", db.ErrDefinitionUnsupported
+	}
+	qualified := "[" + strings.ReplaceAll(schema, "]", "]]") + "].[" + strings.ReplaceAll(name, "]", "]]") + "]"
+	row := sqlDB.QueryRowContext(ctx, "SELECT OBJECT_DEFINITION(OBJECT_ID(@p1))", qualified)
+	var def sql.NullString
+	if err := row.Scan(&def); err != nil {
+		return "", fmt.Errorf("object_definition: %w", err)
+	}
+	if !def.Valid || strings.TrimSpace(def.String) == "" {
+		return "", fmt.Errorf("no definition available for %s %s.%s (may be encrypted or not found)", kind, schema, name)
+	}
+	return rewriteCreateOrAlter(def.String), nil
+}
+
+// rewriteCreateOrAlter finds the first CREATE token (case-insensitive, after any
+// leading whitespace/comments) and replaces it with CREATE OR ALTER unless the
+// text already contains "OR ALTER" after CREATE.
+func rewriteCreateOrAlter(src string) string {
+	upper := strings.ToUpper(src)
+	idx := strings.Index(upper, "CREATE")
+	if idx < 0 {
+		return src
+	}
+	after := strings.TrimLeft(upper[idx+len("CREATE"):], " \t\r\n")
+	if strings.HasPrefix(after, "OR ALTER") || strings.HasPrefix(after, "OR REPLACE") {
+		return src
+	}
+	return src[:idx] + "CREATE OR ALTER" + src[idx+len("CREATE"):]
+}
 
 // buildDSN produces a sqlserver:// URL. cfg.Options → query params.
 func buildDSN(cfg db.Config) string {

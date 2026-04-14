@@ -217,6 +217,94 @@ func TestFormatUsesFourSpaceIndent(t *testing.T) {
 	t.Errorf("no content line found in %q", got)
 }
 
+// TestFormatInsertInto pins the two-word INSERT INTO head: "INSERT
+// INTO" stays on one line at column 0 and its target sits at the item
+// indent. Regression guard against a previous version that split INTO
+// onto its own line.
+func TestFormatInsertInto(t *testing.T) {
+	t.Parallel()
+	got := Format(`INSERT INTO t (a, b) VALUES (1, 2), (3, 4);`)
+	if !hasLineStartingWith(got, "INSERT INTO") {
+		t.Errorf("INSERT INTO not combined on one line:\n%s", got)
+	}
+	if hasLineStartingWith(got, "INTO") {
+		t.Errorf("INTO split onto its own line:\n%s", got)
+	}
+	if !hasLineStartingWith(got, "VALUES") {
+		t.Errorf("VALUES not at column 0:\n%s", got)
+	}
+	// VALUES row tuples must stay inline -- each tuple on one line.
+	if !hasLineStartingWith(got, "(1, 2),") {
+		t.Errorf("VALUES tuple exploded across lines:\n%s", got)
+	}
+	if !hasLineStartingWith(got, "(3, 4)") {
+		t.Errorf("second VALUES tuple missing:\n%s", got)
+	}
+}
+
+// TestFormatDeleteFrom pins the two-word DELETE FROM head.
+func TestFormatDeleteFrom(t *testing.T) {
+	t.Parallel()
+	got := Format(`DELETE FROM t WHERE id = 1;`)
+	if !hasLineStartingWith(got, "DELETE FROM") {
+		t.Errorf("DELETE FROM not combined on one line:\n%s", got)
+	}
+	if hasLineStartingWith(got, "FROM") {
+		t.Errorf("FROM split onto its own line after DELETE:\n%s", got)
+	}
+	if !hasLineStartingWith(got, "WHERE") {
+		t.Errorf("WHERE not at column 0:\n%s", got)
+	}
+}
+
+// TestFormatUpdateSetWhere checks UPDATE lays out as a clean stack of
+// major clauses and SET's assignment list wraps on commas.
+func TestFormatUpdateSetWhere(t *testing.T) {
+	t.Parallel()
+	got := Format(`UPDATE t SET a = 1, b = 2 WHERE id = 3 AND x = 4;`)
+	for _, head := range []string{"UPDATE", "SET", "WHERE"} {
+		if !hasLineStartingWith(got, head) {
+			t.Errorf("%s not at column 0:\n%s", head, got)
+		}
+	}
+	if !hasLineStartingWith(got, "AND x = 4") {
+		t.Errorf("AND in WHERE did not wrap:\n%s", got)
+	}
+	if !hasLineStartingWith(got, "a = 1,") {
+		t.Errorf("SET list did not wrap on comma:\n%s", got)
+	}
+}
+
+// TestFormatCreateOrAlterKeepsOrInline covers the regression where OR
+// at paren depth 0 would wrap mid-header, producing
+// "CREATE\n    OR ALTER ..." for DDL like CREATE OR ALTER PROCEDURE
+// and CREATE OR REPLACE VIEW. AND/OR only wrap inside a boolean
+// context (WHERE / HAVING / ON) now.
+func TestFormatCreateOrAlterKeepsOrInline(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		`CREATE OR ALTER PROCEDURE dbo.foo AS SELECT 1`,
+		`CREATE OR REPLACE VIEW v AS SELECT 1 FROM t`,
+	}
+	for _, src := range cases {
+		got := Format(src)
+		if hasLineStartingWith(got, "OR ") {
+			t.Errorf("OR wrapped in DDL header for %q:\n%s", src, got)
+		}
+	}
+}
+
+// TestFormatJoinOnBooleanContext verifies that AND after a JOIN ON
+// wraps (ON establishes boolean context) but AND inside CREATE OR
+// ALTER-style DDL does not.
+func TestFormatJoinOnBooleanContext(t *testing.T) {
+	t.Parallel()
+	got := Format(`SELECT a FROM t JOIN u ON t.id = u.id AND t.x = u.x`)
+	if !hasLineStartingWith(got, "AND t.x") {
+		t.Errorf("AND in JOIN ON did not wrap:\n%s", got)
+	}
+}
+
 func TestFormatEmptyInputUnchanged(t *testing.T) {
 	t.Parallel()
 	if got := Format("   "); got != "   " {

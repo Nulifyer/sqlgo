@@ -40,6 +40,12 @@ type SQLOptions struct {
 	// and it returns true, the Schema loader marks that object kind as
 	// denied and continues instead of failing the whole refresh.
 	IsPermissionDenied func(error) bool
+
+	// DefinitionFetcher returns runnable DDL for a single object. kind is
+	// one of "view", "procedure", "function", "trigger". Adapters return
+	// ErrDefinitionUnsupported for kinds they can't satisfy. Nil means the
+	// driver doesn't implement Definition at all.
+	DefinitionFetcher func(ctx context.Context, db *sql.DB, kind, schema, name string) (string, error)
 }
 
 // OpenSQL wraps a *sql.DB as a db.Conn. Takes ownership of sqlDB.
@@ -258,6 +264,13 @@ func (c *sqlConn) Columns(ctx context.Context, t TableRef) ([]Column, error) {
 		return nil, fmt.Errorf("columns rows: %w", err)
 	}
 	return out, nil
+}
+
+func (c *sqlConn) Definition(ctx context.Context, kind, schema, name string) (string, error) {
+	if c.opts.DefinitionFetcher == nil {
+		return "", ErrDefinitionUnsupported
+	}
+	return c.opts.DefinitionFetcher(ctx, c.db, kind, schema, name)
 }
 
 func (c *sqlConn) Close() error {

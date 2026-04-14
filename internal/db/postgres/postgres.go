@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -59,6 +60,7 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		RoutinesQuery:      routinesQuery,
 		TriggersQuery:      triggersQuery,
 		IsPermissionDenied: isPermissionDenied,
+		DefinitionFetcher:  fetchDefinition,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: %w", err)
@@ -131,6 +133,69 @@ FROM information_schema.columns
 WHERE table_schema = $1 AND table_name = $2
 ORDER BY ordinal_position;
 `
+
+// fetchDefinition returns runnable DDL for a view/procedure/function/trigger.
+// Views use CREATE OR REPLACE VIEW. Procedures/functions use pg_get_functiondef
+// which already emits CREATE OR REPLACE. Triggers emit DROP TRIGGER IF EXISTS
+// followed by pg_get_triggerdef (postgres has no CREATE OR REPLACE TRIGGER).
+func fetchDefinition(ctx context.Context, sqlDB *sql.DB, kind, schema, name string) (string, error) {
+	switch kind {
+	case "view":
+		var body sql.NullString
+		q := `SELECT pg_get_viewdef(format('%I.%I', $1::text, $2::text)::regclass, true)`
+		if err := sqlDB.QueryRowContext(ctx, q, schema, name).Scan(&body); err != nil {
+			return "", fmt.Errorf("pg_get_viewdef: %w", err)
+		}
+		if !body.Valid {
+			return "", fmt.Errorf("no definition for view %s.%s", schema, name)
+		}
+		return fmt.Sprintf("CREATE OR REPLACE VIEW %s.%s AS\n%s",
+			pgQuoteIdent(schema), pgQuoteIdent(name), strings.TrimRight(body.String, "\r\n\t ;")+";"), nil
+
+	case "procedure", "function":
+		var body sql.NullString
+		q := `
+SELECT pg_get_functiondef(p.oid)
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = $1 AND p.proname = $2
+LIMIT 1`
+		if err := sqlDB.QueryRowContext(ctx, q, schema, name).Scan(&body); err != nil {
+			return "", fmt.Errorf("pg_get_functiondef: %w", err)
+		}
+		if !body.Valid {
+			return "", fmt.Errorf("no definition for %s %s.%s", kind, schema, name)
+		}
+		return body.String, nil
+
+	case "trigger":
+		var (
+			body  sql.NullString
+			table string
+		)
+		q := `
+SELECT pg_get_triggerdef(t.oid, true), c.relname
+FROM pg_trigger t
+JOIN pg_class c ON c.oid = t.tgrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = $1 AND t.tgname = $2 AND NOT t.tgisinternal
+LIMIT 1`
+		if err := sqlDB.QueryRowContext(ctx, q, schema, name).Scan(&body, &table); err != nil {
+			return "", fmt.Errorf("pg_get_triggerdef: %w", err)
+		}
+		if !body.Valid {
+			return "", fmt.Errorf("no definition for trigger %s.%s", schema, name)
+		}
+		drop := fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s.%s;\n",
+			pgQuoteIdent(name), pgQuoteIdent(schema), pgQuoteIdent(table))
+		return drop + strings.TrimRight(body.String, "\r\n\t ;") + ";", nil
+	}
+	return "", db.ErrDefinitionUnsupported
+}
+
+func pgQuoteIdent(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
 
 // buildDSN produces a postgres:// URL. cfg.Options → query params.
 func buildDSN(cfg db.Config) string {

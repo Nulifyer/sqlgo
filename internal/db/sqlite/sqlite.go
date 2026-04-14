@@ -60,6 +60,7 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 			q := "SELECT name, type FROM pragma_table_info(" + quoteSQLiteLiteral(t.Name) + ");"
 			return q, nil
 		},
+		DefinitionFetcher: fetchDefinition,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: %w", err)
@@ -104,6 +105,34 @@ FROM sqlite_master
 WHERE type = 'trigger'
 ORDER BY name;
 `
+
+// fetchDefinition retrieves the stored CREATE text from sqlite_master for
+// views and triggers and prepends a DROP IF EXISTS. sqlite has no stored
+// procedures or functions, so those kinds return ErrDefinitionUnsupported.
+func fetchDefinition(ctx context.Context, sqlDB *sql.DB, kind, schema, name string) (string, error) {
+	var masterType, dropKw string
+	switch kind {
+	case "view":
+		masterType, dropKw = "view", "VIEW"
+	case "trigger":
+		masterType, dropKw = "trigger", "TRIGGER"
+	default:
+		return "", db.ErrDefinitionUnsupported
+	}
+	_ = schema // sqlite is flat; schema ignored beyond the synthetic "main"
+	var body sql.NullString
+	err := sqlDB.QueryRowContext(ctx,
+		"SELECT sql FROM sqlite_master WHERE type = ? AND name = ?",
+		masterType, name).Scan(&body)
+	if err != nil {
+		return "", fmt.Errorf("sqlite_master: %w", err)
+	}
+	if !body.Valid || strings.TrimSpace(body.String) == "" {
+		return "", fmt.Errorf("no definition for %s %s", kind, name)
+	}
+	drop := fmt.Sprintf("DROP %s IF EXISTS \"%s\";\n", dropKw, strings.ReplaceAll(name, `"`, `""`))
+	return drop + strings.TrimRight(body.String, "\r\n\t ;") + ";", nil
+}
 
 // buildDSN converts cfg into a sqlite DSN. cfg.Database is the
 // file path; empty or ":memory:" → in-memory. cfg.Options becomes

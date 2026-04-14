@@ -74,6 +74,16 @@ type session struct {
 	// table is previewed and are promoted to a permanent tab on the
 	// first real edit. Mirrors VSCode's single-click preview pane.
 	preview bool
+
+	// editKind/editSchema/editName tag a tab opened via Explorer 'e'
+	// (edit-definition). Empty editKind means the tab is a normal
+	// query tab. editOriginal holds the DDL text as first fetched so
+	// the Apply flow can diff user edits against the starting point
+	// (not the live DB state; Apply re-fetches for that).
+	editKind     string
+	editSchema   string
+	editName     string
+	editOriginal string
 }
 
 func newSession() *session {

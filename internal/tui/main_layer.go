@@ -2,6 +2,8 @@ package tui
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -219,7 +221,12 @@ func (m *mainLayer) handleLeftClick(a *app, t FocusTarget, msg MouseMsg, count i
 			if msg.Y == strip.row {
 				for _, h := range m.queryTabHits(strip) {
 					if msg.X >= h.startCol && msg.X <= h.endCol {
-						m.switchTab(h.idx)
+						if count >= 2 {
+							sess := m.sessions[h.idx]
+							a.pushLayer(newRenameLayer(h.idx, sess.title))
+						} else {
+							m.switchTab(h.idx)
+						}
 						break
 					}
 				}
@@ -416,6 +423,8 @@ func (m *mainLayer) Draw(a *app, c *cellbuf) {
 	}
 	if !m.running && m.lastErr != "" && m.lastErr != "cancelled" {
 		m.drawResultsError(c, p.results)
+	} else if m.inSuccessView() {
+		m.drawResultsSuccess(c, p.results)
 	} else {
 		m.table.draw(c, p.results)
 	}
@@ -603,6 +612,11 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		a.runQuery()
 		return
 	}
+	if k.Kind == KeyF2 {
+		sess := m.sessions[m.activeTab]
+		a.pushLayer(newRenameLayer(m.activeTab, sess.title))
+		return
+	}
 	// Query-tab management. Global so the user can switch tabs from
 	// any focus without first returning to the Query pane. Ctrl+T new,
 	// Ctrl+W closes the active tab, Ctrl+PgUp/PgDn cycle.
@@ -756,6 +770,8 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 		switch m.explorer.SelectedKind() {
 		case itemSchema, itemSubgroup:
 			m.explorer.Toggle()
+		case itemView, itemProcedure, itemFunction, itemTrigger:
+			m.editObjectFromExplorer(a)
 		default:
 			m.prefillSelectFromExplorer(a)
 		}
@@ -771,6 +787,75 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 			return
 		}
 	}
+}
+
+// editObjectFromExplorer fetches the DDL for the view/procedure/function/
+// trigger under the cursor and opens a new non-preview tab pre-filled with
+// it. Tags the session with editKind/editSchema/editName so the Apply flow
+// (Phase 1.5) can diff + re-run against the source object. Sync fetch with
+// a short timeout; if the driver returns ErrDefinitionUnsupported the
+// status line explains and no tab is opened.
+func (m *mainLayer) editObjectFromExplorer(a *app) {
+	if a.conn == nil {
+		m.status = "not connected"
+		return
+	}
+	var kind, schema, name string
+	switch m.explorer.SelectedKind() {
+	case itemView:
+		t, ok := m.explorer.Selected()
+		if !ok {
+			return
+		}
+		kind, schema, name = "view", t.Schema, t.Name
+	case itemProcedure:
+		r, ok := m.explorer.SelectedRoutine()
+		if !ok {
+			return
+		}
+		kind, schema, name = "procedure", r.Schema, r.Name
+	case itemFunction:
+		r, ok := m.explorer.SelectedRoutine()
+		if !ok {
+			return
+		}
+		kind, schema, name = "function", r.Schema, r.Name
+	case itemTrigger:
+		tr, ok := m.explorer.SelectedTrigger()
+		if !ok {
+			return
+		}
+		kind, schema, name = "trigger", tr.Schema, tr.Name
+	default:
+		m.status = "edit: select a view, routine, or trigger"
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	body, err := a.conn.Definition(ctx, kind, schema, name)
+	if err != nil {
+		if errors.Is(err, db.ErrDefinitionUnsupported) {
+			m.status = "edit: " + kind + " not supported by this driver"
+			return
+		}
+		m.status = "edit: " + err.Error()
+		return
+	}
+	sess := newSession()
+	label := name
+	if schema != "" {
+		label = schema + "." + name
+	}
+	sess.title = label
+	sess.editor.buf.SetText(body)
+	sess.editKind = kind
+	sess.editSchema = schema
+	sess.editName = name
+	sess.editOriginal = body
+	m.sessions = append(m.sessions, sess)
+	m.activeTab = len(m.sessions) - 1
+	m.session = sess
+	m.focus = FocusQuery
 }
 
 // handleResultsKey processes keys when the Results panel is focused.
@@ -941,6 +1026,38 @@ func (m *mainLayer) copyErrorText(a *app) {
 		return
 	}
 	m.status = fmt.Sprintf("copied error (%d chars)", len(m.lastErr))
+}
+
+// inSuccessView reports whether the Results pane should show the
+// non-result "statement completed" view: the last run finished cleanly
+// but produced no columns (DDL/DML like CREATE/UPDATE/DELETE).
+func (m *mainLayer) inSuccessView() bool {
+	return !m.running && m.lastErr == "" && m.lastHasResult && m.table.ColCount() == 0
+}
+
+// drawResultsSuccess renders a prominent "statement completed" message
+// when a non-result query (DDL/DML) finishes without error, so the user
+// gets more obvious feedback than the default "(no results)" placeholder.
+func (m *mainLayer) drawResultsSuccess(c *cellbuf, r rect) {
+	innerRow := r.row + 1
+	innerCol := r.col + 1
+	innerW := r.w - 2
+	innerH := r.h - 2
+	if innerW <= 0 || innerH <= 0 {
+		return
+	}
+	msg := "OK - statement completed"
+	if m.lastElapsed > 0 {
+		msg = fmt.Sprintf("OK - statement completed in %s", m.lastElapsed.Round(time.Millisecond))
+	}
+	row := innerRow + innerH/2
+	col := innerCol + (innerW-len([]rune(msg)))/2
+	if col < innerCol {
+		col = innerCol
+	}
+	c.setFg(colorOK)
+	c.writeAt(row, col, truncate(msg, innerW))
+	c.resetStyle()
 }
 
 // drawResultsError renders the last query error in place of the table.
@@ -1224,17 +1341,24 @@ func hintIf(cond bool, h string) string {
 }
 
 func (m *mainLayer) explorerHints(_ *app) string {
-	selectHint := ""
+	enterHint := ""
+	sHint := ""
 	switch m.explorer.SelectedKind() {
-	case itemTable, itemView:
-		selectHint = "Enter=SELECT"
+	case itemTable:
+		enterHint = "Enter=SELECT"
+	case itemView:
+		enterHint = "Enter=edit"
+		sHint = "s=SELECT"
+	case itemProcedure, itemFunction, itemTrigger:
+		enterHint = "Enter=edit"
 	case itemSchema, itemSubgroup:
-		selectHint = "Enter=expand"
+		enterHint = "Enter=expand"
 	}
 	return joinHints(
 		"F1=help",
 		"Ctrl+Q=quit",
-		selectHint,
+		enterHint,
+		sHint,
 		"Space=menu",
 	)
 }

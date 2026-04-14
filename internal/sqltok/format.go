@@ -119,6 +119,23 @@ type formatter struct {
 	// Flipped on SELECT/FROM/SET/VALUES/GROUP BY/ORDER BY.
 	currentSplit bool
 
+	// currentClause is the uppercase name of the most recently emitted
+	// major clause at the current paren depth. Used so context-sensitive
+	// paren handling (VALUES row tuples, WHERE boolean context) can
+	// branch without re-scanning the token stream.
+	currentClause string
+
+	// booleanContext is true when AND / OR at depth 0 should wrap to
+	// a new line. Set by WHERE, HAVING, and JOIN's ON; cleared by any
+	// other major clause. Keeps CREATE OR ALTER / CREATE OR REPLACE
+	// inline because those ORs aren't boolean operators.
+	booleanContext bool
+
+	// clauseStack / splitSave / boolSave mirror parenStack for the
+	// per-clause state so a subquery restores the outer clause context
+	// when its ')' closes.
+	clauseStack []string
+
 	// betweenPending is set when a BETWEEN keyword is emitted and
 	// cleared by the first AND at the same paren depth. That AND is
 	// the BETWEEN upper-bound delimiter, not a logical AND, so it
@@ -266,12 +283,55 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 			f.writeRaw(upper + " BY")
 			f.newlineTo(f.itemIndent())
 			f.currentSplit = true
+			f.currentClause = upper
+			f.booleanContext = false
 			return i + 1
 		}
 		if upper == "BY" {
 			if prev := prevKeyword(tokens, i); prev == "GROUP" || prev == "ORDER" {
 				return i + 1
 			}
+		}
+
+		// INSERT INTO / DELETE FROM: two-word clause heads, emitted
+		// together so the FROM / INTO doesn't split onto its own line.
+		if upper == "INSERT" && nextKeyword(tokens, i) == "INTO" {
+			f.newlineTo(f.baseIndent)
+			f.writeRaw("INSERT INTO")
+			f.newlineTo(f.itemIndent())
+			f.currentSplit = false
+			f.currentClause = "INSERT"
+			f.booleanContext = false
+			return i + 1
+		}
+		if upper == "INTO" {
+			if prevKeyword(tokens, i) == "INSERT" {
+				return i + 1
+			}
+		}
+		if upper == "DELETE" && nextKeyword(tokens, i) == "FROM" {
+			f.newlineTo(f.baseIndent)
+			f.writeRaw("DELETE FROM")
+			f.newlineTo(f.itemIndent())
+			f.currentSplit = false
+			f.currentClause = "DELETE"
+			f.booleanContext = false
+			return i + 1
+		}
+		if upper == "FROM" {
+			if prevKeyword(tokens, i) == "DELETE" {
+				return i + 1
+			}
+		}
+
+		// ON (join condition) opens a boolean context so subsequent
+		// AND / OR wrap. Inline emission -- handled before the generic
+		// keyword path so the flag flips.
+		if upper == "ON" {
+			f.booleanContext = true
+			f.writeRaw("ON")
+			f.writeRaw(" ")
+			return i + 1
 		}
 
 		// SELECT: special-cased so its modifiers (DISTINCT, ALL, TOP
@@ -285,6 +345,8 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 			next := f.consumeSelectModifiers(tokens, i+1)
 			f.newlineTo(f.itemIndent())
 			f.currentSplit = true
+			f.currentClause = "SELECT"
+			f.booleanContext = false
 			return next
 		}
 
@@ -298,6 +360,8 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 			f.writeRaw(upper)
 			f.newlineTo(f.itemIndent())
 			f.currentSplit = commaSplitters[upper]
+			f.currentClause = upper
+			f.booleanContext = upper == "WHERE" || upper == "HAVING"
 			return i + 1
 		}
 
@@ -324,7 +388,7 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 		// current item indent so long WHERE predicates read cleanly.
 		// Exception: the AND that delimits a BETWEEN's upper bound
 		// must stay inline -- flagged by betweenPending.
-		if (upper == "AND" || upper == "OR") && len(f.parenStack) == 0 {
+		if (upper == "AND" || upper == "OR") && len(f.parenStack) == 0 && f.booleanContext {
 			if upper == "AND" && f.betweenPending {
 				f.betweenPending = false
 				f.writeRaw("AND")
@@ -371,6 +435,13 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 			// no indent bump, no newline before the body.
 			isFn := IsFunctionCall(tokens, i)
 			inlineGroup := isFn || prevKeyword(tokens, i) == "IN"
+			// VALUES row tuples: `VALUES (1, 2), (3, 4)` should keep
+			// each tuple inline on its own line instead of exploding
+			// across four lines. currentClause == "VALUES" at paren
+			// depth zero means this '(' opens a row tuple.
+			if !inlineGroup && len(f.parenStack) == 0 && f.currentClause == "VALUES" {
+				inlineGroup = true
+			}
 			if inlineGroup {
 				if isFn {
 					f.trimTrailingSpace()
@@ -399,11 +470,14 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 				f.parenStack = append(f.parenStack, f.baseIndent)
 				f.splitStack = append(f.splitStack, f.currentSplit)
 				f.closeStack = append(f.closeStack, closeAt)
+				f.clauseStack = append(f.clauseStack, f.currentClause)
 				f.baseIndent += bump
 				f.newlineTo(f.baseIndent)
 				// Reset the child context so the inner clauses can
 				// pick their own state from scratch.
 				f.currentSplit = false
+				f.currentClause = ""
+				f.booleanContext = false
 			}
 		case ")":
 			f.trimTrailingSpace()
@@ -417,6 +491,11 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 				if saved >= 0 {
 					f.baseIndent = saved
 					f.currentSplit = prevSplit
+					if m := len(f.clauseStack); m > 0 {
+						f.currentClause = f.clauseStack[m-1]
+						f.clauseStack = f.clauseStack[:m-1]
+						f.booleanContext = f.currentClause == "WHERE" || f.currentClause == "HAVING"
+					}
 					f.newlineTo(closeAt)
 				}
 			}
