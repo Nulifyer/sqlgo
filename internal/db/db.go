@@ -165,6 +165,13 @@ type Rows interface {
 	// Safe to call at any time, including before the first Next(); safe
 	// to call multiple times.
 	Close() error
+	// NextResultSet advances to the next result set produced by the
+	// query (e.g. a batch of SELECTs separated by semicolons on drivers
+	// that support it). Returns false when there are no more result
+	// sets. After a true return, Columns() reflects the new set and the
+	// caller drains it with Next()/Scan() as usual. Drivers without
+	// multi-result support return false on the first call.
+	NextResultSet() bool
 }
 
 // TableKind distinguishes tables from views in the schema tree.

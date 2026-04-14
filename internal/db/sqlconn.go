@@ -216,3 +216,29 @@ func (r *sqlRows) Close() error {
 	r.closed = true
 	return r.rows.Close()
 }
+
+// NextResultSet advances *sql.Rows to the next result set and refreshes
+// the cached column descriptors. Drivers that don't produce multiple
+// result sets return false immediately.
+func (r *sqlRows) NextResultSet() bool {
+	if r.closed || r.err != nil {
+		return false
+	}
+	if !r.rows.NextResultSet() {
+		return false
+	}
+	types, err := r.rows.ColumnTypes()
+	if err != nil {
+		r.err = fmt.Errorf("column types: %w", err)
+		return false
+	}
+	cols := make([]Column, len(types))
+	for i, t := range types {
+		cols[i] = Column{
+			Name:     t.Name(),
+			TypeName: t.DatabaseTypeName(),
+		}
+	}
+	r.cols = cols
+	return true
+}
