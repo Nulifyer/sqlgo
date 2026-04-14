@@ -67,6 +67,12 @@ func UnsafeMutations(src string) []UnsafeMutation {
 // one statement (no trailing ';' required).
 func classifyStatement(toks []Token) string {
 	first, firstIdx := firstKeyword(toks, 0)
+	if first == "WITH" {
+		// CTE prefix: skip over CTE definitions (each body is a
+		// parenthesised block at depth 0) and classify the real
+		// statement keyword that follows the last CTE.
+		first, firstIdx = effectiveStatementKeyword(toks, firstIdx+1)
+	}
 	switch first {
 	case "UPDATE":
 		if !hasWhereAtDepthZero(toks, firstIdx) {
@@ -105,6 +111,40 @@ func firstKeyword(toks []Token, start int) (string, int) {
 			return strings.ToUpper(toks[i].Text), i
 		default:
 			return "", i
+		}
+	}
+	return "", len(toks)
+}
+
+// effectiveStatementKeyword walks forward from start looking for a DML
+// or DDL keyword at paren depth zero. Used to look past a WITH-CTE
+// preamble so the safety classifier sees the real statement keyword
+// (e.g. UPDATE in `WITH x AS (...) UPDATE t SET ...`). CTE bodies are
+// parenthesised so they are naturally skipped by the depth guard.
+func effectiveStatementKeyword(toks []Token, start int) (string, int) {
+	depth := 0
+	for i := start; i < len(toks); i++ {
+		t := toks[i]
+		if t.Kind == Punct {
+			switch t.Text {
+			case "(":
+				depth++
+			case ")":
+				if depth > 0 {
+					depth--
+				}
+			}
+			continue
+		}
+		if depth != 0 {
+			continue
+		}
+		if t.Kind != Keyword && t.Kind != Ident {
+			continue
+		}
+		switch strings.ToUpper(t.Text) {
+		case "UPDATE", "DELETE", "INSERT", "SELECT", "MERGE", "TRUNCATE", "DROP":
+			return strings.ToUpper(t.Text), i
 		}
 	}
 	return "", len(toks)

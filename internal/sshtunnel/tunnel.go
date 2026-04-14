@@ -158,15 +158,23 @@ func (t *Tunnel) handleConn(local net.Conn, targetAddr string) {
 	}
 	defer remote.Close()
 
+	// Wait for both directions. When one side closes, shut the other
+	// connection so its io.Copy unblocks instead of leaking until the
+	// peer notices. Without this, Close() races the inner goroutines.
 	done := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(remote, local)
+		_ = remote.Close()
+		_ = local.Close()
 		done <- struct{}{}
 	}()
 	go func() {
 		_, _ = io.Copy(local, remote)
+		_ = local.Close()
+		_ = remote.Close()
 		done <- struct{}{}
 	}()
+	<-done
 	<-done
 }
 

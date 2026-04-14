@@ -248,7 +248,7 @@ func (s *screen) applyView(v View) error {
 			// OSC 2 sets the window title; terminated by BEL for the
 			// broadest terminal support (ST works too but a few
 			// terminals don't recognize it).
-			buf.WriteString(esc + "]2;" + v.WindowTitle + "\x07")
+			buf.WriteString(esc + "]2;" + sanitizeWindowTitle(v.WindowTitle) + "\x07")
 		}
 	}
 	if buf.Len() > 0 {
@@ -259,6 +259,22 @@ func (s *screen) applyView(v View) error {
 	s.view = v
 	s.viewSet = true
 	return nil
+}
+
+// sanitizeWindowTitle strips control characters from a WindowTitle so it
+// cannot prematurely terminate the OSC 2 sequence or inject further
+// escape codes. Connection names flow from user config; a malicious or
+// accidental \x1b / \x07 / \x9c would otherwise escape into the
+// terminal command stream.
+func sanitizeWindowTitle(s string) string {
+	clean := make([]rune, 0, len(s))
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || r == 0x9c {
+			continue
+		}
+		clean = append(clean, r)
+	}
+	return string(clean)
 }
 
 // teardownView restores the terminal modes we turned on during Run so

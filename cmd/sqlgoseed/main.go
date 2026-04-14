@@ -13,6 +13,9 @@
 //
 // The -scale flag multiplies base row counts. scale=1 is ~3k-5k rows total;
 // scale=10 is ~30k-50k; scale=100 is hundreds of thousands.
+//
+// The -user/-pass defaults match the compose.yaml dev fixtures. Override
+// them for any non-local-compose target — they are not production creds.
 package main
 
 import (

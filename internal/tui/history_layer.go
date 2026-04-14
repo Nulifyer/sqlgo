@@ -330,22 +330,23 @@ func (h *historyLayer) deleteSelected(a *app) {
 // actually wipes (scoped to the current connection or global,
 // depending on scope); any other key disarms.
 func (h *historyLayer) confirmClear(a *app) {
+	if h.scope == scopeCurrent && a.activeConn == nil {
+		h.clearArmed = false
+		h.status = "cannot clear current-connection history while disconnected"
+		return
+	}
 	if !h.clearArmed {
 		h.clearArmed = true
 		if h.scope == scopeAll {
 			h.status = "press X again to clear ALL history"
 		} else {
-			name := "(disconnected)"
-			if a.activeConn != nil {
-				name = a.activeConn.Name
-			}
-			h.status = "press X again to clear history for " + name
+			h.status = "press X again to clear history for " + a.activeConn.Name
 		}
 		return
 	}
 	h.clearArmed = false
 	connName := ""
-	if h.scope == scopeCurrent && a.activeConn != nil {
+	if h.scope == scopeCurrent {
 		connName = a.activeConn.Name
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), storeReadTimeout)

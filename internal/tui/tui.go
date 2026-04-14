@@ -112,6 +112,12 @@ type app struct {
 	// lives on *session so parallel tabs don't fight over one cancel handle.
 	resultCh chan queryEvent
 
+	// asyncCh carries callbacks from background goroutines back to the
+	// main event loop. Used for non-query background work (schema fetch,
+	// history record, etc.) so the UI never blocks on IO. Callbacks run
+	// on the main goroutine and can safely touch UI state.
+	asyncCh chan func(*app)
+
 	// columnCache memoizes editor autocomplete lookups.
 	// Cleared on disconnect so fresh schema wins.
 	columnCache *columnCache
@@ -312,6 +318,7 @@ func Run(opts Options) error {
 		// Buffer a handful of events so a fast-streaming query doesn't
 		// stall the drain goroutine on a non-blocking progress send.
 		resultCh:         make(chan queryEvent, resultChanBuf),
+		asyncCh:          make(chan func(*app), 16),
 		clipboard:        clipboard.System(),
 		secrets:          sec,
 		secretsAvailable: secAvail,
@@ -411,6 +418,8 @@ func (a *app) loop() error {
 			a.handleInput(m)
 		case e := <-a.resultCh:
 			a.handleQueryEvent(e)
+		case fn := <-a.asyncCh:
+			fn(a)
 		case <-resizeCh:
 			// Wake: loop top calls refreshSize() and redraws.
 		case <-sigCh:
@@ -659,14 +668,28 @@ func (a *app) loadSchema() {
 		m.explorer.SetSchema(nil, db.SchemaDepthSchemas)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), schemaTimeout)
-	defer cancel()
-	info, err := a.conn.Schema(ctx)
-	if err != nil {
-		m.explorer.SetError(err.Error())
-		return
-	}
-	m.explorer.SetSchema(info, a.conn.Capabilities().SchemaDepth)
+	// Capture the current conn so a disconnect+reconnect during the
+	// fetch can't apply stale schema to the new connection.
+	conn := a.conn
+	depth := conn.Capabilities().SchemaDepth
+	m.explorer.SetLoading()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), schemaTimeout)
+		defer cancel()
+		info, err := conn.Schema(ctx)
+		a.asyncCh <- func(a *app) {
+			// Drop the result if the connection has changed underneath us.
+			if a.conn != conn {
+				return
+			}
+			m := a.mainLayerPtr()
+			if err != nil {
+				m.explorer.SetError(err.Error())
+				return
+			}
+			m.explorer.SetSchema(info, depth)
+		}
+	}()
 }
 
 // --- query execution -------------------------------------------------------
@@ -915,9 +938,17 @@ func (a *app) recordHistory(sess *session, e queryEvent) {
 	if e.err != nil && !errors.Is(e.err, context.Canceled) {
 		entry.Error = e.err.Error()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), storeHistoryTimeout)
-	defer cancel()
-	if err := a.store.RecordHistory(ctx, entry); err != nil {
-		sess.status += " (history: " + err.Error() + ")"
-	}
+	store := a.store
+	ch := a.asyncCh
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), storeHistoryTimeout)
+		defer cancel()
+		if err := store.RecordHistory(ctx, entry); err != nil {
+			msg := " (history: " + err.Error() + ")"
+			select {
+			case ch <- func(*app) { sess.status += msg }:
+			default:
+			}
+		}
+	}()
 }

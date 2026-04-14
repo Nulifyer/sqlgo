@@ -8,6 +8,9 @@
 //	    -host localhost -port 11433 \
 //	    -user sa -pass 'SqlGo_dev_Pass1!' \
 //	    -query 'SELECT @@VERSION'
+//
+// The -user/-pass defaults match the compose.yaml dev fixtures. Override
+// them for any non-local-compose target — they are not production creds.
 package main
 
 import (

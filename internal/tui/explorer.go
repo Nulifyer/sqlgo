@@ -153,6 +153,17 @@ func subgroupExpansionKey(schema string, sg subgroupKind) string {
 	return schema + "\x00" + sg.label()
 }
 
+// SetLoading shows a "loading…" placeholder while a background schema
+// fetch is in flight. Called on the main goroutine before kicking off
+// the fetch so the user has immediate feedback.
+func (e *explorer) SetLoading() {
+	e.err = "loading…"
+	e.info = nil
+	e.items = nil
+	e.cursor = 0
+	e.scroll = 0
+}
+
 // SetError puts the explorer into an error state. The tree is cleared so
 // stale data from a previous connection doesn't get mistaken for the new
 // one.

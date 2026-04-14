@@ -64,3 +64,24 @@ func TestApplyViewEmitsDeltasOnly(t *testing.T) {
 		t.Errorf("unchanged AltScreen flag re-emitted altScreenOn: %q", buf.String())
 	}
 }
+
+func TestSanitizeWindowTitle(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in, want string
+	}{
+		{"plain", "plain"},
+		{"with\x1bescape", "withescape"},
+		{"bel\x07end", "belend"},
+		{"st\u009cend", "stend"},
+		{"tab\ttab", "tabtab"},
+		{"newline\nhere", "newlinehere"},
+		{"del\x7fhere", "delhere"},
+		{"unicode-πok", "unicode-πok"},
+	}
+	for _, tc := range cases {
+		if got := sanitizeWindowTitle(tc.in); got != tc.want {
+			t.Errorf("sanitizeWindowTitle(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

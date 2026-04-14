@@ -21,6 +21,14 @@ func TestUnsafeMutations(t *testing.T) {
 		{"insert is safe", "INSERT INTO t VALUES (1)", 0, ""},
 		{"subquery where doesn't count", "UPDATE t SET a = (SELECT 1 FROM u WHERE u.id = 1)", 1, "UPDATE without WHERE"},
 		{"multi-stmt mix", "SELECT 1; DELETE FROM t; UPDATE t SET a=1 WHERE id=1", 1, "DELETE without WHERE"},
+		{"cte delete no where", "WITH c AS (SELECT id FROM u) DELETE FROM t", 1, "DELETE without WHERE"},
+		{"cte delete with where", "WITH c AS (SELECT id FROM u) DELETE FROM t WHERE id IN (SELECT id FROM c)", 0, ""},
+		{"cte update no where", "WITH c AS (SELECT 1) UPDATE t SET a = 1", 1, "UPDATE without WHERE"},
+		{"cte update with where", "WITH c AS (SELECT 1) UPDATE t SET a=1 WHERE id=1", 0, ""},
+		{"cte multi chained", "WITH a AS (SELECT 1), b AS (SELECT 2) DELETE FROM t", 1, "DELETE without WHERE"},
+		{"cte select safe", "WITH c AS (SELECT 1) SELECT * FROM c", 0, ""},
+		{"cte recursive delete", "WITH RECURSIVE r AS (SELECT 1) DELETE FROM t", 1, "DELETE without WHERE"},
+		{"cte drop table", "WITH c AS (SELECT 1) DROP TABLE t", 1, "DROP TABLE"},
 	}
 	for _, tc := range cases {
 		tc := tc

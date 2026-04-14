@@ -1,7 +1,12 @@
+// sqlgotree is a dev utility that opens the three compose.yaml test
+// databases and prints their schema trees. Credentials default to the
+// dev fixtures in compose.yaml but can be overridden with flags so the
+// binary does not carry baked-in secrets if reused elsewhere.
 package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"sort"
 
@@ -19,11 +24,16 @@ type target struct {
 }
 
 func main() {
+	mssqlPass := flag.String("mssql-pass", "SqlGo_dev_Pass1!", "mssql password (compose.yaml fixture default)")
+	pgPass := flag.String("pg-pass", "sqlgo_dev", "postgres password (compose.yaml fixture default)")
+	mysqlPass := flag.String("mysql-pass", "sqlgo_dev", "mysql password (compose.yaml fixture default)")
+	flag.Parse()
+
 	ctx := context.Background()
 	targets := []target{
-		{"mssql", "mssql", db.Config{Host: "localhost", Port: 11433, User: "sa", Password: "SqlGo_dev_Pass1!", Database: "acmewidgets", Options: map[string]string{"encrypt": "disable"}}},
-		{"postgres", "postgres", db.Config{Host: "localhost", Port: 15432, User: "sqlgo", Password: "sqlgo_dev", Database: "acmewidgets", Options: map[string]string{"sslmode": "disable"}}},
-		{"mysql", "mysql", db.Config{Host: "localhost", Port: 13306, User: "sqlgo", Password: "sqlgo_dev", Database: "acmewidgets"}},
+		{"mssql", "mssql", db.Config{Host: "localhost", Port: 11433, User: "sa", Password: *mssqlPass, Database: "acmewidgets", Options: map[string]string{"encrypt": "disable"}}},
+		{"postgres", "postgres", db.Config{Host: "localhost", Port: 15432, User: "sqlgo", Password: *pgPass, Database: "acmewidgets", Options: map[string]string{"sslmode": "disable"}}},
+		{"mysql", "mysql", db.Config{Host: "localhost", Port: 13306, User: "sqlgo", Password: *mysqlPass, Database: "acmewidgets"}},
 	}
 	for _, t := range targets {
 		fmt.Printf("\n=== %s ===\n", t.label)
@@ -135,7 +145,6 @@ func render(info *db.SchemaInfo) {
 		}
 	}
 	dump("[user]", user)
-	// Sys: summary counts only
 	if len(sys) > 0 {
 		fmt.Println("[sys]")
 		schemas := make([]string, 0, len(sys))
