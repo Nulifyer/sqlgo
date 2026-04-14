@@ -39,8 +39,12 @@ func (f FocusTarget) String() string {
 // editor. Panel focus switches are bound to Alt+1/2/3 so every printable
 // key stays available to the editor.
 type mainLayer struct {
-	editor       *editor
-	table        *table
+	// session is the per-tab state (editor, table, last-query summary)
+	// embedded so promoted fields keep m.editor / m.table / m.lastErr
+	// working without touching the ~136 existing call sites. Later phases
+	// swap this pointer to switch query tabs.
+	*session
+
 	explorer     *explorer
 	focus        FocusTarget
 	status       string // transient query feedback ("running...", "3 row(s) in 12ms"); never replaces the hint line
@@ -51,23 +55,6 @@ type mainLayer struct {
 	// line). Toggled by F11. When on, focus is locked to FocusQuery
 	// so Alt+1/3 silently no-op.
 	editorFullscreen bool
-
-	// Last-query summary surfaced on the results panel's top-right
-	// border. lastHasResult is the gate: zero on startup / after a
-	// disconnect so no stale "0 rows / 0ms" shows up before any query.
-	lastRowCount  int
-	lastColCount  int
-	lastElapsed   time.Duration
-	lastHasResult bool
-	lastCapped    bool
-	lastCapReason string
-	lastErr       string
-	lastErrLine   int
-
-	// resultsErrScroll is the top-line offset into the wrapped error
-	// text when lastErr is rendered in place of the table. Reset when a
-	// new query starts.
-	resultsErrScroll int
 
 	// clicks tracks click counts for double/triple detection across the
 	// three panels. Shared because a click outside the last-clicked panel
@@ -273,8 +260,7 @@ func (m *mainLayer) wheelQuery(a *app, delta int) {
 
 func newMainLayer() *mainLayer {
 	m := &mainLayer{
-		editor:   newEditor(),
-		table:    newTable(),
+		session:  newSession(),
 		explorer: newExplorer(),
 		focus:    FocusQuery,
 	}
