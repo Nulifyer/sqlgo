@@ -77,23 +77,106 @@ var engineSpecs = []engineSpec{
 			// cfg.Database holds the file path; no extra fields needed.
 		},
 	},
+	{
+		driver:      "oracle",
+		label:       "Oracle",
+		defaultPort: 1521,
+		defaultUser: "system",
+		fields: []engineOption{
+			// cfg.Database holds the Oracle service name. go-ora accepts
+			// extra knobs via cfg.Options (SSL, WALLET, PREFETCH_ROWS...).
+		},
+	},
+	{
+		driver:      "firebird",
+		label:       "Firebird",
+		defaultPort: 3050,
+		defaultUser: "sysdba",
+		fields: []engineOption{
+			{key: "role", label: "Role"},
+			{key: "charset", label: "Charset"},
+		},
+	},
+	{
+		driver:      "d1",
+		label:       "Cloudflare D1",
+		defaultPort: 0,
+		defaultUser: "",
+		fields: []engineOption{
+			// cfg.User = account id, cfg.Database = D1 database id,
+			// cfg.Password = API token. Host overrides api.cloudflare.com.
+		},
+	},
+	{
+		driver:      "libsql",
+		label:       "libSQL / Turso",
+		defaultPort: 0,
+		defaultUser: "",
+		fields: []engineOption{
+			// cfg.Host holds the Turso database URL; cfg.Password the
+			// auth token. No extra fields.
+		},
+	},
+	{
+		driver:      "file",
+		label:       "File (CSV/TSV/JSONL)",
+		defaultPort: 0,
+		defaultUser: "",
+		fields: []engineOption{
+			// cfg.Database holds a ';'-separated list of file paths.
+		},
+	},
+}
+
+// engineAliases maps a label-only alias to the base driver whose
+// engineSpec (fields, defaults) it reuses. Kept in sync with
+// internal/db/aliases.
+var engineAliases = map[string]string{
+	"mariadb":     "mysql",
+	"cockroachdb": "postgres",
+	"supabase":    "postgres",
+	"neon":        "postgres",
+	"yugabytedb":  "postgres",
+	"timescaledb": "postgres",
+}
+
+// aliasLabels gives each alias its display name in the connect form.
+var aliasLabels = map[string]string{
+	"mariadb":     "MariaDB",
+	"cockroachdb": "CockroachDB",
+	"supabase":    "Supabase",
+	"neon":        "Neon",
+	"yugabytedb":  "YugabyteDB",
+	"timescaledb": "TimescaleDB",
 }
 
 // engineSpecFor looks up a driver, or returns a generic fallback
-// when the driver isn't registered.
+// when the driver isn't registered. Aliases reuse the base driver's
+// fields/defaults with just the label swapped.
 func engineSpecFor(driver string) engineSpec {
 	for _, s := range engineSpecs {
 		if s.driver == driver {
 			return s
 		}
 	}
+	if base, ok := engineAliases[driver]; ok {
+		for _, s := range engineSpecs {
+			if s.driver == base {
+				s.driver = driver
+				if lbl, ok := aliasLabels[driver]; ok {
+					s.label = lbl
+				}
+				return s
+			}
+		}
+	}
 	return engineSpec{driver: driver, label: driver}
 }
 
-// engineSpecIndex returns the index of driver, or 0 if unknown.
-func engineSpecIndex(driver string) int {
-	for i, s := range engineSpecs {
-		if s.driver == driver {
+// driverIndex returns the index of driver in names, or 0 if not found.
+func driverIndex(names []string, driver string) int {
+	for i, n := range names {
+		if n == driver {
 			return i
 		}
 	}

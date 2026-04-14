@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Nulifyer/sqlgo/internal/config"
+	"github.com/Nulifyer/sqlgo/internal/db"
 )
 
 // connForm is the add/edit form. Layout: fixed core fields, then
@@ -15,10 +16,11 @@ type connForm struct {
 	title        string
 	originalName string // edit target; passed to SaveConnection as oldName
 
-	fixed     []formField
-	driverIdx int
-	engine    []formField
-	ssh       []formField
+	fixed       []formField
+	driverNames []string // from db.Registered(); drives the Driver cycler
+	driverIdx   int
+	engine      []formField
+	ssh         []formField
 
 	active int
 	status string
@@ -49,16 +51,23 @@ const (
 )
 
 func newConnForm(title string, c *config.Connection) *connForm {
-	driver := "mssql"
+	names := db.Registered()
+	if len(names) == 0 {
+		// Fallback so the form still renders if no drivers are registered
+		// (tests, mis-wired builds). Matches the pre-C1 default.
+		names = []string{"mssql"}
+	}
+	driver := names[0]
 	if c != nil && c.Driver != "" {
 		driver = c.Driver
 	}
-	idx := engineSpecIndex(driver)
-	spec := engineSpecs[idx]
+	idx := driverIndex(names, driver)
+	spec := engineSpecFor(names[idx])
 
 	f := &connForm{
-		title:     title,
-		driverIdx: idx,
+		title:       title,
+		driverNames: names,
+		driverIdx:   idx,
 	}
 	f.fixed = make([]formField, coreCount)
 	f.fixed[coreName] = formField{label: "Name", in: newInput("")}
@@ -193,7 +202,7 @@ func cycleFieldValue(ff *formField, delta int) {
 // preserving shared-key values, and resets port/user to the new
 // defaults only if they still match the prior defaults.
 func (f *connForm) cycleDriver(delta int) {
-	n := len(engineSpecs)
+	n := len(f.driverNames)
 	if n == 0 {
 		return
 	}
@@ -202,14 +211,14 @@ func (f *connForm) cycleDriver(delta int) {
 		return
 	}
 	prior := map[string]string{}
-	priorSpec := engineSpecs[f.driverIdx]
+	priorSpec := engineSpecFor(f.driverNames[f.driverIdx])
 	for i, opt := range priorSpec.fields {
 		if i < len(f.engine) {
 			prior[opt.key] = f.engine[i].in.String()
 		}
 	}
 	f.driverIdx = newIdx
-	newSpec := engineSpecs[newIdx]
+	newSpec := engineSpecFor(f.driverNames[newIdx])
 	f.engine = buildEngineFields(newSpec, prior)
 	f.fixed[coreDriver].in.SetString(newSpec.driver)
 	priorPort := strconv.Itoa(priorSpec.defaultPort)
@@ -428,7 +437,7 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 		}
 		// Cycler rows render "‹ value ›". Empty → "(default)".
 		if i == coreDriver {
-			val = "‹ " + engineSpecs[f.driverIdx].label + " ›"
+			val = "‹ " + engineSpecFor(f.driverNames[f.driverIdx]).label + " ›"
 		} else if field.isCycler() {
 			display := val
 			if display == "" {

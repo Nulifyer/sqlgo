@@ -187,6 +187,11 @@ func TestBuildSelectDriverSpecific(t *testing.T) {
 			caps: db.Capabilities{LimitSyntax: db.LimitSyntaxLimit, IdentifierQuote: '"'},
 			want: `SELECT * FROM "dbo"."users" LIMIT 100;`,
 		},
+		{
+			name: "oracle-fetchfirst-doublequotes",
+			caps: db.Capabilities{LimitSyntax: db.LimitSyntaxFetchFirst, IdentifierQuote: '"'},
+			want: `SELECT * FROM "dbo"."users" OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY;`,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

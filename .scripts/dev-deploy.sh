@@ -23,7 +23,7 @@ mkdir -p "$INSTALL_DIR"
 cd "$REPO_ROOT"
 for name in "${CMDS[@]}"; do
     echo "  -> $name"
-    go build -ldflags "-s -w" -o "$INSTALL_DIR/$name" "./cmd/$name"
+    CGO_ENABLED=1 go build -tags sqlite_fts5 -ldflags "-s -w" -o "$INSTALL_DIR/$name" "./cmd/$name"
     chmod +x "$INSTALL_DIR/$name"
 done
 

@@ -22,8 +22,14 @@ import (
 	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
+	_ "github.com/Nulifyer/sqlgo/internal/db/aliases"
+	_ "github.com/Nulifyer/sqlgo/internal/db/d1"
+	_ "github.com/Nulifyer/sqlgo/internal/db/file"
+	_ "github.com/Nulifyer/sqlgo/internal/db/firebird"
+	_ "github.com/Nulifyer/sqlgo/internal/db/libsql"
 	_ "github.com/Nulifyer/sqlgo/internal/db/mssql"
 	_ "github.com/Nulifyer/sqlgo/internal/db/mysql"
+	_ "github.com/Nulifyer/sqlgo/internal/db/oracle"
 	_ "github.com/Nulifyer/sqlgo/internal/db/postgres"
 	_ "github.com/Nulifyer/sqlgo/internal/db/sqlite"
 )

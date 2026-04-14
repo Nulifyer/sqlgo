@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // TestOpenAtCreatesFile verifies that opening the store against a fresh
@@ -68,7 +68,7 @@ func TestMigrationsApplyInOrder(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "sqlgo.db")
 
-	db, err := sql.Open("sqlite", dsnFor(path))
+	db, err := sql.Open("sqlite3", dsnFor(path))
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}

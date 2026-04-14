@@ -49,8 +49,8 @@ func TestBuildInsertParamCount(t *testing.T) {
 		// Count emitted placeholders. Each dialect uses a distinct marker,
 		// so we pick the right one and count occurrences.
 		marker := d.placeholder(1)
-		if strings.HasPrefix(marker, "@p") || strings.HasPrefix(marker, "$") {
-			// Positional numbered. Check that the highest index equals wantArgs.
+		if strings.HasPrefix(marker, "@p") || strings.HasPrefix(marker, "$") || strings.HasPrefix(marker, ":") {
+			// Positional numbered (@pN, $N, :N). Check that the highest index equals wantArgs.
 			last := d.placeholder(wantArgs)
 			if !strings.Contains(sql, last) {
 				t.Errorf("%s: expected last placeholder %q in:\n%s", name, last, sql)

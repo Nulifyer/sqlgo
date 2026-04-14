@@ -1,5 +1,5 @@
-// Package sqlite registers the modernc.org/sqlite driver (pure-Go,
-// CGO-free). Import for side effects.
+// Package sqlite registers the mattn/go-sqlite3 driver. Requires cgo.
+// Import for side effects.
 package sqlite
 
 import (
@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"strings"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 	"github.com/Nulifyer/sqlgo/internal/sqltok"
@@ -41,15 +41,16 @@ var capabilities = db.Capabilities{
 	IdentifierQuote: '"',
 	SupportsCancel:  true,
 	SupportsTLS:     false,
-	ExplainFormat:   db.ExplainFormatSQLiteRows,
-	Dialect:         sqltok.DialectSQLite,
+	ExplainFormat:        db.ExplainFormatSQLiteRows,
+	Dialect:              sqltok.DialectSQLite,
+	SupportsTransactions: true,
 }
 
 func (driver) Capabilities() db.Capabilities { return capabilities }
 
 func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	dsn := buildDSN(cfg)
-	sqlDB, err := sql.Open("sqlite", dsn)
+	sqlDB, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite open: %w", err)
 	}

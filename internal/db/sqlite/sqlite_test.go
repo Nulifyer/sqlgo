@@ -42,7 +42,7 @@ func TestBuildDSN(t *testing.T) {
 
 // TestOpenInMemoryRoundTrip covers the full Driver.Open -> Conn.Exec ->
 // Conn.Query -> Rows lifecycle against an in-memory SQLite database. This
-// is the smoke test that proves modernc.org/sqlite is reachable through
+// is the smoke test that proves mattn/go-sqlite3 is reachable through
 // the shared sqlConn wrapper, that streaming Rows works, and that Close()
 // is idempotent.
 func TestOpenInMemoryRoundTrip(t *testing.T) {

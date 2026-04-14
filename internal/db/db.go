@@ -90,6 +90,13 @@ type Capabilities struct {
 	// None means the feature is unsupported for this driver.
 	ExplainFormat ExplainFormat
 
+	// SupportsTransactions reports whether the engine implements
+	// BEGIN/COMMIT/ROLLBACK. False for HTTP-shaped engines like BigQuery,
+	// Athena, and Cloudflare D1 where each request is its own unit of work.
+	// The autocomplete overlay and safety classifier consult this to hide
+	// transaction keywords for engines that don't honor them.
+	SupportsTransactions bool
+
 	// Dialect selects the keyword overlay used by autocomplete so each
 	// engine only suggests syntax it actually accepts (TOP for MSSQL,
 	// RETURNING for Postgres/SQLite, PRAGMA for SQLite, ...).
@@ -119,6 +126,11 @@ const (
 	LimitSyntaxLimit LimitSyntax = iota
 	// LimitSyntaxSelectTop is the "SELECT TOP N ..." prefix used by MSSQL.
 	LimitSyntaxSelectTop
+	// LimitSyntaxFetchFirst is the SQL:2008 "OFFSET 0 ROWS FETCH NEXT N ROWS
+	// ONLY" tail used by Oracle 12c+, Sybase ASE 16+, and DB2. Explorer
+	// emits it without the OFFSET clause since callers only ask for "first
+	// N rows" previews.
+	LimitSyntaxFetchFirst
 )
 
 // ExplainFormat selects the driver's EXPLAIN output shape. None
@@ -319,6 +331,36 @@ func Register(d Driver) {
 		panic(fmt.Sprintf("db.Register: duplicate driver %q", name))
 	}
 	drivers[name] = d
+}
+
+// RegisterAlias registers name as a label-only alias of an existing
+// driver. Aliases share the base driver's Capabilities and Open, so the
+// wire protocol must match (MariaDB over mysql, CockroachDB over
+// postgres, ...). Panics if baseName isn't registered or name collides.
+func RegisterAlias(name, baseName string) {
+	regMu.Lock()
+	defer regMu.Unlock()
+	base, ok := drivers[baseName]
+	if !ok {
+		panic(fmt.Sprintf("db.RegisterAlias: base driver %q not registered", baseName))
+	}
+	if _, dup := drivers[name]; dup {
+		panic(fmt.Sprintf("db.RegisterAlias: duplicate driver %q", name))
+	}
+	drivers[name] = aliasDriver{name: name, base: base}
+}
+
+// aliasDriver forwards everything to its base. Name() returns the
+// alias so db.Registered() lists it separately in the connect form.
+type aliasDriver struct {
+	name string
+	base Driver
+}
+
+func (a aliasDriver) Name() string                               { return a.name }
+func (a aliasDriver) Capabilities() Capabilities                 { return a.base.Capabilities() }
+func (a aliasDriver) Open(ctx context.Context, cfg Config) (Conn, error) {
+	return a.base.Open(ctx, cfg)
 }
 
 // Get returns a registered driver by name.

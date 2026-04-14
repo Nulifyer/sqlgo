@@ -70,18 +70,26 @@ func TokenizeText(text string) []Token {
 // keyword. A keyword tagged with multiple bits is accepted by each of
 // those engines; DialectAll is the convenience union for keywords every
 // engine supports.
-type Dialect uint8
+type Dialect uint16
 
 const (
 	DialectMSSQL Dialect = 1 << iota
 	DialectMySQL
 	DialectPostgres
 	DialectSQLite
+	DialectOracle
+	DialectClickhouse
+	DialectSybase
+	DialectSnowflake
+	DialectBigQuery
+	DialectFirebird
 
 	// DialectAll tags keywords supported by every engine sqlgo speaks.
 	// Use this for ANSI/universal keywords so KeywordsFor(anyDialect)
 	// always includes them.
-	DialectAll = DialectMSSQL | DialectMySQL | DialectPostgres | DialectSQLite
+	DialectAll = DialectMSSQL | DialectMySQL | DialectPostgres | DialectSQLite |
+		DialectOracle | DialectClickhouse | DialectSybase | DialectSnowflake |
+		DialectBigQuery | DialectFirebird
 )
 
 // IsKeyword reports whether s (case-insensitive) is one of the
@@ -262,11 +270,61 @@ var keywordSet = map[string]Dialect{
 	"VIRTUAL":   DialectSQLite,
 	"TEMPORARY": DialectSQLite | DialectPostgres | DialectMySQL,
 	"WITHOUT":   DialectSQLite,
-	"ROWID":     DialectSQLite,
+	"ROWID":     DialectSQLite | DialectOracle,
 	"ATTACH":    DialectSQLite,
 	"DETACH":    DialectSQLite,
 	"REINDEX":   DialectSQLite | DialectPostgres,
 	"INDEXED":   DialectSQLite,
+
+	// Oracle: hierarchical queries, pseudo-columns, PL/SQL, types.
+	"DUAL":         DialectOracle,
+	"ROWNUM":       DialectOracle,
+	"SYSDATE":      DialectOracle,
+	"SYSTIMESTAMP": DialectOracle,
+	"CURRVAL":      DialectOracle,
+	"NEXTVAL":      DialectOracle | DialectPostgres,
+	"CONNECT":      DialectOracle,
+	"PRIOR":        DialectOracle,
+	"START":        DialectOracle,
+	"NOCYCLE":      DialectOracle,
+	"SIBLINGS":     DialectOracle,
+	"MINUS":        DialectOracle,
+	"PIVOT":        DialectOracle | DialectMSSQL,
+	"UNPIVOT":      DialectOracle | DialectMSSQL,
+	"VARCHAR2":     DialectOracle,
+	"NVARCHAR2":    DialectOracle,
+	"NUMBER":       DialectOracle,
+	"CLOB":         DialectOracle,
+	"NCLOB":        DialectOracle,
+	"BLOB":         DialectOracle | DialectSQLite | DialectMySQL,
+	"PACKAGE":      DialectOracle,
+	"BODY":         DialectOracle,
+	"PLSQL":        DialectOracle,
+	"EXCEPTION":    DialectOracle,
+	"RAISE":        DialectOracle,
+	"LOOP":         DialectOracle,
+	"ELSIF":        DialectOracle,
+	"CURSOR":       DialectOracle,
+	"RECORD":       DialectOracle,
+	"VARRAY":       DialectOracle,
+	"NOCOMPRESS":   DialectOracle,
+	"NOPARALLEL":   DialectOracle,
+	"TABLESPACE":   DialectOracle | DialectPostgres,
+
+	// Firebird: generators/sequences, PSQL, domain/computed cols.
+	"GENERATOR":  DialectFirebird,
+	"GEN_ID":     DialectFirebird,
+	"SEQUENCE":   DialectFirebird | DialectPostgres | DialectOracle,
+	"DOMAIN":     DialectFirebird | DialectPostgres,
+	"COMPUTED":   DialectFirebird,
+	"SUSPEND":    DialectFirebird,
+	"LEAVE":      DialectFirebird | DialectMySQL,
+	"EXIT":       DialectFirebird,
+	"PSQL":       DialectFirebird,
+	"ISQL":       DialectFirebird,
+	"ROLE":       DialectFirebird | DialectPostgres,
+	"GRANT":      DialectFirebird | DialectPostgres | DialectMySQL | DialectMSSQL | DialectOracle,
+	"REVOKE":     DialectFirebird | DialectPostgres | DialectMySQL | DialectMSSQL | DialectOracle,
 }
 
 // lexer is a scratch-pad scanner over a rune slice. The zero value is

@@ -12,7 +12,7 @@
 
 Heavy GUI clients are slow to launch, hard to script around, and hostile over SSH. `psql` and `mysql` are great until you want a result pane you can actually scroll. sqlgo sits in the middle: a terminal-native workbench that starts in milliseconds, runs everywhere, and works the same against every engine it supports.
 
-No mouse required. No Electron. No cgo. One static binary.
+No mouse required. No Electron. One binary.
 
 ## Features
 
@@ -20,7 +20,7 @@ No mouse required. No Electron. No cgo. One static binary.
 - **PostgreSQL** via `pgx/v5`
 - **MySQL / MariaDB** via `go-sql-driver/mysql`
 - **SQL Server** via `go-mssqldb`
-- **SQLite** via `modernc.org/sqlite` (pure Go, no cgo)
+- **SQLite** via `github.com/mattn/go-sqlite3` (cgo)
 
 ### Workbench
 - **Three-panel layout** -- Explorer (schema tree), Query (editor), Results (table). Toggle focus with `Alt+1/2/3`.
@@ -87,8 +87,10 @@ Installs to `%LOCALAPPDATA%\sqlgo\sqlgo.exe` and adds that directory to your use
 ### From source
 
 ```sh
-go install github.com/Nulifyer/sqlgo/cmd/sqlgo@latest
+CGO_ENABLED=1 go install -tags sqlite_fts5 github.com/Nulifyer/sqlgo/cmd/sqlgo@latest
 ```
+
+Requires a C toolchain (gcc, clang, or `zig cc`). The `sqlite_fts5` tag enables the FTS5 module that powers query history search.
 
 ### Uninstall
 
@@ -182,7 +184,7 @@ Brings up MSSQL (port `11433`), Postgres (`15432`), MySQL (`13306`), and an SSH 
 ### Build and run
 
 ```sh
-go run ./cmd/sqlgo
+CGO_ENABLED=1 go run -tags sqlite_fts5 ./cmd/sqlgo
 ```
 
 ### Dev deploy

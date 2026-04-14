@@ -294,6 +294,11 @@ var dialects = map[string]*dialect{
 	"postgres": postgresDialect,
 	"mysql":    mysqlDialect,
 	"sqlite":   sqliteDialect,
+	// libsql is hrana-over-HTTP talking to a SQLite engine, so the SQL
+	// dialect is identical to our sqlite adapter. Same for Turso.
+	"libsql":   sqliteDialect,
+	"oracle":   oracleDialect,
+	"firebird": firebirdDialect,
 }
 
 func dialectFor(name string) (*dialect, error) {
@@ -410,6 +415,85 @@ var sqliteDialect = &dialect{
 	quoteIdent:   func(s string) string { return `"` + s + `"` },
 	dropIfExists: func(name string) string { return fmt.Sprintf(`DROP TABLE IF EXISTS "%s"`, name) },
 	maxParams:    900, // SQLite default SQLITE_MAX_VARIABLE_NUMBER is 999.
+}
+
+// Oracle has no DROP TABLE IF EXISTS; wrap each drop in an anonymous
+// PL/SQL block that swallows ORA-00942 (table or view does not exist)
+// so re-runs are idempotent. Placeholders are :1, :2, ...
+var oracleDialect = &dialect{
+	name: "oracle",
+	typeSQL: func(c colDef) string {
+		switch c.typ {
+		case colInt:
+			return "NUMBER(10)"
+		case colBigInt:
+			return "NUMBER(19)"
+		case colText:
+			return fmt.Sprintf("VARCHAR2(%d)", c.size)
+		case colLongText:
+			return "CLOB"
+		case colDecimal:
+			return fmt.Sprintf("NUMBER(%d,%d)", c.size, c.scale)
+		case colBool:
+			return "NUMBER(1)"
+		case colDate:
+			return "DATE"
+		case colDateTime:
+			return "TIMESTAMP"
+		}
+		return "VARCHAR2(255)"
+	},
+	placeholder: func(i int) string { return fmt.Sprintf(":%d", i) },
+	quoteIdent:  func(s string) string { return `"` + strings.ToUpper(s) + `"` },
+	dropIfExists: func(name string) string {
+		return fmt.Sprintf(
+			`BEGIN EXECUTE IMMEDIATE 'DROP TABLE "%s"'; EXCEPTION WHEN OTHERS THEN IF SQLCODE != -942 THEN RAISE; END IF; END;`,
+			strings.ToUpper(name))
+	},
+	// Oracle caps bind variables per statement at 65535, but a single
+	// batched INSERT is an INSERT ALL construct; keep batches modest.
+	maxParams: 1000,
+}
+
+// Firebird lacks DROP TABLE IF EXISTS pre-v4; use EXECUTE BLOCK guarded
+// by a lookup in RDB$RELATIONS so old server versions still work. All
+// identifiers are upper-cased in the system catalog, so we quote and
+// upper-case to keep DDL and DML consistent.
+var firebirdDialect = &dialect{
+	name: "firebird",
+	typeSQL: func(c colDef) string {
+		switch c.typ {
+		case colInt:
+			return "INTEGER"
+		case colBigInt:
+			return "BIGINT"
+		case colText:
+			return fmt.Sprintf("VARCHAR(%d)", c.size)
+		case colLongText:
+			return "BLOB SUB_TYPE TEXT"
+		case colDecimal:
+			return fmt.Sprintf("DECIMAL(%d,%d)", c.size, c.scale)
+		case colBool:
+			return "BOOLEAN"
+		case colDate:
+			return "DATE"
+		case colDateTime:
+			return "TIMESTAMP"
+		}
+		return "VARCHAR(255)"
+	},
+	placeholder: func(i int) string { return "?" },
+	quoteIdent:  func(s string) string { return `"` + strings.ToUpper(s) + `"` },
+	dropIfExists: func(name string) string {
+		upper := strings.ToUpper(name)
+		return fmt.Sprintf(
+			`EXECUTE BLOCK AS BEGIN IF (EXISTS(SELECT 1 FROM RDB$RELATIONS WHERE RDB$RELATION_NAME = '%s')) THEN EXECUTE STATEMENT 'DROP TABLE "%s"'; END`,
+			upper, upper)
+	},
+	// Firebird XSQLDA limits the message buffer; 1491 columns max per
+	// prepared statement. Keep batches small — large multi-row VALUES
+	// also hit parser-stack limits.
+	maxParams: 1000,
 }
 
 // extras DDL: a view, a scalar function, a stored procedure, and a trigger.

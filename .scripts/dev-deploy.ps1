@@ -30,7 +30,8 @@ try {
     foreach ($name in $cmds) {
         $outPath = "$installDir\$name.exe"
         Write-Host "  -> $name" -ForegroundColor DarkGray
-        go build -ldflags "-s -w" -o $outPath "./cmd/$name"
+        $env:CGO_ENABLED = "1"
+        go build -tags sqlite_fts5 -ldflags "-s -w" -o $outPath "./cmd/$name"
         if ($LASTEXITCODE -ne 0) { throw "Build failed: $name" }
     }
 } finally {

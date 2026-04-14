@@ -10,10 +10,15 @@
 #   MSSQL    -> 11433
 #   Postgres -> 15432
 #   MySQL    -> 13306
+#   Oracle   -> 11521
+#   Firebird -> 13050
+#   libSQL   -> 18080 (hrana HTTP)
 #   sshd     -> 12222
 #
 # The integration test suite in internal/db/<driver>/ reads these
-# ports from env vars (SQLGO_IT_*_DSN); see tests_integration.go.
+# ports from env vars (SQLGO_IT_*_*); see each *_integration_test.go.
+# D1 has no self-hostable image; the D1 integration test stands up
+# a fake Cloudflare REST server in-process (see d1_integration_test.go).
 services:
   mssql:
     image: mcr.microsoft.com/mssql/server:2022-latest
@@ -24,8 +29,6 @@ services:
       MSSQL_PID: "Developer"
     ports:
       - "11433:1433"
-    volumes:
-      - mssql-data:/var/opt/mssql
 
   postgres:
     image: postgres:16-alpine
@@ -36,8 +39,6 @@ services:
       POSTGRES_DB: sqlgo_test
     ports:
       - "15432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "sqlgo", "-d", "sqlgo_test"]
       interval: 5s
@@ -54,13 +55,58 @@ services:
       MYSQL_PASSWORD: sqlgo_dev
     ports:
       - "13306:3306"
-    volumes:
-      - mysql-data:/var/lib/mysql
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-usqlgo", "-psqlgo_dev"]
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Oracle Free edition. ~1.5GB image; first boot takes 60-120s while
+  # the DB initializes. The "-faststart" flavor skips the full
+  # db-recreate and is the right choice for dev/test containers.
+  #
+  # ORACLE_PASSWORD sets the SYS/SYSTEM password. APP_USER creates a
+  # non-privileged schema used by the integration tests.
+  oracle:
+    image: gvenzl/oracle-free:23-slim-faststart
+    container_name: sqlgo-oracle
+    environment:
+      ORACLE_PASSWORD: sqlgo_dev
+      APP_USER: sqlgo
+      APP_USER_PASSWORD: sqlgo_dev
+    ports:
+      - "11521:1521"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  # Firebird 5.x. FIREBIRD_DATABASE seeds an initial database owned by
+  # the APP user; the integration test connects to it directly.
+  firebird:
+    image: firebirdsql/firebird:5
+    container_name: sqlgo-firebird
+    environment:
+      FIREBIRD_ROOT_PASSWORD: sqlgo_dev
+      FIREBIRD_DATABASE: sqlgo_test.fdb
+      FIREBIRD_USER: sqlgo
+      FIREBIRD_PASSWORD: sqlgo_dev
+    ports:
+      - "13050:3050"
+
+  # libSQL server (Turso's hrana-compatible daemon). Runs the embedded
+  # SQLite on disk; auth is disabled for local dev. The integration
+  # test hits http://localhost:18080 with an empty token.
+  libsql:
+    image: ghcr.io/tursodatabase/libsql-server:latest
+    container_name: sqlgo-libsql
+    environment:
+      SQLD_NODE: primary
+      SQLD_HTTP_LISTEN_ADDR: 0.0.0.0:8080
+    ports:
+      - "18080:8080"
 
   # sshd is the bastion used by the sshtunnel integration test. It
   # forwards to the postgres service on the compose network so the
@@ -81,7 +127,3 @@ services:
     depends_on:
       - postgres
 
-volumes:
-  mssql-data:
-  postgres-data:
-  mysql-data:

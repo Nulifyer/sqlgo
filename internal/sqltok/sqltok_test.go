@@ -169,9 +169,21 @@ func TestKeywordsForDialect(t *testing.T) {
 			absent:  []string{"TOP", "OUTPUT", "AUTO_INCREMENT", "ILIKE"},
 		},
 		{
+			name:    "oracle has DUAL/ROWNUM not TOP",
+			dialect: DialectOracle,
+			want:    []string{"SELECT", "TRUNCATE", "DUAL", "ROWNUM", "SYSDATE", "CONNECT", "PRIOR", "MINUS", "VARCHAR2", "NUMBER", "PACKAGE"},
+			absent:  []string{"TOP", "PRAGMA", "LIMIT", "AUTO_INCREMENT", "ILIKE"},
+		},
+		{
+			name:    "firebird has GENERATOR/SUSPEND not PRAGMA",
+			dialect: DialectFirebird,
+			want:    []string{"SELECT", "TRUNCATE", "GENERATOR", "GEN_ID", "SUSPEND", "DOMAIN", "COMPUTED"},
+			absent:  []string{"TOP", "PRAGMA", "LIMIT", "ROWNUM", "AUTO_INCREMENT"},
+		},
+		{
 			name:    "all returns everything",
 			dialect: DialectAll,
-			want:    []string{"SELECT", "TRUNCATE", "TOP", "LIMIT", "PRAGMA", "RETURNING"},
+			want:    []string{"SELECT", "TRUNCATE", "TOP", "LIMIT", "PRAGMA", "RETURNING", "DUAL", "GENERATOR"},
 		},
 	}
 	for _, tc := range cases {
@@ -203,6 +215,63 @@ func TestKeywordsForZero(t *testing.T) {
 	t.Parallel()
 	if got := KeywordsFor(0); len(got) != 0 {
 		t.Errorf("KeywordsFor(0) = %d entries, want 0", len(got))
+	}
+}
+
+// TestOracleBindPlaceholder pins how Oracle's :N placeholders lex.
+// The colon is not in the operator or punct sets, so it falls through
+// to Text, and the number that follows tokenizes as Number. The
+// highlighter then paints the number like any other literal, which is
+// what we want -- the TUI shouldn't dress bind markers as keywords.
+func TestOracleBindPlaceholder(t *testing.T) {
+	t.Parallel()
+	got := kindsOf("SELECT * FROM t WHERE id = :1")
+	want := []Kind{Keyword, Operator, Keyword, Ident, Keyword, Ident, Operator, Text, Number}
+	if !eqKinds(got, want) {
+		t.Errorf("kinds = %v, want %v", got, want)
+	}
+}
+
+// TestOracleQuotedIdentifier pins that Oracle's "QuotedIdent" form
+// tokenizes as a String. Oracle preserves case inside double quotes
+// rather than folding to uppercase, so the editor paints these as
+// string-y to visually distinguish them from bare idents.
+func TestOracleQuotedIdentifier(t *testing.T) {
+	t.Parallel()
+	toks := TokenizeText(`SELECT "MixedCase" FROM "SCOTT"."EMP"`)
+	var strings int
+	for _, tk := range toks {
+		if tk.Kind == String {
+			strings++
+		}
+	}
+	if strings != 3 {
+		t.Errorf("expected 3 double-quoted idents as String, got %d in %+v", strings, toks)
+	}
+}
+
+// TestSQLiteDollarPlaceholderIsNotKeyword guards against the lexer
+// ever interpreting $N placeholders as keywords. SQLite and Postgres
+// both use $1-style; we don't have a bind-marker token kind, so they
+// fall out as Text + Number.
+func TestSQLiteDollarPlaceholderIsNotKeyword(t *testing.T) {
+	t.Parallel()
+	for _, tk := range TokenizeText("SELECT * WHERE x = $1") {
+		if tk.Kind == Keyword && tk.Text == "$1" {
+			t.Errorf("$1 should not lex as keyword: %+v", tk)
+		}
+	}
+}
+
+// TestFirebirdIsKeyword checks the new Firebird overlay registers.
+// This is the sanity pin that the new dialect bit actually routes
+// keywords through IsKeyword().
+func TestFirebirdIsKeyword(t *testing.T) {
+	t.Parallel()
+	for _, kw := range []string{"GENERATOR", "GEN_ID", "SUSPEND"} {
+		if !IsKeyword(kw) {
+			t.Errorf("%q should be recognized as a keyword", kw)
+		}
 	}
 }
 

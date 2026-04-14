@@ -7,6 +7,8 @@ package dbtest
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,9 +48,11 @@ func ExerciseDriver(t *testing.T, conn db.Conn, tableSchema, createTable, tableN
 	if err != nil {
 		t.Fatalf("schema: %v", err)
 	}
+	// Engines like Oracle/Firebird fold unquoted identifiers to
+	// uppercase, so compare case-insensitively.
 	found := false
 	for _, tr := range info.Tables {
-		if tr.Name == tableName {
+		if strings.EqualFold(tr.Name, tableName) {
 			found = true
 			break
 		}
@@ -64,8 +68,8 @@ func ExerciseDriver(t *testing.T, conn db.Conn, tableSchema, createTable, tableN
 	if len(cols) != 2 {
 		t.Fatalf("len(cols) = %d, want 2 (%+v)", len(cols), cols)
 	}
-	if cols[0].Name != "id" || cols[1].Name != "label" {
-		t.Errorf("cols = %+v, want [id, label]", cols)
+	if !strings.EqualFold(cols[0].Name, "id") || !strings.EqualFold(cols[1].Name, "label") {
+		t.Errorf("cols = %+v, want [id, label] (case-insensitive)", cols)
 	}
 
 	rows, err := conn.Query(ctx, "SELECT id, label FROM "+tableName+" ORDER BY id")
@@ -88,6 +92,12 @@ func ExerciseDriver(t *testing.T, conn db.Conn, tableSchema, createTable, tableN
 			gotIDs = append(gotIDs, int64(v))
 		case int:
 			gotIDs = append(gotIDs, int64(v))
+		case string:
+			n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			if err != nil {
+				t.Fatalf("row[0] = string %q, parse: %v", v, err)
+			}
+			gotIDs = append(gotIDs, n)
 		default:
 			t.Fatalf("row[0] = %T (%v), want integer", row[0], row[0])
 		}

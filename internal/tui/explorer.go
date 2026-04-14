@@ -683,10 +683,14 @@ func quoteChars(open rune) (string, string) {
 // both come from caps.
 func BuildSelect(caps db.Capabilities, t db.TableRef, limit int) string {
 	name := QualifiedName(caps, t)
-	if caps.LimitSyntax == db.LimitSyntaxSelectTop {
+	switch caps.LimitSyntax {
+	case db.LimitSyntaxSelectTop:
 		return "SELECT TOP " + itoa(limit) + " * FROM " + name + ";"
+	case db.LimitSyntaxFetchFirst:
+		return "SELECT * FROM " + name + " OFFSET 0 ROWS FETCH NEXT " + itoa(limit) + " ROWS ONLY;"
+	default:
+		return "SELECT * FROM " + name + " LIMIT " + itoa(limit) + ";"
 	}
-	return "SELECT * FROM " + name + " LIMIT " + itoa(limit) + ";"
 }
 
 // itoa avoids pulling in strconv for one call site.

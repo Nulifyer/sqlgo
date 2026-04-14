@@ -1,7 +1,7 @@
 // Package store is sqlgo's self-hosted SQLite backing store. Connections
 // (Phase 1.6), query history (Phase 1.7), and any future user-level state
 // live in a single sqlgo.db file inside the sqlgo config directory. We
-// dogfood the pure-Go SQLite driver we ship to users, so the store path
+// dogfood the same SQLite driver we ship to users, so the store path
 // gives us constant coverage of the read path with zero extra footprint.
 package store
 
@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"path/filepath"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/Nulifyer/sqlgo/internal/config"
 )
@@ -56,7 +56,7 @@ func Open(ctx context.Context) (*Store, error) {
 // OpenAt opens a store at the given filesystem path. Used by tests to
 // point the store at a temp directory.
 func OpenAt(ctx context.Context, path string) (*Store, error) {
-	sqlDB, err := sql.Open("sqlite", dsnFor(path))
+	sqlDB, err := sql.Open("sqlite3", dsnFor(path))
 	if err != nil {
 		return nil, fmt.Errorf("store open: %w", err)
 	}
@@ -81,7 +81,7 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// dsnFor builds a modernc.org/sqlite URI DSN with the pragmas we want on
+// dsnFor builds a mattn/go-sqlite3 URI DSN with the pragmas we want on
 // every store connection. Forward slashes are used for Windows paths so
 // the URI parses cleanly; sqlite accepts either separator on Windows.
 func dsnFor(path string) string {
@@ -93,7 +93,7 @@ func dsnFor(path string) string {
 		p = "/" + p
 	}
 	return "file:" + p +
-		"?_pragma=foreign_keys(1)" +
-		"&_pragma=journal_mode(wal)" +
-		"&_pragma=busy_timeout(5000)"
+		"?_foreign_keys=1" +
+		"&_journal_mode=WAL" +
+		"&_busy_timeout=5000"
 }
