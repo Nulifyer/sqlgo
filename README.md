@@ -54,7 +54,7 @@ No mouse required. No Electron. No cgo. One static binary.
 - **Export** -- CSV, TSV, JSON, and Markdown. Format is chosen from the output path extension.
 
 ### Power Features
-- **SSH tunneling** -- optional jump host per connection with password or key-file auth and TOFU host-key prompts. `ssh-agent` is not supported; supply a key file or password.
+- **SSH tunneling** -- optional jump host per connection with password or key-file auth and TOFU host-key prompts. `ssh-agent` is not supported; supply a key file or password. See [docs/ssh-tunneling.md](docs/ssh-tunneling.md).
 - **OS keyring** -- passwords are stored in the system keychain when available (falls back to plain store with a warning)
 - **Query history** -- last 1000 queries per connection, FTS5-indexed, retrievable from the history overlay
 - **EXPLAIN overlay** -- run the current query through its engine's explain path (Postgres, MySQL, SQLite; MSSQL is not supported)
@@ -164,6 +164,8 @@ Passwords go to the OS keyring when one is available (macOS Keychain, Windows Cr
 ---
 
 ## Development
+
+For a high-level tour of the event loop, layer stack, and async boundaries, see [docs/architecture.md](docs/architecture.md). For adding a new engine, see [docs/adding-a-db-adapter.md](docs/adding-a-db-adapter.md).
 
 ### Prereqs
 - Go (version tracked in `go.mod`)
