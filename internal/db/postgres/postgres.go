@@ -52,16 +52,18 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	return conn, nil
 }
 
-// schemaQuery: user tables/views only. Excludes pg_catalog /
-// information_schema / pg_toast% / pg_temp_%.
+// schemaQuery: user + system tables/views. pg_catalog and
+// information_schema are flagged is_system=1 so the explorer groups
+// them under Sys. pg_toast% / pg_temp_% are still excluded — they're
+// implementation noise, not useful catalog views.
 const schemaQuery = `
 SELECT
     table_schema AS schema_name,
     table_name   AS name,
-    CASE WHEN table_type = 'VIEW' THEN 1 ELSE 0 END AS is_view
+    CASE WHEN table_type = 'VIEW' THEN 1 ELSE 0 END AS is_view,
+    CASE WHEN table_schema IN ('pg_catalog', 'information_schema') THEN 1 ELSE 0 END AS is_system
 FROM information_schema.tables
-WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-  AND table_schema NOT LIKE 'pg_toast%'
+WHERE table_schema NOT LIKE 'pg_toast%'
   AND table_schema NOT LIKE 'pg_temp_%'
 ORDER BY table_schema, table_name;
 `

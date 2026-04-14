@@ -53,14 +53,16 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	return conn, nil
 }
 
-// schemaQuery: user tables/views only. Excludes MySQL system DBs.
+// schemaQuery: user + system tables/views. MySQL system DBs
+// (mysql, information_schema, performance_schema, sys) are flagged
+// is_system=1 so the explorer groups them under Sys.
 const schemaQuery = `
 SELECT
     TABLE_SCHEMA AS schema_name,
     TABLE_NAME   AS name,
-    CASE WHEN TABLE_TYPE = 'VIEW' THEN 1 ELSE 0 END AS is_view
+    CASE WHEN TABLE_TYPE = 'VIEW' THEN 1 ELSE 0 END AS is_view,
+    CASE WHEN TABLE_SCHEMA IN ('mysql', 'information_schema', 'performance_schema', 'sys') THEN 1 ELSE 0 END AS is_system
 FROM information_schema.tables
-WHERE TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')
 ORDER BY TABLE_SCHEMA, TABLE_NAME;
 `
 

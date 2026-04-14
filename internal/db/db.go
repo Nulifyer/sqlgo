@@ -183,10 +183,14 @@ const (
 )
 
 // TableRef is a single table or view in the schema tree.
+// System is true for engine-internal catalogs (pg_catalog, sys,
+// information_schema, sqlite_* etc.) so the explorer can bucket
+// them under a "Sys" group instead of mixing with user objects.
 type TableRef struct {
 	Schema string
 	Name   string
 	Kind   TableKind
+	System bool
 }
 
 // SchemaInfo is a flat list of tables+views. The explorer groups by Schema

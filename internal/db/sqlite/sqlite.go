@@ -66,16 +66,17 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	return conn, nil
 }
 
-// schemaQuery lists user tables/views under the synthetic "main"
-// schema. sqlite_% (internal metadata, FTS shadow tables) filtered.
+// schemaQuery lists user + system tables/views under the synthetic
+// "main" schema. sqlite_% objects are flagged is_system=1 so the
+// explorer groups them under Sys.
 const schemaQuery = `
 SELECT
     'main' AS schema_name,
     name,
-    CASE WHEN type = 'view' THEN 1 ELSE 0 END AS is_view
+    CASE WHEN type = 'view' THEN 1 ELSE 0 END AS is_view,
+    CASE WHEN name LIKE 'sqlite_%' THEN 1 ELSE 0 END AS is_system
 FROM sqlite_master
 WHERE type IN ('table','view')
-  AND name NOT LIKE 'sqlite_%'
 ORDER BY name;
 `
 

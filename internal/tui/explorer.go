@@ -49,6 +49,12 @@ func (s subgroupKind) label() string {
 	return ""
 }
 
+// sysSchemaSentinel is the synthetic schema name used for the top-level
+// "Sys" pseudo-schema that groups every System-flagged table/view
+// regardless of its physical schema. Non-empty so renderExplorerLine
+// uses the schemas-mode indent for its subgroups/leaves.
+const sysSchemaSentinel = "\x00sys"
+
 // explorer renders a collapsible schema tree. Selection and scroll live on
 // the widget; the main layer reads them to know which table to prefill a
 // SELECT for.
@@ -100,6 +106,18 @@ func (e *explorer) SetSchema(info *db.SchemaInfo, depth db.SchemaDepth) {
 				if _, seen := e.expanded[k]; !seen {
 					e.expanded[k] = true
 				}
+			}
+		}
+		// Sys pseudo-schema starts collapsed — noisy and rarely what the
+		// user wants. Seed its subgroup expansion keys so reopening Sys
+		// later surfaces Tables/Views already expanded.
+		if _, seen := e.expanded[sysSchemaSentinel]; !seen {
+			e.expanded[sysSchemaSentinel] = false
+		}
+		for _, sg := range []subgroupKind{subgroupTables, subgroupViews} {
+			k := subgroupExpansionKey(sysSchemaSentinel, sg)
+			if _, seen := e.expanded[k]; !seen {
+				e.expanded[k] = true
 			}
 		}
 	}
@@ -271,26 +289,31 @@ func (e *explorer) rebuild() {
 	}
 	buckets := map[string]*schemaBucket{}
 	var schemas []string
+	sysBucket := &schemaBucket{}
 	for _, t := range e.info.Tables {
-		b := buckets[t.Schema]
-		if b == nil {
-			b = &schemaBucket{}
-			buckets[t.Schema] = b
-			schemas = append(schemas, t.Schema)
+		target := sysBucket
+		if !t.System {
+			b := buckets[t.Schema]
+			if b == nil {
+				b = &schemaBucket{}
+				buckets[t.Schema] = b
+				schemas = append(schemas, t.Schema)
+			}
+			target = b
 		}
 		if t.Kind == db.TableKindView {
-			b.views = append(b.views, t)
+			target.views = append(target.views, t)
 		} else {
-			b.tables = append(b.tables, t)
+			target.tables = append(target.tables, t)
 		}
 	}
 	sort.Strings(schemas)
 
 	if e.depth == db.SchemaDepthFlat {
-		// Merge every bucket into one synthetic "" schema so the Tables/
-		// Views subgroups contain everything. sqlite normally reports
-		// a single "main" schema, but we join across any rogue buckets
-		// defensively.
+		// Merge every user bucket into one synthetic "" schema so the
+		// Tables/Views subgroups contain everything. sqlite normally
+		// reports a single "main" schema, but we join across any rogue
+		// buckets defensively.
 		var allTables, allViews []db.TableRef
 		for _, s := range schemas {
 			allTables = append(allTables, buckets[s].tables...)
@@ -311,6 +334,23 @@ func (e *explorer) rebuild() {
 			b := buckets[s]
 			e.appendSubgroup(s, subgroupTables, b.tables)
 			e.appendSubgroup(s, subgroupViews, b.views)
+		}
+	}
+
+	// Sys pseudo-schema: rendered at the same level as user schemas
+	// (Schemas mode) or as a top-level peer to Tables/Views (Flat
+	// mode). The sentinel schema name is non-empty so renderExplorerLine
+	// uses the schemas-mode indent for its subgroups/leaves, giving a
+	// consistent look across both depth modes.
+	if len(sysBucket.tables) > 0 || len(sysBucket.views) > 0 {
+		e.items = append(e.items, explorerItem{
+			kind:       itemSchema,
+			label:      "Sys",
+			schemaName: sysSchemaSentinel,
+		})
+		if e.expanded[sysSchemaSentinel] {
+			e.appendSubgroup(sysSchemaSentinel, subgroupTables, sysBucket.tables)
+			e.appendSubgroup(sysSchemaSentinel, subgroupViews, sysBucket.views)
 		}
 	}
 
@@ -337,11 +377,11 @@ func (e *explorer) appendSubgroup(schema string, sg subgroupKind, entries []db.T
 	if !e.expanded[subgroupExpansionKey(schema, sg)] {
 		return
 	}
-	leafKind := itemTable
-	if sg == subgroupViews {
-		leafKind = itemView
-	}
 	for _, t := range entries {
+		leafKind := itemTable
+		if t.Kind == db.TableKindView {
+			leafKind = itemView
+		}
 		e.items = append(e.items, explorerItem{
 			kind:       leafKind,
 			label:      t.Name,

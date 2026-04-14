@@ -52,15 +52,25 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	return conn, nil
 }
 
-// schemaQuery: user tables/views only. Excludes sys/INFORMATION_SCHEMA.
+// schemaQuery: user + system tables/views. sys/INFORMATION_SCHEMA
+// are flagged is_system=1 for the explorer Sys group. Union the two
+// because INFORMATION_SCHEMA.TABLES itself does not list objects in
+// the sys schema.
+// Drive off sys.objects so is_ms_shipped routes dbo-schema system
+// tables (spt_*, MSreplication_options) into Sys correctly.
+// INFORMATION_SCHEMA views are accessible via the sys schema too;
+// flagged via o.is_ms_shipped. Filter on o.type for base tables and
+// views only.
 const schemaQuery = `
 SELECT
-	TABLE_SCHEMA AS [schema],
-	TABLE_NAME   AS name,
-	CASE WHEN TABLE_TYPE = 'VIEW' THEN 1 ELSE 0 END AS is_view
-FROM INFORMATION_SCHEMA.TABLES
-WHERE TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA')
-ORDER BY TABLE_SCHEMA, TABLE_NAME;
+	s.name AS [schema],
+	o.name AS name,
+	CASE WHEN o.type = 'V' THEN 1 ELSE 0 END AS is_view,
+	CASE WHEN o.is_ms_shipped = 1 OR s.name IN ('sys', 'INFORMATION_SCHEMA') THEN 1 ELSE 0 END AS is_system
+FROM sys.objects o
+JOIN sys.schemas s ON s.schema_id = o.schema_id
+WHERE o.type IN ('U','V')
+ORDER BY s.name, o.name;
 `
 
 // columnsQuery uses @p1/@p2 (go-mssqldb named placeholders).

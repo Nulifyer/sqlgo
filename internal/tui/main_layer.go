@@ -39,15 +39,21 @@ func (f FocusTarget) String() string {
 // editor. Panel focus switches are bound to Alt+1/2/3 so every printable
 // key stays available to the editor.
 type mainLayer struct {
-	// session is the per-tab state (editor, table, last-query summary)
-	// embedded so promoted fields keep m.editor / m.table / m.lastErr
-	// working without touching the ~136 existing call sites. Later phases
-	// swap this pointer to switch query tabs.
+	// session is the active tab's state (editor, table, last-query
+	// summary). Embedded so promoted fields keep m.editor / m.table /
+	// m.lastErr working without touching the existing call sites.
+	// Switching query tabs just swaps this pointer.
 	*session
+
+	// sessions is the ordered list of query tabs; activeTab indexes into
+	// it. Each session owns its own editor + result tabs + runner state
+	// so a long query in one tab doesn't stall another. There is always
+	// at least one session -- closing the last tab opens a blank one.
+	sessions  []*session
+	activeTab int
 
 	explorer     *explorer
 	focus        FocusTarget
-	status       string // transient query feedback ("running...", "3 row(s) in 12ms"); never replaces the hint line
 	pendingSpace bool
 
 	// editorFullscreen hides the explorer and results panels and
@@ -85,6 +91,7 @@ func (m *mainLayer) HandleInput(a *app, msg InputMsg) bool {
 	case PasteMsg:
 		if m.focus == FocusQuery && v.Text != "" {
 			m.editor.buf.InsertText(v.Text)
+			m.promoteActiveIfPreview()
 			return true
 		}
 	case MouseMsg:
@@ -148,7 +155,8 @@ func (m *mainLayer) handleMouse(a *app, msg MouseMsg) bool {
 	}
 	switch msg.Button {
 	case MouseButtonLeft:
-		if msg.Action == MouseActionPress {
+		switch msg.Action {
+		case MouseActionPress:
 			m.focus = target
 			m.pendingSpace = false
 			count := m.clicks.bump(msg)
@@ -156,8 +164,20 @@ func (m *mainLayer) handleMouse(a *app, msg MouseMsg) bool {
 			if target == FocusQuery {
 				m.dragTarget = FocusQuery
 			}
-		} else if msg.Action == MouseActionRelease {
+		case MouseActionRelease:
 			m.dragTarget = -1
+		}
+	case MouseButtonMiddle:
+		if msg.Action == MouseActionPress && target == FocusQuery && p.query.h > 3 {
+			strip := queryTabStripRect(p.query)
+			if msg.Y == strip.row {
+				for _, h := range m.queryTabHits(strip) {
+					if msg.X >= h.startCol && msg.X <= h.endCol {
+						m.closeTab(h.idx)
+						break
+					}
+				}
+			}
 		}
 	case MouseButtonWheelUp:
 		m.wheelPanel(a, target, -3, msg.Shift || msg.Alt)
@@ -194,8 +214,31 @@ func (m *mainLayer) handleLeftClick(a *app, t FocusTarget, msg MouseMsg, count i
 			}
 		}
 	case FocusQuery:
+		if p.query.h > 3 {
+			strip := queryTabStripRect(p.query)
+			if msg.Y == strip.row {
+				for _, h := range m.queryTabHits(strip) {
+					if msg.X >= h.startCol && msg.X <= h.endCol {
+						m.switchTab(h.idx)
+						break
+					}
+				}
+				return
+			}
+		}
 		m.editor.clickAt(p.query, msg.Y, msg.X, count)
 	case FocusResults:
+		if len(m.results) > 1 {
+			strip := resultTabStripRect(p.results)
+			if msg.Y == strip.row {
+				for _, h := range m.resultTabHits(strip) {
+					if msg.X >= h.startCol && msg.X <= h.endCol {
+						m.switchResult(h.idx)
+						return
+					}
+				}
+			}
+		}
 		if m.inErrorView(a) {
 			return
 		}
@@ -259,15 +302,84 @@ func (m *mainLayer) wheelQuery(a *app, delta int) {
 }
 
 func newMainLayer() *mainLayer {
+	sess := newSession()
 	m := &mainLayer{
-		session:  newSession(),
-		explorer: newExplorer(),
-		focus:    FocusQuery,
+		session:   sess,
+		sessions:  []*session{sess},
+		activeTab: 0,
+		explorer:  newExplorer(),
+		focus:     FocusQuery,
 	}
 	for _, r := range "SELECT @@VERSION AS version;" {
 		m.editor.buf.Insert(r)
 	}
 	return m
+}
+
+// newTab appends a fresh session and activates it. The embedded *session
+// swap keeps promoted fields (m.editor, m.table, ...) pointed at the new
+// tab so the existing call sites continue to resolve against the active
+// session.
+func (m *mainLayer) newTab() {
+	sess := newSession()
+	sess.title = m.nextTabTitle()
+	m.sessions = append(m.sessions, sess)
+	m.activeTab = len(m.sessions) - 1
+	m.session = sess
+}
+
+// nextTabTitle returns the lowest "Query N" label not already taken by
+// an existing tab. Closing tab 2 and opening a new one reuses "Query 2"
+// rather than marching the counter forward -- matches SSMS.
+func (m *mainLayer) nextTabTitle() string {
+	used := make(map[string]bool, len(m.sessions))
+	for _, s := range m.sessions {
+		used[s.title] = true
+	}
+	for i := 1; ; i++ {
+		t := fmt.Sprintf("Query %d", i)
+		if !used[t] {
+			return t
+		}
+	}
+}
+
+// switchTab activates the tab at idx (clamped). No-op if out of range or
+// already active. Swaps the embedded *session pointer.
+func (m *mainLayer) switchTab(idx int) {
+	if idx < 0 || idx >= len(m.sessions) || idx == m.activeTab {
+		return
+	}
+	m.activeTab = idx
+	m.session = m.sessions[idx]
+}
+
+// closeTab removes the tab at idx. A running query on that tab is
+// cancelled first so the goroutine unwinds cleanly. Closing the last
+// tab opens a fresh blank one so the invariant len(sessions) >= 1
+// holds everywhere else.
+func (m *mainLayer) closeTab(idx int) {
+	if idx < 0 || idx >= len(m.sessions) {
+		return
+	}
+	s := m.sessions[idx]
+	if s.running && s.cancel != nil {
+		s.cancel()
+	}
+	m.sessions = append(m.sessions[:idx], m.sessions[idx+1:]...)
+	if len(m.sessions) == 0 {
+		fresh := newSession()
+		m.sessions = []*session{fresh}
+		m.activeTab = 0
+		m.session = fresh
+		return
+	}
+	if m.activeTab >= len(m.sessions) {
+		m.activeTab = len(m.sessions) - 1
+	} else if idx < m.activeTab {
+		m.activeTab--
+	}
+	m.session = m.sessions[m.activeTab]
 }
 
 func (m *mainLayer) Draw(a *app, c *cellbuf) {
@@ -277,16 +389,32 @@ func (m *mainLayer) Draw(a *app, c *cellbuf) {
 	}
 	p := computeLayout(a.term.width, a.term.height)
 	drawFrame(c, p.explorer, "Explorer", m.focus == FocusExplorer)
-	drawFrameInfo(c, p.query, "Query", m.queryRightInfo(), m.focus == FocusQuery)
-	drawFrameInfo(c, p.results, m.resultsTitle(), m.resultsRightInfo(a), m.focus == FocusResults)
+	drawFrameInfo(c, p.query, "", m.queryRightInfo(), m.focus == FocusQuery)
+	resultsTitle := ""
+	if len(m.results) == 0 {
+		resultsTitle = m.resultsTitle()
+	}
+	drawFrameInfo(c, p.results, resultsTitle, m.resultsRightInfo(a), m.focus == FocusResults)
 
 	// Show the editor cursor whenever the Query panel is focused. If an
 	// overlay is stacked on top of us, its cell buffer will be the topmost
 	// one during compositing and the main layer's cursor request gets
 	// discarded automatically.
 	m.explorer.draw(c, p.explorer, m.focus == FocusExplorer)
+
+	// Paint query tab labels directly onto the top border row of the
+	// Query frame, replacing the static "Query" title. Saves a content
+	// row; the editor keeps the full inner panel.
+	m.drawQueryTabs(c, queryTabStripRect(p.query))
 	m.editor.draw(c, p.query, m.focus == FocusQuery)
-	if !a.running && m.lastErr != "" && m.lastErr != "cancelled" {
+
+	// Paint result tab labels onto the top border of the Results frame,
+	// mirroring the query tab treatment. Keeps the full inner panel for
+	// the table / error view.
+	if len(m.results) > 0 {
+		m.drawResultTabs(c, resultTabStripRect(p.results))
+	}
+	if !m.running && m.lastErr != "" && m.lastErr != "cancelled" {
 		m.drawResultsError(c, p.results)
 	} else {
 		m.table.draw(c, p.results)
@@ -298,6 +426,147 @@ func (m *mainLayer) Draw(a *app, c *cellbuf) {
 	c.setFg(colorStatusBar)
 	c.writeAt(p.status.row, p.status.col, m.statusText(a, p.status.w))
 	c.resetStyle()
+}
+
+// queryTabStripRect returns the top-border row of the Query panel,
+// offset 2 cols in from the left corner. The tab strip is painted
+// directly on the frame border in place of a static title.
+func queryTabStripRect(q rect) rect {
+	if q.w < 5 {
+		return rect{row: q.row, col: q.col, w: 0, h: 1}
+	}
+	return rect{row: q.row, col: q.col + 2, w: q.w - 4, h: 1}
+}
+
+// queryTabLabel formats a session's label for the query tab strip.
+// Wraps the title in " " for spacing and brackets the active tab so it
+// still reads on terminals without color. A trailing "+" hint tab is
+// rendered separately by drawQueryTabs.
+func queryTabLabel(s *session, active bool) string {
+	lbl := fmt.Sprintf(" %s ", s.title)
+	if active {
+		lbl = "[" + lbl[1:len(lbl)-1] + "]"
+	}
+	return lbl
+}
+
+// queryTabHits returns the (sessionIndex, startCol, endCol) of each
+// visible query tab given the strip rect. Used by mouse hit-tests.
+// endCol is inclusive.
+func (m *mainLayer) queryTabHits(r rect) []queryTabHit {
+	if r.w < 3 {
+		return nil
+	}
+	hits := make([]queryTabHit, 0, len(m.sessions))
+	col := r.col
+	for i, s := range m.sessions {
+		lbl := queryTabLabel(s, i == m.activeTab)
+		remaining := r.col + r.w - col
+		if remaining < 3 {
+			break
+		}
+		if len(lbl) > remaining {
+			lbl = lbl[:remaining]
+		}
+		hits = append(hits, queryTabHit{idx: i, startCol: col, endCol: col + len(lbl) - 1})
+		col += len(lbl)
+	}
+	return hits
+}
+
+type queryTabHit struct {
+	idx      int
+	startCol int
+	endCol   int
+}
+
+// drawQueryTabs renders the tab strip at the top of the Query pane.
+// Mirrors drawResultTabs but indexes m.sessions/m.activeTab.
+func (m *mainLayer) drawQueryTabs(c *cellbuf, r rect) {
+	if r.w < 3 || len(m.sessions) == 0 {
+		return
+	}
+	for _, h := range m.queryTabHits(r) {
+		s := m.sessions[h.idx]
+		lbl := queryTabLabel(s, h.idx == m.activeTab)
+		if len(lbl) > h.endCol-h.startCol+1 {
+			lbl = lbl[:h.endCol-h.startCol+1]
+		}
+		fg := colorTitleUnfocused
+		if h.idx == m.activeTab {
+			fg = colorTitleFocused
+		}
+		st := Style{FG: fg, BG: ansiDefaultBG}
+		if s.preview {
+			// Underline signals "preview tab — will be replaced by the
+			// next explorer click unless you edit". Mirrors VSCode's
+			// italic preview-tab title, which terminals here don't
+			// reliably support.
+			st.Attrs |= attrUnderline
+		}
+		c.writeStyled(r.row, h.startCol, lbl, st)
+	}
+}
+
+// resultTabStripRect returns the top-border row of the Results panel,
+// offset 2 cols in from the left corner. Mirrors queryTabStripRect --
+// result tabs paint on the frame border in place of a static title.
+func resultTabStripRect(p rect) rect {
+	if p.w < 5 {
+		return rect{row: p.row, col: p.col, w: 0, h: 1}
+	}
+	return rect{row: p.row, col: p.col + 2, w: p.w - 4, h: 1}
+}
+
+// resultTabLabel formats a result tab's label. Active tab gets square
+// brackets so it reads without color.
+func resultTabLabel(t *resultTab, active bool) string {
+	lbl := fmt.Sprintf(" %s ", resultTabTitle(t))
+	if active {
+		lbl = "[" + lbl[1:len(lbl)-1] + "]"
+	}
+	return lbl
+}
+
+// resultTabHits returns per-tab click targets given the strip rect.
+func (m *mainLayer) resultTabHits(r rect) []queryTabHit {
+	if r.w < 3 {
+		return nil
+	}
+	hits := make([]queryTabHit, 0, len(m.results))
+	col := r.col
+	for i, t := range m.results {
+		lbl := resultTabLabel(t, i == m.activeResult)
+		remaining := r.col + r.w - col
+		if remaining < 3 {
+			break
+		}
+		if len(lbl) > remaining {
+			lbl = lbl[:remaining]
+		}
+		hits = append(hits, queryTabHit{idx: i, startCol: col, endCol: col + len(lbl) - 1})
+		col += len(lbl)
+	}
+	return hits
+}
+
+// drawResultTabs renders the tab strip that appears across the top of the
+// Results pane when a query produced more than one result set.
+func (m *mainLayer) drawResultTabs(c *cellbuf, r rect) {
+	if r.w < 3 || len(m.results) == 0 {
+		return
+	}
+	for _, h := range m.resultTabHits(r) {
+		lbl := resultTabLabel(m.results[h.idx], h.idx == m.activeResult)
+		if len(lbl) > h.endCol-h.startCol+1 {
+			lbl = lbl[:h.endCol-h.startCol+1]
+		}
+		fg := colorTitleUnfocused
+		if h.idx == m.activeResult {
+			fg = colorTitleFocused
+		}
+		c.writeStyled(r.row, h.startCol, lbl, Style{FG: fg, BG: ansiDefaultBG})
+	}
 }
 
 // drawFullscreen renders the editor filling the entire terminal (minus
@@ -326,7 +595,7 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 	// Ctrl+C cancels a running query. When no query is running, it
 	// falls through so the editor can use Ctrl+C as "copy selection"
 	// without stealing it back from the cancel binding.
-	if k.Ctrl && k.Rune == 'c' && a.running {
+	if k.Ctrl && k.Rune == 'c' && m.running {
 		a.cancelQuery()
 		return
 	}
@@ -334,6 +603,41 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		a.runQuery()
 		return
 	}
+	// Query-tab management. Global so the user can switch tabs from
+	// any focus without first returning to the Query pane. Ctrl+T new,
+	// Ctrl+W closes the active tab, Ctrl+PgUp/PgDn cycle.
+	if k.Ctrl && k.Kind == KeyRune && k.Rune == 't' {
+		m.newTab()
+		m.focus = FocusQuery
+		return
+	}
+	if k.Ctrl && k.Kind == KeyRune && k.Rune == 'w' {
+		m.closeTab(m.activeTab)
+		m.focus = FocusQuery
+		return
+	}
+	// Ctrl+PgUp / Ctrl+PgDn cycle the "tab-like thing" in the focused
+	// pane: Query focus cycles session tabs, Results focus cycles
+	// result sets. Explorer focus ignores them.
+	if k.Ctrl && (k.Kind == KeyPgUp || k.Kind == KeyPgDn) {
+		dir := 1
+		if k.Kind == KeyPgUp {
+			dir = -1
+		}
+		switch m.focus {
+		case FocusQuery:
+			if n := len(m.sessions); n > 1 {
+				m.switchTab((m.activeTab + dir + n) % n)
+			}
+			return
+		case FocusResults:
+			if n := len(m.results); n > 1 {
+				m.switchResult((m.activeResult + dir + n) % n)
+			}
+			return
+		}
+	}
+
 	// Ctrl+K is the global command-menu prefix. Works from any focus,
 	// including the Query editor where Space is a literal character.
 	if k.Ctrl && k.Rune == 'k' {
@@ -395,6 +699,7 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 	if m.focus == FocusQuery {
 		if k.Ctrl && k.Rune == 'l' {
 			m.editor.buf.Clear()
+			m.promoteActiveIfPreview()
 			return
 		}
 		// Ctrl+F: find/replace. Seed with current selection if any.
@@ -407,7 +712,11 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 			a.pushLayer(fl)
 			return
 		}
+		before := m.editor.buf.Text()
 		m.editor.handleInsert(a, k)
+		if m.editor.buf.Text() != before {
+			m.promoteActiveIfPreview()
+		}
 		return
 	}
 
@@ -587,8 +896,8 @@ func (m *mainLayer) copyAllResults(a *app) {
 
 // inErrorView reports whether the Results pane is currently showing the
 // error view instead of the table.
-func (m *mainLayer) inErrorView(a *app) bool {
-	return !a.running && m.lastErr != "" && m.lastErr != "cancelled"
+func (m *mainLayer) inErrorView(_ *app) bool {
+	return !m.running && m.lastErr != "" && m.lastErr != "cancelled"
 }
 
 // handleResultsErrorKey processes keys while the results pane is in
@@ -687,12 +996,15 @@ func (m *mainLayer) formatQuery() {
 		return
 	}
 	m.editor.buf.SetText(formatted)
+	m.promoteActiveIfPreview()
 	m.status = "formatted"
 }
 
 // prefillSelectFromExplorer writes a driver-aware SELECT for the highlighted
-// table into the editor and moves focus to Query. No-op if nothing selectable
-// is under the cursor.
+// table into the editor and moves focus to Query. Uses a preview tab (VSCode-
+// style): if a preview tab already exists its buffer is replaced in place,
+// otherwise a new preview tab is opened. The tab is promoted to a permanent
+// tab on the first real edit. No-op if nothing selectable is under the cursor.
 func (m *mainLayer) prefillSelectFromExplorer(a *app) {
 	t, ok := m.explorer.Selected()
 	if !ok {
@@ -702,8 +1014,38 @@ func (m *mainLayer) prefillSelectFromExplorer(a *app) {
 	if a.conn != nil {
 		caps = a.conn.Capabilities()
 	}
-	m.editor.buf.SetText(sqltok.Format(BuildSelect(caps, t, defaultSelectLimit)))
+	sql := sqltok.Format(BuildSelect(caps, t, defaultSelectLimit))
+
+	// Reuse an existing preview tab if one is open, else spawn a new
+	// one. Permanent tabs are never clobbered.
+	prev := -1
+	for i, s := range m.sessions {
+		if s.preview {
+			prev = i
+			break
+		}
+	}
+	if prev < 0 {
+		sess := newSession()
+		sess.preview = true
+		m.sessions = append(m.sessions, sess)
+		prev = len(m.sessions) - 1
+	}
+	sess := m.sessions[prev]
+	sess.title = t.Name
+	sess.editor.buf.SetText(sql)
+	m.activeTab = prev
+	m.session = sess
 	m.focus = FocusQuery
+}
+
+// promoteActiveIfPreview marks the active tab as permanent. Called after
+// any real editor mutation so a user typing into a preview tab converts
+// it to a regular tab, matching VSCode's single-click preview promotion.
+func (m *mainLayer) promoteActiveIfPreview() {
+	if m.session != nil && m.session.preview {
+		m.session.preview = false
+	}
 }
 
 // handleSpace dispatches the second key of the space-menu prefix.
@@ -779,8 +1121,8 @@ func (m *mainLayer) queryRightInfo() string {
 	return fmt.Sprintf("Ln %d, Col %d", row+1, col+1)
 }
 
-func (m *mainLayer) resultsRightInfo(a *app) string {
-	if a.running {
+func (m *mainLayer) resultsRightInfo(_ *app) string {
+	if m.running {
 		return fmt.Sprintf("streaming %d rows / %d cols", m.table.RowCount(), m.table.ColCount())
 	}
 	if !m.lastHasResult {
@@ -881,71 +1223,51 @@ func hintIf(cond bool, h string) string {
 	return ""
 }
 
-func (m *mainLayer) explorerHints(a *app) string {
-	connected := a.conn != nil
+func (m *mainLayer) explorerHints(_ *app) string {
 	selectHint := ""
 	switch m.explorer.SelectedKind() {
 	case itemTable, itemView:
-		selectHint = "Enter/s=SELECT"
+		selectHint = "Enter=SELECT"
 	case itemSchema, itemSubgroup:
 		selectHint = "Enter=expand"
 	}
 	return joinHints(
+		"F1=help",
 		"Ctrl+Q=quit",
-		"Ctrl+K=menu",
-		hintAlwaysFocus(),
-		hintIf(len(m.explorer.items) > 0, "Up/Dn/PgUp/PgDn=move"),
 		selectHint,
-		hintIf(connected, "R=refresh"),
 		"Space=menu",
 	)
 }
 
 func (m *mainLayer) queryHints(a *app) string {
 	connected := a.conn != nil
-	running := a.running
+	running := m.running
 	hasText := m.editor.buf.LineCount() > 1 || len(m.editor.buf.Line(0)) > 0
-	hasSel := m.editor.buf.HasSelection()
 	return joinHints(
+		"F1=help",
 		"Ctrl+Q=quit",
-		"Ctrl+K=menu",
-		hintAlwaysFocus(),
 		hintIf(connected && !running, "F5=run"),
 		hintIf(running, "Ctrl+C=cancel"),
-		hintIf(hasSel, "Ctrl+C/X=copy/cut"),
-		hintIf(!hasSel, "Ctrl+V=paste"),
-		"Ctrl+Z/Y=undo/redo",
 		hintIf(hasText, "Alt+F=format"),
-		"Ctrl+Space=complete",
-		hintIf(hasText, "Ctrl+F=find"),
-		hintIf(hasText, "Ctrl+Alt+Up/Dn=multicursor"),
-		"F11=fullscreen",
-		hintIf(hasText, "Ctrl+L=clear"),
+		"Ctrl+T=new tab",
 	)
 }
 
 func (m *mainLayer) resultsHints(a *app) string {
 	if m.inErrorView(a) {
 		return joinHints(
+			"F1=help",
 			"Ctrl+Q=quit",
-			hintAlwaysFocus(),
-			"Up/Dn=scroll",
 			"y=copy error",
 			"Space=menu",
 		)
 	}
 	hasRows := m.table.RowCount() > 0
-	hasCols := m.table.HasColumns()
 	return joinHints(
+		"F1=help",
 		"Ctrl+Q=quit",
-		"Ctrl+K=menu",
-		hintAlwaysFocus(),
-		hintIf(hasRows, "Up/Dn/Lt/Rt=cell"),
 		hintIf(hasRows, "Enter=inspect"),
-		hintIf(hasRows, "y=cell Y=row Alt+A=all"),
-		hintIf(hasRows, "s=sort"),
-		hintIf(hasCols, "/=filter"),
-		hintIf(hasCols, "w=wrap"),
+		hintIf(hasRows, "y=copy"),
 		"Space=menu",
 	)
 }

@@ -30,12 +30,18 @@ import (
 type queryEventKind int
 
 const (
-	// evtStarted: Query() returned a cursor; the table has been Init()'d
-	// and rows will start flowing in via the query goroutine.
-	evtStarted queryEventKind = iota
+	// evtResultSetStart: a new result set is about to stream into the
+	// attached tab. The goroutine has already called Init() on the tab's
+	// table; the main loop needs to register the tab on the session so
+	// the user sees it in the tab bar.
+	evtResultSetStart queryEventKind = iota
+	// evtResultSetDone: the attached tab's result set finished. The main
+	// loop writes the per-tab summary (row count, elapsed, cap flags)
+	// from this event.
+	evtResultSetDone
 	// evtProgress: periodic row-count update. Non-authoritative and
 	// dropped if the main loop is busy -- the final count arrives in
-	// evtDone.
+	// evtResultSetDone.
 	evtProgress
 	// evtDone: the query has finished, either cleanly (err==nil) or with
 	// an error (including context.Canceled on user cancel).
@@ -52,6 +58,13 @@ type queryEvent struct {
 	capReason string
 	err       error
 	elapsed   time.Duration
+	// tab is the *resultTab this event applies to. Set on
+	// evtResultSetStart / evtResultSetDone; nil otherwise.
+	tab *resultTab
+	// sess is the session (query tab) that produced this event.
+	// Required so the main loop can route the update to the right
+	// tab even when the user has switched away from it mid-query.
+	sess *session
 }
 
 // app is the top-level TUI state. The UI is composed of a stack of Layers;
@@ -93,12 +106,10 @@ type app struct {
 	// "driver closed" error first.
 	tunnel *sshtunnel.Tunnel
 
-	// Async query.
-	running        bool
-	resultCh       chan queryEvent
-	cancel         context.CancelFunc
-	lastQuerySQL   string    // SQL of the most recently started query (for history)
-	lastQueryStart time.Time // wall-clock start of that query
+	// Async query. The resultCh is a single pump shared across sessions;
+	// per-session runner state (running/cancel/lastQuerySQL/lastQueryStart)
+	// lives on *session so parallel tabs don't fight over one cancel handle.
+	resultCh chan queryEvent
 
 	// columnCache memoizes editor autocomplete lookups.
 	// Cleared on disconnect so fresh schema wins.
@@ -620,9 +631,7 @@ func (a *app) connectTo(c config.Connection) {
 	m := a.mainLayerPtr()
 	m.status = "connected"
 	m.editor.buf.Clear()
-	m.table.Clear()
-	m.lastHasResult = false
-	m.lastErr = ""
+	m.resetResults()
 	m.focus = FocusExplorer
 	a.loadSchema()
 }
@@ -645,10 +654,8 @@ func (a *app) disconnect() {
 		a.columnCache.clear()
 	}
 	m := a.mainLayerPtr()
-	m.table.Clear()
+	m.resetResults()
 	m.explorer.SetSchema(nil, db.SchemaDepthSchemas)
-	m.lastHasResult = false
-	m.lastErr = ""
 }
 
 // loadSchema fetches the schema list from the active connection and hands it
@@ -680,78 +687,100 @@ func (a *app) loadSchema() {
 // cursor throws away any buffered rows the driver hasn't handed us yet.
 func (a *app) runQuery() {
 	m := a.mainLayerPtr()
-	if a.running {
+	sess := m.session
+	if sess.running {
 		return
 	}
 	if a.conn == nil {
-		m.status = "no connection: press space then c to connect"
+		sess.status = "no connection: press space then c to connect"
 		return
 	}
-	sql := strings.TrimSpace(m.editor.buf.Text())
+	sql := strings.TrimSpace(sess.editor.buf.Text())
 	if sql == "" {
-		m.status = "nothing to run"
+		sess.status = "nothing to run"
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	a.cancel = cancel
-	a.running = true
-	a.lastQuerySQL = sql
-	a.lastQueryStart = time.Now()
-	m.table.Clear()
-	m.lastHasResult = false
-	m.lastErr = ""
-	m.status = "running query…"
-	start := a.lastQueryStart
+	sess.cancel = cancel
+	sess.running = true
+	sess.lastQuerySQL = sql
+	sess.lastQueryStart = time.Now()
+	sess.resetResults()
+	sess.status = "running query…"
+	start := sess.lastQueryStart
 
-	tbl := m.table
+	firstTab := sess.results[0]
 	conn := a.conn
 	resultCh := a.resultCh
 	go func() {
 		defer cancel()
 		rows, err := conn.Query(ctx, sql)
 		if err != nil {
-			resultCh <- queryEvent{kind: evtDone, err: err, elapsed: time.Since(start)}
+			resultCh <- queryEvent{kind: evtDone, sess: sess, err: err, elapsed: time.Since(start)}
 			return
 		}
 		defer rows.Close()
 
-		tbl.Init(rows.Columns())
-		resultCh <- queryEvent{kind: evtStarted, elapsed: time.Since(start)}
+		totalLoaded := 0
+		setIdx := 0
+		for {
+			setIdx++
+			var tab *resultTab
+			if setIdx == 1 {
+				// First set reuses the placeholder tab that resetResults
+				// seeded on the main goroutine; main already knows about
+				// it, so evtResultSetStart is informational.
+				tab = firstTab
+			} else {
+				tab = newResultTab(nextResultTitle(setIdx))
+			}
+			tab.table.Init(rows.Columns())
+			resultCh <- queryEvent{kind: evtResultSetStart, sess: sess, tab: tab, elapsed: time.Since(start)}
 
-		loaded := 0
-		lastReport := time.Now()
-		for rows.Next() {
-			row, scanErr := rows.Scan()
-			if scanErr != nil {
-				tbl.Done(scanErr)
-				resultCh <- queryEvent{kind: evtDone, err: scanErr, loaded: loaded, elapsed: time.Since(start)}
-				return
-			}
-			if !tbl.Append(row) {
-				tbl.Done(nil)
-				resultCh <- queryEvent{kind: evtDone, loaded: loaded, capped: true, capReason: tbl.CapReason(), elapsed: time.Since(start)}
-				return
-			}
-			loaded++
-			// Non-blocking progress pings wake the main loop for a
-			// redraw so the user watches rows stream in live. If the
-			// channel is full we skip -- evtDone will carry the final
-			// count anyway.
-			if time.Since(lastReport) > progressThrottle {
-				select {
-				case resultCh <- queryEvent{kind: evtProgress, loaded: loaded}:
-				default:
+			loaded := 0
+			lastReport := time.Now()
+			capped := false
+			capReason := ""
+			for rows.Next() {
+				row, scanErr := rows.Scan()
+				if scanErr != nil {
+					tab.table.Done(scanErr)
+					resultCh <- queryEvent{kind: evtResultSetDone, sess: sess, tab: tab, err: scanErr, loaded: loaded, elapsed: time.Since(start)}
+					resultCh <- queryEvent{kind: evtDone, sess: sess, err: scanErr, loaded: totalLoaded + loaded, elapsed: time.Since(start)}
+					return
 				}
-				lastReport = time.Now()
+				if !tab.table.Append(row) {
+					capped = true
+					capReason = tab.table.CapReason()
+					break
+				}
+				loaded++
+				if time.Since(lastReport) > progressThrottle {
+					select {
+					case resultCh <- queryEvent{kind: evtProgress, sess: sess, loaded: totalLoaded + loaded}:
+					default:
+					}
+					lastReport = time.Now()
+				}
+			}
+			if rerr := rows.Err(); rerr != nil {
+				tab.table.Done(rerr)
+				resultCh <- queryEvent{kind: evtResultSetDone, sess: sess, tab: tab, err: rerr, loaded: loaded, elapsed: time.Since(start)}
+				resultCh <- queryEvent{kind: evtDone, sess: sess, err: rerr, loaded: totalLoaded + loaded, elapsed: time.Since(start)}
+				return
+			}
+			tab.table.Done(nil)
+			totalLoaded += loaded
+			resultCh <- queryEvent{kind: evtResultSetDone, sess: sess, tab: tab, loaded: loaded, capped: capped, capReason: capReason, elapsed: time.Since(start)}
+
+			if capped {
+				break
+			}
+			if !rows.NextResultSet() {
+				break
 			}
 		}
-		if err := rows.Err(); err != nil {
-			tbl.Done(err)
-			resultCh <- queryEvent{kind: evtDone, err: err, loaded: loaded, elapsed: time.Since(start)}
-			return
-		}
-		tbl.Done(nil)
-		resultCh <- queryEvent{kind: evtDone, loaded: loaded, elapsed: time.Since(start)}
+		resultCh <- queryEvent{kind: evtDone, sess: sess, loaded: totalLoaded, elapsed: time.Since(start)}
 	}()
 }
 
@@ -760,11 +789,12 @@ func (a *app) runQuery() {
 // false mid-stream; the goroutine's deferred rows.Close() then throws
 // away any rows the driver had buffered ahead of us.
 func (a *app) cancelQuery() {
-	if !a.running || a.cancel == nil {
+	sess := a.mainLayerPtr().session
+	if !sess.running || sess.cancel == nil {
 		return
 	}
-	a.cancel()
-	a.mainLayerPtr().status = "cancelling…"
+	sess.cancel()
+	sess.status = "cancelling…"
 }
 
 // handleQueryEvent updates the footer status as events arrive. The table
@@ -772,51 +802,79 @@ func (a *app) cancelQuery() {
 // this function only touches app.running / status text and, on evtDone,
 // records the run in persistent history.
 func (a *app) handleQueryEvent(e queryEvent) {
-	m := a.mainLayerPtr()
+	sess := e.sess
+	if sess == nil {
+		return
+	}
 	switch e.kind {
-	case evtStarted:
-		m.status = "streaming…"
-		m.lastErr = ""
-		m.lastErrLine = 0
-		m.resultsErrScroll = 0
+	case evtResultSetStart:
+		sess.status = "streaming…"
+		if e.tab == nil {
+			return
+		}
+		// First set reuses the placeholder tab already in results; any
+		// subsequent set arrives as a new tab we append + activate so
+		// the user sees rows streaming into it live.
+		found := false
+		for _, t := range sess.results {
+			if t == e.tab {
+				found = true
+				break
+			}
+		}
+		if !found {
+			sess.appendResultTab(e.tab)
+		}
 	case evtProgress:
-		m.status = fmt.Sprintf("streaming… %d row(s)", e.loaded)
-	case evtDone:
-		a.running = false
-		a.cancel = nil
-		m.lastRowCount = e.loaded
-		m.lastColCount = m.table.ColCount()
-		m.lastElapsed = e.elapsed
-		m.lastCapped = e.capped
-		m.lastCapReason = e.capReason
-		m.lastHasResult = true
-		m.lastErr = ""
-		m.lastErrLine = 0
+		sess.status = fmt.Sprintf("streaming… %d row(s)", e.loaded)
+	case evtResultSetDone:
+		if e.tab == nil {
+			return
+		}
+		e.tab.lastRowCount = e.loaded
+		e.tab.lastColCount = e.tab.table.ColCount()
+		e.tab.lastElapsed = e.elapsed
+		e.tab.lastCapped = e.capped
+		e.tab.lastCapReason = e.capReason
+		e.tab.lastHasResult = true
+		e.tab.resultsErrScroll = 0
 		if e.err != nil {
 			if errors.Is(e.err, context.Canceled) {
-				m.status = fmt.Sprintf("cancelled after %d row(s)", e.loaded)
-				m.lastErr = "cancelled"
-			} else if e.loaded > 0 {
-				m.status = fmt.Sprintf("error after %d row(s): %s", e.loaded, e.err)
-				m.lastErr = e.err.Error()
-				m.lastErrLine = errinfo.Line(e.err, a.lastQuerySQL)
+				e.tab.lastErr = "cancelled"
 			} else {
-				m.status = fmt.Sprintf("error: %s", e.err)
-				m.lastErr = e.err.Error()
-				m.lastErrLine = errinfo.Line(e.err, a.lastQuerySQL)
+				e.tab.lastErr = e.err.Error()
+				e.tab.lastErrLine = errinfo.Line(e.err, sess.lastQuerySQL)
 			}
 		} else {
-			m.status = ""
+			e.tab.lastErr = ""
+			e.tab.lastErrLine = 0
 		}
-		a.recordHistory(e)
+	case evtDone:
+		sess.running = false
+		sess.cancel = nil
+		if e.err != nil {
+			if errors.Is(e.err, context.Canceled) {
+				sess.status = fmt.Sprintf("cancelled after %d row(s)", e.loaded)
+			} else if e.loaded > 0 {
+				sess.status = fmt.Sprintf("error after %d row(s): %s", e.loaded, e.err)
+			} else {
+				sess.status = fmt.Sprintf("error: %s", e.err)
+			}
+		} else if len(sess.results) > 1 {
+			sess.status = fmt.Sprintf("%d result set(s) / %d row(s) in %s",
+				len(sess.results), e.loaded, e.elapsed.Round(time.Millisecond))
+		} else {
+			sess.status = ""
+		}
+		a.recordHistory(sess, e)
 	}
 }
 
 // recordHistory persists the just-finished query to the store's history
 // table. Failures here are logged to the status line but never block the
 // user -- history is a convenience, not a correctness requirement.
-func (a *app) recordHistory(e queryEvent) {
-	if a.store == nil || a.lastQuerySQL == "" {
+func (a *app) recordHistory(sess *session, e queryEvent) {
+	if a.store == nil || sess.lastQuerySQL == "" {
 		return
 	}
 	connName := ""
@@ -825,8 +883,8 @@ func (a *app) recordHistory(e queryEvent) {
 	}
 	entry := store.HistoryEntry{
 		ConnectionName: connName,
-		SQL:            a.lastQuerySQL,
-		ExecutedAt:     a.lastQueryStart.UTC(),
+		SQL:            sess.lastQuerySQL,
+		ExecutedAt:     sess.lastQueryStart.UTC(),
 		Elapsed:        e.elapsed,
 		RowCount:       int64(e.loaded),
 	}
@@ -836,9 +894,6 @@ func (a *app) recordHistory(e queryEvent) {
 	ctx, cancel := context.WithTimeout(context.Background(), storeHistoryTimeout)
 	defer cancel()
 	if err := a.store.RecordHistory(ctx, entry); err != nil {
-		// Append to status rather than overwriting -- the primary row
-		// count / error is more important than the history failure.
-		m := a.mainLayerPtr()
-		m.status += " (history: " + err.Error() + ")"
+		sess.status += " (history: " + err.Error() + ")"
 	}
 }

@@ -425,10 +425,14 @@ func (f *formatter) writeToken(tokens []Token, i int) int {
 		case ";":
 			// Semicolon lives on its own line at the base indent so
 			// the user can easily edit or remove it when stitching
-			// statements together.
+			// statements together. A blank line follows so batched
+			// statements are visually separated (tidy caps at 1).
 			f.newlineTo(f.baseIndent)
 			f.writeRaw(";")
-			f.newlineTo(f.baseIndent)
+			f.trimTrailingSpace()
+			f.buf.WriteString("\n\n")
+			f.atLine = true
+			f.pendingIndent = f.baseIndent
 		case ".":
 			f.trimTrailingSpace()
 			f.writeRaw(".")

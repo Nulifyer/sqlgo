@@ -112,11 +112,12 @@ func TestOpenInMemoryRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSchemaFiltersInternalObjects asserts that the schema query hides
-// sqlite-internal tables (e.g. sqlite_sequence from AUTOINCREMENT) and
-// that everything lands under the synthetic "main" schema so the
-// explorer's flat-depth rendering has a single consistent parent.
-func TestSchemaFiltersInternalObjects(t *testing.T) {
+// TestSchemaFlagsInternalObjects asserts that sqlite-internal tables
+// (e.g. sqlite_sequence from AUTOINCREMENT) are returned with
+// System=true so the explorer buckets them under Sys, and that
+// everything lands under the synthetic "main" schema so the explorer's
+// flat-depth rendering has a single consistent parent.
+func TestSchemaFlagsInternalObjects(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	d, err := db.Get(driverName)
@@ -141,21 +142,25 @@ func TestSchemaFiltersInternalObjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schema: %v", err)
 	}
-	if len(info.Tables) != 2 {
-		t.Fatalf("schema entries = %d, want 2 (got %+v)", len(info.Tables), info.Tables)
+	type seenEntry struct {
+		kind   db.TableKind
+		system bool
 	}
-	seen := map[string]db.TableKind{}
+	seen := map[string]seenEntry{}
 	for _, tr := range info.Tables {
 		if tr.Schema != syntheticSchema {
 			t.Errorf("schema = %q, want %q", tr.Schema, syntheticSchema)
 		}
-		seen[tr.Name] = tr.Kind
+		seen[tr.Name] = seenEntry{kind: tr.Kind, system: tr.System}
 	}
-	if k, ok := seen["thing"]; !ok || k != db.TableKindTable {
-		t.Errorf("expected table 'thing', got %v", seen)
+	if e, ok := seen["thing"]; !ok || e.kind != db.TableKindTable || e.system {
+		t.Errorf("expected user table 'thing', got %+v", seen)
 	}
-	if k, ok := seen["v_thing"]; !ok || k != db.TableKindView {
-		t.Errorf("expected view 'v_thing', got %v", seen)
+	if e, ok := seen["v_thing"]; !ok || e.kind != db.TableKindView || e.system {
+		t.Errorf("expected user view 'v_thing', got %+v", seen)
+	}
+	if e, ok := seen["sqlite_sequence"]; !ok || !e.system {
+		t.Errorf("expected system table 'sqlite_sequence', got %+v", seen)
 	}
 }
 

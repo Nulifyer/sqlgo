@@ -10,8 +10,10 @@ import (
 // SQLOptions holds engine-specific knobs for the shared sqlConn
 // wrapper. Adapters build one and pass it to OpenSQL.
 //
-// SchemaQuery must return (schema, name, is_view int). Flat-schema
-// engines synthesize a placeholder schema like "main".
+// SchemaQuery must return (schema, name, is_view int, is_system int).
+// Flat-schema engines synthesize a placeholder schema like "main".
+// is_system flags engine-internal catalogs (pg_catalog, sys, etc.)
+// so the explorer can group them under a Sys header.
 //
 // ColumnsQuery takes (schema, table) positional args and returns
 // (col_name, type_name). Placeholder style varies per driver.
@@ -58,17 +60,17 @@ func (c *sqlConn) Schema(ctx context.Context) (*SchemaInfo, error) {
 	var out []TableRef
 	for rows.Next() {
 		var (
-			schema, name string
-			isView       int
+			schema, name     string
+			isView, isSystem int
 		)
-		if err := rows.Scan(&schema, &name, &isView); err != nil {
+		if err := rows.Scan(&schema, &name, &isView, &isSystem); err != nil {
 			return nil, fmt.Errorf("schema scan: %w", err)
 		}
 		kind := TableKindTable
 		if isView != 0 {
 			kind = TableKindView
 		}
-		out = append(out, TableRef{Schema: schema, Name: name, Kind: kind})
+		out = append(out, TableRef{Schema: schema, Name: name, Kind: kind, System: isSystem != 0})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("schema rows: %w", err)
