@@ -84,6 +84,28 @@ type session struct {
 	editSchema   string
 	editName     string
 	editOriginal string
+
+	// sourcePath is the absolute filesystem path backing this tab when
+	// it was loaded from or saved to disk. Empty for scratch/query tabs
+	// that have never been written. savedText is the buffer contents at
+	// the last load/save; IsDirty compares it against editor.buf.Text().
+	sourcePath string
+	savedText  string
+}
+
+// IsDirty reports whether the editor buffer has unsaved changes relative
+// to the last load or save. A scratch tab (no sourcePath) is dirty only
+// once the user has typed something; that way an empty fresh "Query 1"
+// doesn't render the unsaved marker.
+func (s *session) IsDirty() bool {
+	if s == nil || s.editor == nil {
+		return false
+	}
+	cur := s.editor.buf.Text()
+	if s.sourcePath == "" && s.savedText == "" {
+		return cur != ""
+	}
+	return cur != s.savedText
 }
 
 func newSession() *session {

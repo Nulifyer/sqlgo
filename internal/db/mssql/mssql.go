@@ -54,6 +54,7 @@ var capabilities = db.Capabilities{
 	IdentifierQuote: '[',
 	SupportsCancel:  true,
 	SupportsTLS:     true,
+	ExplainFormat:   db.ExplainFormatMSSQLXML,
 	Dialect:         sqltok.DialectMSSQL,
 }
 
@@ -74,6 +75,7 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		TriggersQuery:      triggersQuery,
 		IsPermissionDenied: isPermissionDenied,
 		DefinitionFetcher:  fetchDefinition,
+		ExplainRunner:      runExplain,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mssql: %w", err)
@@ -171,6 +173,51 @@ func fetchDefinition(ctx context.Context, sqlDB *sql.DB, kind, schema, name stri
 		return "", fmt.Errorf("no definition available for %s %s.%s (may be encrypted or not found)", kind, schema, name)
 	}
 	return rewriteCreateOrAlter(def.String), nil
+}
+
+// runExplain pins a single connection, toggles SET SHOWPLAN_XML ON,
+// runs the target SQL (which returns the plan XML as one row instead
+// of executing), then turns SHOWPLAN off. The pin is required because
+// SHOWPLAN_XML is session state; a *sql.DB may hand the next call a
+// different pooled connection. Returns the single XML row as rows[0][0].
+func runExplain(ctx context.Context, sqlDB *sql.DB, query string) ([][]any, error) {
+	trimmed := strings.TrimRight(strings.TrimSpace(query), "; \t\r\n")
+	if trimmed == "" {
+		return nil, fmt.Errorf("explain: empty query")
+	}
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("explain pin conn: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SET SHOWPLAN_XML ON"); err != nil {
+		return nil, fmt.Errorf("set showplan_xml on: %w", err)
+	}
+	// Always try to turn SHOWPLAN off before releasing the conn back to
+	// the pool, even if the target query failed. Uses a background ctx
+	// so a cancelled parent doesn't leave the session in SHOWPLAN mode.
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), "SET SHOWPLAN_XML OFF")
+	}()
+	rows, err := conn.QueryContext(ctx, trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("explain query: %w", err)
+	}
+	defer rows.Close()
+	var out [][]any
+	for rows.Next() {
+		var xml sql.NullString
+		if err := rows.Scan(&xml); err != nil {
+			return nil, fmt.Errorf("explain scan: %w", err)
+		}
+		if xml.Valid {
+			out = append(out, []any{xml.String})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("explain rows: %w", err)
+	}
+	return out, nil
 }
 
 // rewriteCreateOrAlter finds the first CREATE token (case-insensitive, after any

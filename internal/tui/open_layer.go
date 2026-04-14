@@ -22,6 +22,12 @@ type openLayer struct {
 	status   string
 	scanErr  string
 
+	// marked is the set of abs paths toggled with Tab. When non-empty,
+	// Enter opens each marked file in its own editor tab instead of
+	// loading the highlighted entry into the current tab. Keyed by
+	// absolute path so marks survive filter changes.
+	marked map[string]bool
+
 	lastListTop int
 	lastListH   int
 	clicks      clickTracker
@@ -46,7 +52,7 @@ const openScanMaxDepth = 6
 const openScanMaxFiles = 2000
 
 func newOpenLayer(seed string) *openLayer {
-	ol := &openLayer{search: newInput(seed)}
+	ol := &openLayer{search: newInput(seed), marked: map[string]bool{}}
 	ol.scan()
 	ol.filter()
 	return ol
@@ -183,7 +189,11 @@ func (ol *openLayer) filter() {
 	case len(ol.results) == 0:
 		ol.status = "no matches"
 	default:
-		ol.status = fmt.Sprintf("%d / %d files", len(ol.results), len(ol.all))
+		if n := len(ol.marked); n > 0 {
+			ol.status = fmt.Sprintf("%d / %d files -- %d marked (Enter opens each in a new tab)", len(ol.results), len(ol.all), n)
+		} else {
+			ol.status = fmt.Sprintf("%d / %d files", len(ol.results), len(ol.all))
+		}
 	}
 }
 
@@ -262,12 +272,21 @@ func (ol *openLayer) Draw(a *app, c *cellbuf) {
 				break
 			}
 			e := ol.results[idx]
+			selMark := "  "
+			if idx == ol.selected {
+				selMark = "▶ "
+			}
+			pickMark := "  "
+			if ol.marked[e.abs] {
+				pickMark = "● "
+			}
+			line := truncate(selMark+pickMark+e.rel, boxW-4)
 			if idx == ol.selected {
 				c.setFg(colorBorderFocused)
-				c.writeAt(listTop+i, innerCol, truncate("▶ "+e.rel, boxW-4))
+				c.writeAt(listTop+i, innerCol, line)
 				c.resetStyle()
 			} else {
-				c.writeAt(listTop+i, innerCol, truncate("  "+e.rel, boxW-4))
+				c.writeAt(listTop+i, innerCol, line)
 			}
 		}
 	}
@@ -310,6 +329,9 @@ func (ol *openLayer) HandleKey(a *app, k Key) {
 			ol.selected = len(ol.results) - 1
 		}
 		return
+	case KeyTab:
+		ol.toggleMark()
+		return
 	case KeyEnter:
 		ol.load(a)
 		return
@@ -318,11 +340,36 @@ func (ol *openLayer) HandleKey(a *app, k Key) {
 	ol.filter()
 }
 
-// load resolves the target path: if the results list has a highlighted
-// entry, load it; otherwise treat the search box contents as a path and
-// load that directly. The direct-path fallback preserves the original
-// openLayer behavior for users who already know the file they want.
+// toggleMark flips the marked state for the highlighted entry and
+// refreshes the status line.
+func (ol *openLayer) toggleMark() {
+	if ol.selected < 0 || ol.selected >= len(ol.results) {
+		return
+	}
+	abs := ol.results[ol.selected].abs
+	if ol.marked[abs] {
+		delete(ol.marked, abs)
+	} else {
+		ol.marked[abs] = true
+	}
+	// Refresh the status line so the marked count stays current
+	// without re-running the filter.
+	if n := len(ol.marked); n > 0 {
+		ol.status = fmt.Sprintf("%d / %d files -- %d marked (Enter opens each in a new tab)", len(ol.results), len(ol.all), n)
+	} else {
+		ol.status = fmt.Sprintf("%d / %d files", len(ol.results), len(ol.all))
+	}
+}
+
+// load resolves the target path(s): if any entries are marked, each is
+// loaded into its own new editor tab; otherwise the highlighted entry
+// is loaded into the current tab, falling back to treating the search
+// box contents as a direct path if the results list is empty.
 func (ol *openLayer) load(a *app) {
+	if len(ol.marked) > 0 {
+		ol.loadMarked(a)
+		return
+	}
 	var path string
 	switch {
 	case len(ol.results) > 0 && ol.selected >= 0 && ol.selected < len(ol.results):
@@ -334,15 +381,84 @@ func (ol *openLayer) load(a *app) {
 		ol.status = "path is required"
 		return
 	}
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		path = filepath.Clean(abs)
+	}
+	m := a.mainLayerPtr()
+	if idx := m.findTabByPath(path); idx >= 0 {
+		m.switchTab(idx)
+		a.popLayer()
+		m.status = fmt.Sprintf("switched to open tab for %s", filepath.Base(path))
+		return
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		ol.status = "read failed: " + err.Error()
 		return
 	}
-	m := a.mainLayerPtr()
-	m.editor.buf.SetText(string(data))
+	text := string(data)
+	m.editor.buf.SetText(text)
+	m.session.sourcePath = path
+	m.session.savedText = text
+	m.session.title = filepath.Base(path)
 	a.popLayer()
 	m.status = fmt.Sprintf("loaded %d bytes from %s", len(data), path)
+}
+
+// loadMarked opens each marked entry in its own new editor tab.
+// Iterates ol.all for deterministic order (scan order, most-recent
+// first) rather than map iteration. Silently skips files that fail to
+// read and reports the count of loaded/skipped in the status line.
+func (ol *openLayer) loadMarked(a *app) {
+	m := a.mainLayerPtr()
+	var loaded, skipped, reused int
+	var lastErr string
+	lastIdx := -1
+	for _, e := range ol.all {
+		if !ol.marked[e.abs] {
+			continue
+		}
+		if idx := m.findTabByPath(e.abs); idx >= 0 {
+			reused++
+			lastIdx = idx
+			continue
+		}
+		data, err := os.ReadFile(e.abs)
+		if err != nil {
+			skipped++
+			lastErr = err.Error()
+			continue
+		}
+		m.newTab()
+		text := string(data)
+		m.editor.buf.SetText(text)
+		m.session.sourcePath = e.abs
+		m.session.savedText = text
+		m.session.title = filepath.Base(e.abs)
+		loaded++
+		lastIdx = m.activeTab
+	}
+	if loaded == 0 && reused == 0 {
+		if lastErr != "" {
+			ol.status = "read failed: " + lastErr
+		} else {
+			ol.status = "no files loaded"
+		}
+		return
+	}
+	if lastIdx >= 0 {
+		m.switchTab(lastIdx)
+	}
+	a.popLayer()
+	switch {
+	case skipped > 0:
+		m.status = fmt.Sprintf("opened %d new, %d already open (%d failed)", loaded, reused, skipped)
+	case reused > 0:
+		m.status = fmt.Sprintf("opened %d new, %d already open", loaded, reused)
+	default:
+		m.status = fmt.Sprintf("opened %d files in new tabs", loaded)
+	}
 }
 
 // HandleInput routes mouse events: wheel scrolls the selection; left
@@ -398,6 +514,7 @@ func (ol *openLayer) Hints(a *app) string {
 	return joinHints(
 		"type=search",
 		hintIf(hasResults, "Up/Dn/PgUp/PgDn=move"),
+		hintIf(hasResults, "Tab=mark"),
 		"Enter=load",
 		"Esc=cancel",
 	)

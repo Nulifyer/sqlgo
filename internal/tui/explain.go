@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -27,9 +29,8 @@ type explainTree struct {
 	raw  string
 }
 
-// runExplain wraps sql in the driver's EXPLAIN form, runs it
-// against the live connection with a 5s deadline, and parses the
-// rows into an explainTree. ExplainFormatNone drivers return an
+// runExplain calls the connection's Explain and parses the rows
+// into an explainTree. ExplainFormatNone drivers return an
 // "unsupported" sentinel tree.
 func (a *app) runExplain(sql string) (*explainTree, error) {
 	if a.conn == nil {
@@ -42,46 +43,18 @@ func (a *app) runExplain(sql string) (*explainTree, error) {
 		}, nil
 	}
 
-	wrapped := explainWrapSQL(caps.ExplainFormat, sql)
 	ctx, cancel := context.WithTimeout(context.Background(), explainTimeout)
 	defer cancel()
-	rows, err := a.conn.Query(ctx, wrapped)
+	raw, err := a.conn.Explain(ctx, sql)
 	if err != nil {
+		if errors.Is(err, db.ErrExplainUnsupported) {
+			return &explainTree{
+				root: &explainNode{label: "EXPLAIN not supported for " + a.conn.Driver()},
+			}, nil
+		}
 		return nil, fmt.Errorf("explain: %w", err)
 	}
-	defer rows.Close()
-
-	var raw [][]any
-	for rows.Next() {
-		r, err := rows.Scan()
-		if err != nil {
-			return nil, fmt.Errorf("explain scan: %w", err)
-		}
-		raw = append(raw, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("explain rows: %w", err)
-	}
-
 	return explainParse(caps.ExplainFormat, raw)
-}
-
-// explainWrapSQL builds the driver-specific EXPLAIN prefix.
-// Strips trailing semicolons + whitespace so the wrapper SQL
-// lands as one statement.
-func explainWrapSQL(format db.ExplainFormat, sql string) string {
-	trimmed := strings.TrimRightFunc(strings.TrimSpace(sql), func(r rune) bool {
-		return r == ';' || r == ' ' || r == '\t' || r == '\n'
-	})
-	switch format {
-	case db.ExplainFormatPostgresJSON:
-		return "EXPLAIN (FORMAT JSON) " + trimmed
-	case db.ExplainFormatMySQLJSON:
-		return "EXPLAIN FORMAT=JSON " + trimmed
-	case db.ExplainFormatSQLiteRows:
-		return "EXPLAIN QUERY PLAN " + trimmed
-	}
-	return trimmed
 }
 
 // explainParse dispatches to the format-specific parser.
@@ -93,8 +66,142 @@ func explainParse(format db.ExplainFormat, rows [][]any) (*explainTree, error) {
 		return parseMySQLExplain(rows)
 	case db.ExplainFormatSQLiteRows:
 		return parseSQLiteExplain(rows)
+	case db.ExplainFormatMSSQLXML:
+		return parseMSSQLExplain(rows)
 	}
 	return &explainTree{root: &explainNode{label: "unsupported format"}}, nil
+}
+
+// ShowPlanXML minimal schema: top-level ShowPlanXML has
+// BatchSequence -> Batch -> Statements -> StmtSimple, each with a
+// QueryPlan containing a single root RelOp. RelOp nests recursively.
+type mssqlShowPlan struct {
+	XMLName   xml.Name       `xml:"ShowPlanXML"`
+	Batches   []mssqlBatch   `xml:"BatchSequence>Batch"`
+}
+
+type mssqlBatch struct {
+	Statements []mssqlStmt `xml:"Statements>StmtSimple"`
+}
+
+type mssqlStmt struct {
+	StatementText     string       `xml:"StatementText,attr"`
+	StatementType     string       `xml:"StatementType,attr"`
+	StatementSubTreeCost string    `xml:"StatementSubTreeCost,attr"`
+	QueryPlan         *mssqlQPlan  `xml:"QueryPlan"`
+}
+
+type mssqlQPlan struct {
+	RelOp *mssqlRelOp `xml:"RelOp"`
+}
+
+// mssqlRelOp captures attributes on a single plan node. ShowPlanXML
+// wraps children in operator-specific elements (Hash, NestedLoops,
+// IndexScan, ...) so we capture the body as raw XML and re-scan it
+// for any nested <RelOp> tags rather than modelling every wrapper.
+type mssqlRelOp struct {
+	NodeID                    string `xml:"NodeId,attr"`
+	PhysicalOp                string `xml:"PhysicalOp,attr"`
+	LogicalOp                 string `xml:"LogicalOp,attr"`
+	EstimateRows              string `xml:"EstimateRows,attr"`
+	EstimateIO                string `xml:"EstimateIO,attr"`
+	EstimateCPU               string `xml:"EstimateCPU,attr"`
+	EstimatedTotalSubtreeCost string `xml:"EstimatedTotalSubtreeCost,attr"`
+	InnerXML                  string `xml:",innerxml"`
+}
+
+// parseMSSQLExplain parses the ShowPlanXML document returned by
+// SET SHOWPLAN_XML ON. Each StmtSimple becomes a top-level node;
+// RelOp children nest under it.
+func parseMSSQLExplain(rows [][]any) (*explainTree, error) {
+	if len(rows) == 0 || len(rows[0]) == 0 {
+		return nil, fmt.Errorf("explain: empty result")
+	}
+	raw := toString(rows[0][0])
+	var plan mssqlShowPlan
+	if err := xml.Unmarshal([]byte(raw), &plan); err != nil {
+		return nil, fmt.Errorf("explain parse: %w", err)
+	}
+	root := &explainNode{label: "query plan"}
+	for _, b := range plan.Batches {
+		for _, s := range b.Statements {
+			stmtNode := &explainNode{label: mssqlStmtLabel(s)}
+			if s.StatementSubTreeCost != "" {
+				stmtNode.details = append(stmtNode.details, "subtree cost "+s.StatementSubTreeCost)
+			}
+			if s.QueryPlan != nil && s.QueryPlan.RelOp != nil {
+				stmtNode.children = append(stmtNode.children, mssqlRelOpNode(*s.QueryPlan.RelOp))
+			}
+			root.children = append(root.children, stmtNode)
+		}
+	}
+	if len(root.children) == 0 {
+		root.label = "empty plan"
+	}
+	return &explainTree{root: root, raw: raw}, nil
+}
+
+func mssqlStmtLabel(s mssqlStmt) string {
+	if s.StatementType != "" {
+		return s.StatementType
+	}
+	if s.StatementText != "" {
+		return s.StatementText
+	}
+	return "statement"
+}
+
+func mssqlRelOpNode(r mssqlRelOp) *explainNode {
+	label := r.PhysicalOp
+	if r.LogicalOp != "" && r.LogicalOp != r.PhysicalOp {
+		label += " (" + r.LogicalOp + ")"
+	}
+	if label == "" {
+		label = "RelOp"
+	}
+	n := &explainNode{label: label}
+	addIf := func(key, v string) {
+		if v != "" {
+			n.details = append(n.details, key+" "+v)
+		}
+	}
+	addIf("rows", r.EstimateRows)
+	addIf("io", r.EstimateIO)
+	addIf("cpu", r.EstimateCPU)
+	addIf("subtree cost", r.EstimatedTotalSubtreeCost)
+	for _, c := range mssqlChildRelOps(r.InnerXML) {
+		n.children = append(n.children, mssqlRelOpNode(c))
+	}
+	return n
+}
+
+// mssqlChildRelOps walks inner xml tokens and returns the immediate
+// <RelOp> descendants — skipping past wrapper elements like <Hash>,
+// <NestedLoops>, <IndexScan>, which vary per physical operator. We
+// stop descending into a <RelOp> once found; its own InnerXML will
+// be walked on the recursive call.
+func mssqlChildRelOps(inner string) []mssqlRelOp {
+	if inner == "" {
+		return nil
+	}
+	dec := xml.NewDecoder(strings.NewReader(inner))
+	var out []mssqlRelOp
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return out
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		if se.Name.Local == "RelOp" {
+			var r mssqlRelOp
+			if err := dec.DecodeElement(&r, &se); err == nil {
+				out = append(out, r)
+			}
+		}
+	}
 }
 
 // parsePostgresExplain reads the single JSON row pgx returns for

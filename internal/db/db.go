@@ -137,6 +137,11 @@ const (
 	// ExplainFormatSQLiteRows: `EXPLAIN QUERY PLAN ...` returns rows
 	// (id, parent, notused, detail) the TUI reparents into a tree.
 	ExplainFormatSQLiteRows
+	// ExplainFormatMSSQLXML: `SET SHOWPLAN_XML ON` + target statement
+	// returns one row with a ShowPlanXML document. Requires a pinned
+	// *sql.Conn so the SET state persists to the target query; the
+	// MSSQL adapter supplies a custom SQLOptions.ExplainRunner for that.
+	ExplainFormatMSSQLXML
 )
 
 // Conn is a live database connection. NOT required to be
@@ -162,9 +167,18 @@ type Conn interface {
 	// (or DROP + CREATE for triggers), mysql/sqlite use DROP + CREATE.
 	// Returns an error for unsupported kinds or drivers.
 	Definition(ctx context.Context, kind, schema, name string) (string, error)
+	// Explain returns raw plan rows for sql. Shape is engine-specific:
+	// callers dispatch on Capabilities().ExplainFormat to parse. Adapters
+	// that set ExplainFormatNone return ErrExplainUnsupported so the TUI
+	// can skip the feature cleanly.
+	Explain(ctx context.Context, sql string) ([][]any, error)
 	Driver() string
 	Capabilities() Capabilities
 }
+
+// ErrExplainUnsupported is returned by Conn.Explain for drivers whose
+// Capabilities report ExplainFormatNone.
+var ErrExplainUnsupported = errors.New("explain unsupported")
 
 // ErrDefinitionUnsupported is returned by Conn.Definition when the
 // driver or object kind doesn't support fetching a runnable DDL body.

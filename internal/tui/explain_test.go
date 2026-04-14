@@ -8,39 +8,6 @@ import (
 	_ "github.com/Nulifyer/sqlgo/internal/db/sqlite"
 )
 
-func TestExplainWrapSQLPostgres(t *testing.T) {
-	t.Parallel()
-	got := explainWrapSQL(db.ExplainFormatPostgresJSON, "SELECT 1;")
-	want := "EXPLAIN (FORMAT JSON) SELECT 1"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-func TestExplainWrapSQLMySQL(t *testing.T) {
-	t.Parallel()
-	got := explainWrapSQL(db.ExplainFormatMySQLJSON, "SELECT 1")
-	want := "EXPLAIN FORMAT=JSON SELECT 1"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-func TestExplainWrapSQLStripsTrailingSemi(t *testing.T) {
-	t.Parallel()
-	cases := []string{
-		"SELECT 1;",
-		"SELECT 1 ; ",
-		"SELECT 1;;",
-	}
-	for _, in := range cases {
-		got := explainWrapSQL(db.ExplainFormatSQLiteRows, in)
-		if got != "EXPLAIN QUERY PLAN SELECT 1" {
-			t.Errorf("strip(%q) = %q", in, got)
-		}
-	}
-}
-
 func TestParsePostgresExplainBasic(t *testing.T) {
 	t.Parallel()
 	rows := [][]any{
@@ -120,6 +87,51 @@ func TestParseSQLiteExplainReparent(t *testing.T) {
 	}
 	if len(tree.root.children[0].children) != 1 {
 		t.Errorf("users should have 1 child")
+	}
+}
+
+func TestParseMSSQLExplainBasic(t *testing.T) {
+	t.Parallel()
+	xmlDoc := `<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+<BatchSequence><Batch><Statements>
+<StmtSimple StatementText="SELECT 1" StatementType="SELECT" StatementSubTreeCost="0.01">
+<QueryPlan>
+<RelOp NodeId="0" PhysicalOp="Hash Match" LogicalOp="Inner Join" EstimateRows="10" EstimateIO="0.1" EstimateCPU="0.2" EstimatedTotalSubtreeCost="0.3">
+  <Hash>
+    <RelOp NodeId="1" PhysicalOp="Table Scan" LogicalOp="Table Scan" EstimateRows="5" EstimateIO="0.05" EstimateCPU="0.02"/>
+    <RelOp NodeId="2" PhysicalOp="Index Seek" LogicalOp="Index Seek" EstimateRows="2" EstimateIO="0.01" EstimateCPU="0.01"/>
+  </Hash>
+</RelOp>
+</QueryPlan>
+</StmtSimple>
+</Statements></Batch></BatchSequence>
+</ShowPlanXML>`
+	tree, err := parseMSSQLExplain([][]any{{xmlDoc}})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if tree.root == nil || len(tree.root.children) != 1 {
+		t.Fatalf("expected one stmt, got %+v", tree.root)
+	}
+	stmt := tree.root.children[0]
+	if stmt.label != "SELECT" {
+		t.Errorf("stmt label = %q", stmt.label)
+	}
+	if len(stmt.children) != 1 {
+		t.Fatalf("expected one root RelOp, got %d", len(stmt.children))
+	}
+	root := stmt.children[0]
+	if root.label != "Hash Match (Inner Join)" {
+		t.Errorf("root relop label = %q", root.label)
+	}
+	if len(root.children) != 2 {
+		t.Fatalf("expected 2 child RelOps, got %d", len(root.children))
+	}
+	if root.children[0].label != "Table Scan" {
+		t.Errorf("child[0] label = %q", root.children[0].label)
+	}
+	if root.children[1].label != "Index Seek" {
+		t.Errorf("child[1] label = %q", root.children[1].label)
 	}
 }
 

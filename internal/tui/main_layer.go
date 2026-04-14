@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -323,6 +324,48 @@ func newMainLayer() *mainLayer {
 	return m
 }
 
+// saveActive writes the active tab's buffer to its sourcePath. If the
+// tab has no sourcePath yet, pushes the Save As dialog instead. A zero
+// sourcePath is the "never saved" state; any non-empty path means the
+// file is known and Ctrl+S should just overwrite without prompting.
+func (m *mainLayer) saveActive(a *app) {
+	if m.activeTab < 0 || m.activeTab >= len(m.sessions) {
+		return
+	}
+	sess := m.sessions[m.activeTab]
+	if sess.sourcePath == "" {
+		seed := sess.title
+		if !strings.HasSuffix(strings.ToLower(seed), ".sql") {
+			seed += ".sql"
+		}
+		a.pushLayer(newSaveLayer(m.activeTab, seed))
+		return
+	}
+	text := sess.editor.buf.Text()
+	if err := os.WriteFile(sess.sourcePath, []byte(text), 0644); err != nil {
+		m.status = "save failed: " + err.Error()
+		return
+	}
+	sess.savedText = text
+	m.status = fmt.Sprintf("saved %d bytes to %s", len(text), sess.sourcePath)
+}
+
+// findTabByPath returns the index of a session whose sourcePath matches
+// the given absolute path, or -1 if no tab has that file open. Used by
+// the open dialog to switch to an already-open file instead of
+// duplicating the tab (and dropping any unsaved edits).
+func (m *mainLayer) findTabByPath(abs string) int {
+	if abs == "" {
+		return -1
+	}
+	for i, s := range m.sessions {
+		if s.sourcePath == abs {
+			return i
+		}
+	}
+	return -1
+}
+
 // newTab appends a fresh session and activates it. The embedded *session
 // swap keeps promoted fields (m.editor, m.table, ...) pointed at the new
 // tab so the existing call sites continue to resolve against the active
@@ -452,7 +495,11 @@ func queryTabStripRect(q rect) rect {
 // still reads on terminals without color. A trailing "+" hint tab is
 // rendered separately by drawQueryTabs.
 func queryTabLabel(s *session, active bool) string {
-	lbl := fmt.Sprintf(" %s ", s.title)
+	title := s.title
+	if s.IsDirty() {
+		title = "● " + title
+	}
+	lbl := fmt.Sprintf(" %s ", title)
 	if active {
 		lbl = "[" + lbl[1:len(lbl)-1] + "]"
 	}
@@ -610,6 +657,13 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 	}
 	if k.Kind == KeyF5 {
 		a.runQuery()
+		return
+	}
+	// Ctrl+S saves the active tab. If the tab was loaded from or
+	// previously saved to a file, write to that path directly; otherwise
+	// push the Save As dialog to prompt for one.
+	if k.Ctrl && k.Rune == 's' {
+		m.saveActive(a)
 		return
 	}
 	if k.Kind == KeyF2 {
@@ -1197,6 +1251,22 @@ func (m *mainLayer) handleSpace(a *app, k Key) {
 		a.pushLayer(hl)
 	case 'o':
 		a.pushLayer(newOpenLayer(""))
+	case 's':
+		m.saveActive(a)
+	case 'S':
+		seed := ""
+		if m.activeTab >= 0 && m.activeTab < len(m.sessions) {
+			sess := m.sessions[m.activeTab]
+			if sess.sourcePath != "" {
+				seed = sess.sourcePath
+			} else {
+				seed = sess.title
+				if !strings.HasSuffix(strings.ToLower(seed), ".sql") {
+					seed += ".sql"
+				}
+			}
+		}
+		a.pushLayer(newSaveLayer(m.activeTab, seed))
 	case 'p':
 		// Explain plan for current editor SQL.
 		sql := strings.TrimSpace(m.editor.buf.Text())
@@ -1402,6 +1472,8 @@ func (m *mainLayer) spaceMenuHints(a *app) string {
 		"c=connect",
 		hintIf(a.conn != nil, "x=disconnect"),
 		"o=open",
+		"s=save",
+		"S=save as",
 		hintIf(m.table.HasColumns(), "e=export"),
 		"h=history",
 		hintIf(a.conn != nil && hasText, "p=explain"),

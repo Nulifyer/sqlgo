@@ -175,7 +175,12 @@ outside the adapter.
 - **`ExplainFormat`** -- selects the TUI's EXPLAIN renderer.
   `ExplainFormatNone` hides the feature. Existing shapes:
   `ExplainFormatPostgresJSON`, `ExplainFormatMySQLJSON`,
-  `ExplainFormatSQLiteRows`.
+  `ExplainFormatSQLiteRows`, `ExplainFormatMSSQLXML`. Engines whose
+  EXPLAIN flow can't be expressed as a one-shot wrapper (MSSQL needs
+  `SET SHOWPLAN_XML ON` on a pinned `*sql.Conn` for the target
+  query to return the plan instead of executing) supply a custom
+  `SQLOptions.ExplainRunner` that runs the full flow and returns the
+  raw plan rows. The TUI still dispatches parsing via `ExplainFormat`.
 - **`Dialect`** -- which keyword overlay autocomplete should suggest.
   One of `sqltok.DialectMSSQL`, `DialectMySQL`, `DialectPostgres`,
   `DialectSQLite`. Keeps `TOP` out of Postgres suggestions and

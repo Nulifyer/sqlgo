@@ -46,6 +46,14 @@ type SQLOptions struct {
 	// ErrDefinitionUnsupported for kinds they can't satisfy. Nil means the
 	// driver doesn't implement Definition at all.
 	DefinitionFetcher func(ctx context.Context, db *sql.DB, kind, schema, name string) (string, error)
+
+	// ExplainRunner is an optional override that executes the engine's
+	// EXPLAIN flow end-to-end and returns the raw plan rows. When nil,
+	// sqlConn.Explain falls back to the default wrap-and-query flow
+	// driven by Capabilities.ExplainFormat. MSSQL supplies its own so it
+	// can pin a *sql.Conn across `SET SHOWPLAN_XML ON` + the target
+	// statement.
+	ExplainRunner func(ctx context.Context, db *sql.DB, sql string) ([][]any, error)
 }
 
 // OpenSQL wraps a *sql.DB as a db.Conn. Takes ownership of sqlDB.
@@ -271,6 +279,52 @@ func (c *sqlConn) Definition(ctx context.Context, kind, schema, name string) (st
 		return "", ErrDefinitionUnsupported
 	}
 	return c.opts.DefinitionFetcher(ctx, c.db, kind, schema, name)
+}
+
+// Explain runs the engine's EXPLAIN flow and returns raw plan rows. The
+// TUI dispatches on Capabilities.ExplainFormat to pick a parser. Adapters
+// with ExplainFormatNone return ErrExplainUnsupported; adapters with a
+// custom SQLOptions.ExplainRunner delegate to it (MSSQL pins a connection
+// so SHOWPLAN_XML session state survives to the next batch).
+func (c *sqlConn) Explain(ctx context.Context, query string) ([][]any, error) {
+	format := c.opts.Capabilities.ExplainFormat
+	if format == ExplainFormatNone {
+		return nil, ErrExplainUnsupported
+	}
+	if c.opts.ExplainRunner != nil {
+		return c.opts.ExplainRunner(ctx, c.db, query)
+	}
+	wrapped := wrapExplainSQL(format, query)
+	rows, err := c.db.QueryContext(ctx, wrapped)
+	if err != nil {
+		return nil, fmt.Errorf("explain: %w", err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, fmt.Errorf("explain columns: %w", err)
+	}
+	var out [][]any
+	for rows.Next() {
+		dest := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range dest {
+			ptrs[i] = &dest[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, fmt.Errorf("explain scan: %w", err)
+		}
+		for i, v := range dest {
+			if b, ok := v.([]byte); ok {
+				dest[i] = string(b)
+			}
+		}
+		out = append(out, dest)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("explain rows: %w", err)
+	}
+	return out, nil
 }
 
 func (c *sqlConn) Close() error {
