@@ -4,8 +4,11 @@
 // internal/store in sqlgo.db; this package no longer reads or writes
 // connections.json.
 //
-// Passwords are stored in plaintext for now. OS keyring integration is
-// a future concern.
+// Passwords on Connection.Password are the in-memory plaintext shape.
+// On disk they are replaced with the secret.Placeholder sentinel when
+// an OS keyring backend is available; see internal/secret. Plaintext
+// only lands in sqlgo.db when no keyring is reachable, in which case
+// the TUI surfaces a one-time warning.
 package config
 
 import (

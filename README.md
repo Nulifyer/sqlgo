@@ -73,7 +73,7 @@ No mouse required. No Electron. One binary.
 - 🔐 **SSH tunneling** -- optional jump host per connection with password or key-file auth and TOFU host-key prompts. `ssh-agent` is not supported; supply a key file or password. See [docs/ssh-tunneling.md](docs/ssh-tunneling.md).
 - 🔑 **OS keyring** -- passwords are stored in the system keychain when available (falls back to plain store with a warning)
 - 🕘 **Query history** -- last 1000 queries per connection, FTS5-indexed, retrievable from the history overlay
-- 🔎 **EXPLAIN overlay** -- run the current query through its engine's explain path (Postgres, MySQL, SQLite; MSSQL is not supported)
+- 🔎 **EXPLAIN overlay** -- run the current query through its engine's explain path (Postgres, MySQL, SQLite, SQL Server via `SHOWPLAN_XML`)
 - 📂 **Open file** -- `o` opens a workspace file picker rooted at the current directory; honors a `.sqlgoignore` file for directory skips
 
 ---

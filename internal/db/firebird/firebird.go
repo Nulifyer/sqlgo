@@ -183,7 +183,7 @@ func fetchDefinition(ctx context.Context, sqlDB *sql.DB, kind, schema, name stri
 		err := sqlDB.QueryRowContext(ctx, `
 SELECT RDB$VIEW_SOURCE FROM RDB$RELATIONS
 WHERE RDB$RELATION_NAME = ? AND RDB$VIEW_SOURCE IS NOT NULL`,
-			padFBName(name)).Scan(&body)
+			trimFBName(name)).Scan(&body)
 		if err != nil {
 			return wrapNotFound(err, kind, name)
 		}
@@ -192,7 +192,7 @@ WHERE RDB$RELATION_NAME = ? AND RDB$VIEW_SOURCE IS NOT NULL`,
 	case "procedure":
 		err := sqlDB.QueryRowContext(ctx, `
 SELECT RDB$PROCEDURE_SOURCE FROM RDB$PROCEDURES
-WHERE RDB$PROCEDURE_NAME = ?`, padFBName(name)).Scan(&body)
+WHERE RDB$PROCEDURE_NAME = ?`, trimFBName(name)).Scan(&body)
 		if err != nil {
 			return wrapNotFound(err, kind, name)
 		}
@@ -202,7 +202,7 @@ WHERE RDB$PROCEDURE_NAME = ?`, padFBName(name)).Scan(&body)
 		var table sql.NullString
 		err := sqlDB.QueryRowContext(ctx, `
 SELECT RDB$RELATION_NAME, RDB$TRIGGER_SOURCE FROM RDB$TRIGGERS
-WHERE RDB$TRIGGER_NAME = ?`, padFBName(name)).Scan(&table, &body)
+WHERE RDB$TRIGGER_NAME = ?`, trimFBName(name)).Scan(&table, &body)
 		if err != nil {
 			return wrapNotFound(err, kind, name)
 		}
@@ -230,10 +230,11 @@ func fbQuoteString(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// padFBName right-pads to 31 chars when comparing against RDB$ CHAR(31)
-// columns — drivers that don't auto-pad fail these lookups silently.
-// firebirdsql does pad, but we trim-then-repad defensively.
-func padFBName(s string) string { return strings.TrimSpace(s) }
+// trimFBName trims surrounding whitespace before binding a name into a
+// RDB$ CHAR(31) lookup. firebirdsql right-pads short bind values to the
+// declared CHAR width on its own, so explicit padding here is redundant;
+// the trim alone is enough to normalise user input.
+func trimFBName(s string) string { return strings.TrimSpace(s) }
 
 // buildDSN formats the firebirdsql DSN:
 //
