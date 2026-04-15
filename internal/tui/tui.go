@@ -284,6 +284,13 @@ type Options struct {
 	// InitialQuery, if non-empty, seeds the query editor with this text
 	// on startup. Used by the CLI `sqlgo file.sql` entry point.
 	InitialQuery string
+
+	// InitialConnection, if non-nil, auto-connects to this entry on
+	// startup -- picker is pushed first so a connect failure still
+	// leaves the user with a usable UI, then connectTo runs and pops it
+	// on success. Used by `sqlgo open FILE` to drop the user straight
+	// into an ephemeral file-driver session without touching the store.
+	InitialConnection *config.Connection
 }
 
 // Run takes over the terminal and runs until the user quits (Ctrl+Q) or an
@@ -343,6 +350,16 @@ func Run(opts Options) error {
 
 	// Start on the picker so the user picks or creates a connection first.
 	a.pushLayer(newPickerLayer(a.connCache))
+
+	// Ephemeral auto-connect path (e.g. `sqlgo open file.csv`). Queue
+	// onto asyncCh so the connect runs *after* loop() has entered the
+	// alt-screen and set up terminal modes -- otherwise connectTo's
+	// status-line draw/flush spills control sequences over the user's
+	// shell history. Picker stays the fallback on connect failure.
+	if opts.InitialConnection != nil {
+		ic := *opts.InitialConnection
+		a.asyncCh <- func(a *app) { a.connectTo(ic) }
+	}
 
 	defer func() {
 		if a.conn != nil {
@@ -579,20 +596,63 @@ func (a *app) connectTo(c config.Connection) {
 		cfg.Port = t.LocalPort
 	}
 
+	// File-driver CSV/JSONL ingestion can take many seconds on large
+	// inputs, so d.Open runs on a goroutine and a ticker pushes spinner
+	// frames through asyncCh until it finishes. Without this, the main
+	// loop is blocked and the picker looks frozen on "connecting…".
 	if pl != nil {
-		pl.setStatus("connecting…")
-		// Flush the status update before we block on Open so the user
-		// sees feedback.
-		a.draw()
-		_ = a.scr.flush()
+		pl.setStatus("connecting " + spinnerFrames[0])
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
-	defer cancel()
-	conn, err := d.Open(ctx, cfg)
+	done := make(chan struct{})
+	go runSpinner(a, done, func(a *app, frame string) {
+		if pl, ok := a.topLayer().(*pickerLayer); ok {
+			pl.setStatus("connecting " + frame)
+		}
+	})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
+		defer cancel()
+		conn, err := d.Open(ctx, cfg)
+		close(done)
+		a.asyncCh <- func(a *app) {
+			a.finishConnect(c, cfg, conn, tunnel, err)
+		}
+	}()
+}
+
+// spinnerFrames cycle at ~10fps on any long-running status indicator.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// runSpinner ticks a spinner until done is closed. Each frame is
+// delivered to apply via asyncCh so the main loop owns all UI mutation
+// -- the goroutine never touches app state directly. apply receives
+// the current frame glyph and should splice it into whatever status
+// surface the caller owns (picker status, layer field, etc.).
+func runSpinner(a *app, done <-chan struct{}, apply func(a *app, frame string)) {
+	t := time.NewTicker(100 * time.Millisecond)
+	defer t.Stop()
+	i := 0
+	for {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+			i++
+			frame := spinnerFrames[i%len(spinnerFrames)]
+			a.asyncCh <- func(a *app) { apply(a, frame) }
+		}
+	}
+}
+
+// finishConnect runs on the main loop after d.Open returns. It applies
+// the same commit/teardown logic the original synchronous connectTo
+// used, but now has to tolerate the picker having been dismissed or
+// swapped in the meantime.
+func (a *app) finishConnect(c config.Connection, cfg db.Config, conn db.Conn, tunnel *sshtunnel.Tunnel, err error) {
+	_ = cfg
+	pl, _ := a.topLayer().(*pickerLayer)
 	if err != nil {
-		// Tear down the just-opened tunnel so a dial failure doesn't
-		// leak the listener + SSH client into the background.
 		if tunnel != nil {
 			_ = tunnel.Close()
 		}
@@ -602,9 +662,6 @@ func (a *app) connectTo(c config.Connection) {
 		return
 	}
 
-	// Commit the new connection. Close the previous db conn and its
-	// tunnel (if any) first so the old listener goes away before the
-	// new one's state becomes visible.
 	if a.conn != nil {
 		_ = a.conn.Close()
 	}
@@ -620,12 +677,10 @@ func (a *app) connectTo(c config.Connection) {
 	a.activeConn = &cc
 	a.connErr = nil
 
-	// Dismiss the picker and reset the main-view state. Focus lands on
-	// the explorer (not the query editor) because the most common first
-	// action after connecting is "browse the schema", and any prior
-	// query text / results from the previous connection are wiped so
-	// the user doesn't accidentally run them against the new one.
-	a.popLayer()
+	// Only pop if the picker is still on top -- user may have dismissed it.
+	if _, ok := a.topLayer().(*pickerLayer); ok {
+		a.popLayer()
+	}
 	m := a.mainLayerPtr()
 	m.status = "connected"
 	m.editor.buf.Clear()
@@ -672,10 +727,21 @@ func (a *app) loadSchema() {
 	conn := a.conn
 	depth := conn.Capabilities().SchemaDepth
 	m.explorer.SetLoading()
+	done := make(chan struct{})
+	go runSpinner(a, done, func(a *app, frame string) {
+		// Only animate if this goroutine's fetch is still the active one
+		// (conn unchanged). A stale tick on a swapped connection would
+		// otherwise scribble a spinner frame over a fresh explorer state.
+		if a.conn != conn {
+			return
+		}
+		a.mainLayerPtr().explorer.SetLoadingFrame(frame)
+	})
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), schemaTimeout)
 		defer cancel()
 		info, err := conn.Schema(ctx)
+		close(done)
 		a.asyncCh <- func(a *app) {
 			// Drop the result if the connection has changed underneath us.
 			if a.conn != conn {
@@ -704,7 +770,7 @@ func (a *app) runQuery() {
 		return
 	}
 	if a.conn == nil {
-		sess.status = "no connection: press space then c to connect"
+		sess.status = "no connection: press Ctrl+K then c to connect"
 		return
 	}
 	sql := strings.TrimSpace(sess.editor.buf.Text())
@@ -732,7 +798,7 @@ func (a *app) runQueryUnsafe() {
 		return
 	}
 	if a.conn == nil {
-		sess.status = "no connection: press space then c to connect"
+		sess.status = "no connection: press Ctrl+K then c to connect"
 		return
 	}
 	sql := strings.TrimSpace(sess.editor.buf.Text())

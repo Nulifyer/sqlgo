@@ -91,6 +91,7 @@ type explorer struct {
 	cursor   int            // index into items
 	scroll   int            // first visible item
 	err      string         // non-empty when schema load failed
+	loading  string         // non-empty while a schema fetch is in flight; holds current spinner frame
 }
 
 func newExplorer() *explorer {
@@ -107,6 +108,7 @@ func (e *explorer) SetSchema(info *db.SchemaInfo, depth db.SchemaDepth) {
 	e.info = info
 	e.depth = depth
 	e.err = ""
+	e.loading = ""
 	e.cursor = 0
 	e.scroll = 0
 	if info != nil {
@@ -153,15 +155,28 @@ func subgroupExpansionKey(schema string, sg subgroupKind) string {
 	return schema + "\x00" + sg.label()
 }
 
-// SetLoading shows a "loading…" placeholder while a background schema
+// SetLoading shows an animated placeholder while a background schema
 // fetch is in flight. Called on the main goroutine before kicking off
-// the fetch so the user has immediate feedback.
+// the fetch so the user has immediate feedback. The initial frame is
+// the first braille dot; the spinner goroutine advances it via
+// SetLoadingFrame.
 func (e *explorer) SetLoading() {
-	e.err = "loading…"
+	e.err = ""
+	e.loading = spinnerFrames[0]
 	e.info = nil
 	e.items = nil
 	e.cursor = 0
 	e.scroll = 0
+}
+
+// SetLoadingFrame updates the spinner frame while a schema fetch is in
+// flight. A no-op once loading has ended so late spinner ticks can't
+// reintroduce the placeholder after SetSchema/SetError.
+func (e *explorer) SetLoadingFrame(frame string) {
+	if e.loading == "" {
+		return
+	}
+	e.loading = frame
 }
 
 // SetError puts the explorer into an error state. The tree is cleared so
@@ -169,6 +184,7 @@ func (e *explorer) SetLoading() {
 // one.
 func (e *explorer) SetError(msg string) {
 	e.err = msg
+	e.loading = ""
 	e.info = nil
 	e.items = nil
 	e.cursor = 0
@@ -563,6 +579,10 @@ func (e *explorer) draw(c *cellbuf, r rect, focused bool) {
 		return
 	}
 
+	if e.loading != "" {
+		c.writeAt(innerRow, innerCol, truncate(e.loading+" loading schema…", innerW))
+		return
+	}
 	if e.err != "" {
 		c.writeAt(innerRow, innerCol, truncate("error: "+e.err, innerW))
 		return

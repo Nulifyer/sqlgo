@@ -64,6 +64,12 @@ type session struct {
 	lastQuerySQL   string
 	lastQueryStart time.Time
 
+	// explainBusy is set while an EXPLAIN fetch + parse is in flight.
+	// Gates the 'p' key so a second press can't stack a duplicate
+	// goroutine, and drives the spinner frame in the status line.
+	explainBusy  bool
+	explainFrame string
+
 	// status is the transient feedback line shown in the Results
 	// border ("running…", "3 row(s) in 12ms"). Per-session so each
 	// tab remembers its own last message when the user switches.

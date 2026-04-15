@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"io"
 
@@ -22,6 +23,9 @@ func runExec(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(argv); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return ExitOK
+		}
 		return ExitUsage
 	}
 

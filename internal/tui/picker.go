@@ -155,10 +155,11 @@ func (pl *pickerLayer) Draw(a *app, c *cellbuf) {
 
 func (pl *pickerLayer) HandleKey(a *app, k Key) {
 	if k.Kind == KeyEsc {
-		// Only allow dismissing the picker if there's an active connection.
-		if a.conn != nil {
-			a.popLayer()
-		}
+		// Always dismissible. The earlier "only if a.conn != nil" gate
+		// trapped first-run users with no saved connections in a modal
+		// they couldn't satisfy. Main view handles the no-conn state
+		// fine and Ctrl+K then c reopens the picker.
+		a.popLayer()
 		return
 	}
 	switch k.Kind {
@@ -304,6 +305,6 @@ func (pl *pickerLayer) Hints(a *app) string {
 		hintIf(hasList, "e=edit"),
 		hintIf(hasList, "x=delete"),
 		hintIf(hasList, "K=unlink-keyring"),
-		hintIf(a.conn != nil, "Esc=back"),
+		"Esc=back",
 	)
 }

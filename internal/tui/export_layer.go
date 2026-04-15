@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/Nulifyer/sqlgo/internal/db"
 	"github.com/Nulifyer/sqlgo/internal/output"
 )
 
@@ -17,6 +18,13 @@ import (
 type exportLayer struct {
 	path   *input
 	status string
+	// busy is set while a goroutine is writing the file. Input and
+	// Enter are ignored during this window so the user can't kick off a
+	// second export or dismiss the layer mid-write (Esc still cancels
+	// the UI, but the write keeps running -- that's fine, it's local
+	// disk).
+	busy  bool
+	frame string
 }
 
 func newExportLayer(seed string) *exportLayer {
@@ -80,14 +88,27 @@ func (el *exportLayer) Draw(a *app, c *cellbuf) {
 	}
 	c.writeAt(cur+5, innerCol, truncate(fmt.Sprintf("Rows to export: %d", rows), boxW-4))
 
-	if el.status != "" {
+	status := el.status
+	if el.busy {
+		status = "writing " + el.frame
+	}
+	if status != "" {
 		c.setFg(colorBorderFocused)
-		c.writeAt(r.row+r.h-2, innerCol, truncate(el.status, boxW-4))
+		c.writeAt(r.row+r.h-2, innerCol, truncate(status, boxW-4))
 		c.resetStyle()
 	}
 }
 
 func (el *exportLayer) HandleKey(a *app, k Key) {
+	if el.busy {
+		// Only Esc is honored while the write is running. It pops the
+		// layer but the goroutine keeps going; its completion posts a
+		// status back to the main view instead of to this layer.
+		if k.Kind == KeyEsc {
+			a.popLayer()
+		}
+		return
+	}
 	if k.Kind == KeyEsc {
 		a.popLayer()
 		return
@@ -116,27 +137,54 @@ func (el *exportLayer) save(a *app) {
 	format, known := output.FormatFromPath(path)
 	cols, rows := m.table.Snapshot()
 
+	el.busy = true
+	el.frame = spinnerFrames[0]
+	el.status = ""
+
+	done := make(chan struct{})
+	go runSpinner(a, done, func(a *app, frame string) {
+		if top, ok := a.topLayer().(*exportLayer); ok && top == el {
+			el.frame = frame
+		}
+	})
+	go func() {
+		writeErr := writeExportFile(path, cols, rows, format)
+		close(done)
+		a.asyncCh <- func(a *app) {
+			el.busy = false
+			if writeErr != nil {
+				el.status = writeErr.Error()
+				return
+			}
+			// If the user Esc'd the layer mid-write, post the success
+			// onto the main view instead so they still see it.
+			msg := fmt.Sprintf("exported %d row(s) to %s", len(rows), path)
+			if !known {
+				msg += " (unknown extension, used csv)"
+			}
+			if top, ok := a.topLayer().(*exportLayer); ok && top == el {
+				a.popLayer()
+			}
+			a.mainLayerPtr().status = msg
+		}
+	}()
+}
+
+// writeExportFile runs on a goroutine; all error wrapping happens here
+// so the main-loop callback only has to stringify.
+func writeExportFile(path string, cols []db.Column, rows [][]string, format output.Format) error {
 	f, err := os.Create(path)
 	if err != nil {
-		el.status = "create failed: " + err.Error()
-		return
+		return fmt.Errorf("create failed: %w", err)
 	}
 	if err := output.Write(f, cols, rows, format); err != nil {
 		_ = f.Close()
-		el.status = "write failed: " + err.Error()
-		return
+		return fmt.Errorf("write failed: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		el.status = "close failed: " + err.Error()
-		return
+		return fmt.Errorf("close failed: %w", err)
 	}
-
-	a.popLayer()
-	if known {
-		m.status = fmt.Sprintf("exported %d row(s) to %s", len(rows), path)
-	} else {
-		m.status = fmt.Sprintf("exported %d row(s) to %s (unknown extension, used csv)", len(rows), path)
-	}
+	return nil
 }
 
 func (el *exportLayer) Hints(a *app) string {

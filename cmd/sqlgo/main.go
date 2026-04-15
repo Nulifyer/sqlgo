@@ -25,25 +25,22 @@ func main() {
 
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
-		fmt.Fprintf(out, "usage: %s [file.sql]\n", os.Args[0])
-		fmt.Fprintf(out, "       %s <verb> [flags]    verbs: exec, export, conns, history, version\n", os.Args[0])
+		fmt.Fprintf(out, "usage: %s\n", os.Args[0])
+		fmt.Fprintf(out, "       %s <verb> [flags]    verbs: exec, export, open, edit, conns, history, version\n", os.Args[0])
 		fmt.Fprintf(out, "       %s --version\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 
-	opts := tui.Options{}
+	// Bare positional args no longer map to "open FILE.sql in TUI" --
+	// that shorthand moved to `sqlgo edit FILE.sql`. Anything left over
+	// here is a mistyped verb.
 	if flag.NArg() > 0 {
-		path := flag.Arg(0)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "sqlgo:", err)
-			os.Exit(1)
-		}
-		opts.InitialQuery = string(data)
+		fmt.Fprintf(os.Stderr, "sqlgo: unknown verb %q -- try 'sqlgo help'\n", flag.Arg(0))
+		os.Exit(int(cli.ExitUsage))
 	}
 
-	if err := tui.Run(opts); err != nil {
+	if err := tui.Run(tui.Options{}); err != nil {
 		fmt.Fprintln(os.Stderr, "sqlgo:", err)
 		os.Exit(1)
 	}

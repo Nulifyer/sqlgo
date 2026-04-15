@@ -166,8 +166,19 @@ func (t *table) Append(row []any) bool {
 			}
 		}
 	}
+	idx := len(t.rendered)
 	t.rendered = append(t.rendered, cells)
 	t.bytes += rowBytes
+	// Keep the active view in sync with the new row so a filter typed
+	// mid-stream still narrows down newly arrived data without waiting
+	// for another SetFilter call. Sort is intentionally skipped --
+	// inserting in sorted order on every append is O(n) per row and
+	// streaming + sort is rare; the user's next 's' press rebuilds.
+	if t.view != nil && t.sortCol < 0 && t.filterMatch != nil {
+		if t.filterMatch(cells) {
+			t.view = append(t.view, idx)
+		}
+	}
 	return true
 }
 
@@ -420,6 +431,43 @@ func (t *table) cursorSourceIndexLocked() (int, bool) {
 	return t.cellRow, true
 }
 
+// pinnedSrcIdxLocked returns the rendered-index under the cursor, or -1
+// when the view is empty. Callers capture this before a rebuildViewLocked
+// so the cursor can follow the row across filter/sort changes instead of
+// jumping to a new position.
+func (t *table) pinnedSrcIdxLocked() int {
+	src, ok := t.cursorSourceIndexLocked()
+	if !ok {
+		return -1
+	}
+	return src
+}
+
+// restoreCursorToSrcLocked places cellRow at the view position holding
+// src. If src is not in the current view (filtered out, or -1), cellRow
+// falls back to 0. clampCursorLocked still runs after.
+func (t *table) restoreCursorToSrcLocked(src int) {
+	if src < 0 {
+		t.cellRow = 0
+		return
+	}
+	if t.view == nil {
+		if src >= 0 && src < len(t.rendered) {
+			t.cellRow = src
+			return
+		}
+		t.cellRow = 0
+		return
+	}
+	for i, v := range t.view {
+		if v == src {
+			t.cellRow = i
+			return
+		}
+	}
+	t.cellRow = 0
+}
+
 // --- filter / sort ---------------------------------------------------------
 
 // SetFilter replaces the current filter expression and rebuilds the
@@ -569,7 +617,18 @@ func (t *table) CycleSortAtCursor() (col int, desc bool, active bool) {
 		t.sortCol = -1
 		t.sortDesc = false
 	}
+	// Reserve space for the " ▲"/" ▼" marker on the sorted column so the
+	// header glyph is not clipped by the column width. Widths only ever
+	// grow, so the extra 2 cells persist after toggling sort off.
+	if t.sortCol >= 0 && t.sortCol < len(t.widths) {
+		need := displayWidth(t.cols[t.sortCol].Name) + 2
+		if t.widths[t.sortCol] < need {
+			t.widths[t.sortCol] = need
+		}
+	}
 	t.rebuildViewLocked()
+	t.cellRow = 0
+	t.scrollRow = 0
 	t.clampCursorLocked()
 	return t.sortCol, t.sortDesc, t.sortCol >= 0
 }
@@ -1150,11 +1209,6 @@ func renderHeaderRow(cols []db.Column, widths []int, sortCol int, desc bool) str
 				label += " ▼"
 			} else {
 				label += " ▲"
-			}
-			if displayWidth(label) > widths[i] {
-				// Measure string may exceed col width after adding the
-				// marker; the sliceRunes clip below will still hide any
-				// overflow on the right edge.
 			}
 		}
 		labels[i] = label

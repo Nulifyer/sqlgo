@@ -1,7 +1,7 @@
 package tui
 
 // helpLayer is a modal overlay listing every keybind, grouped by
-// context (global / Query / Explorer / Results / Space menu). It is
+// context (global / Query / Explorer / Results / Command menu). It is
 // opened by F1 from anywhere and closed by F1 or Esc. The contents
 // are a static table; when a binding changes it must be updated here
 // too.
@@ -65,7 +65,7 @@ func helpContent() []helpLine {
 		bind("Enter", "expand schema / group"),
 		bind("Up / Dn / PgUp / PgDn", "move cursor"),
 		bind("R", "refresh schema"),
-		bind("Space", "command menu"),
+		bind("Ctrl+K", "command menu"),
 		blank,
 
 		section("Results"),
@@ -79,7 +79,7 @@ func helpContent() []helpLine {
 		bind("/", "filter"),
 		bind("w", "toggle wrap"),
 		bind("Ctrl+PgUp / PgDn", "prev / next result set"),
-		bind("Space", "command menu"),
+		bind("Ctrl+K", "command menu"),
 		blank,
 
 		section("Results (error view)"),
@@ -87,7 +87,7 @@ func helpContent() []helpLine {
 		bind("y / Alt+A", "copy error text"),
 		blank,
 
-		section("Command menu (Space / Ctrl+K)"),
+		section("Command menu (Ctrl+K)"),
 		bind("c / x", "connect / disconnect"),
 		bind("o", "open SQL file"),
 		bind("e", "export results"),

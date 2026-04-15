@@ -58,7 +58,7 @@ type mainLayer struct {
 
 	explorer     *explorer
 	focus        FocusTarget
-	pendingSpace bool
+	pendingMenu bool
 
 	// editorFullscreen hides the explorer and results panels and
 	// expands the query editor to fill the terminal (minus the status
@@ -162,7 +162,7 @@ func (m *mainLayer) handleMouse(a *app, msg MouseMsg) bool {
 		switch msg.Action {
 		case MouseActionPress:
 			m.focus = target
-			m.pendingSpace = false
+			m.pendingMenu = false
 			count := m.clicks.bump(msg)
 			m.handleLeftClick(a, target, msg, count)
 			if target == FocusQuery {
@@ -578,11 +578,33 @@ func resultTabStripRect(p rect) rect {
 // resultTabLabel formats a result tab's label. Active tab gets square
 // brackets so it reads without color.
 func resultTabLabel(t *resultTab, active bool) string {
-	lbl := fmt.Sprintf(" %s ", resultTabTitle(t))
+	return resultTabLabelWith(t, active, "")
+}
+
+// resultTabLabelWith mirrors resultTabLabel but lets the caller inject a
+// trailing annotation (e.g. a filter glyph). Centralised so tab-hit
+// width and the drawn label stay in sync -- if they drifted the
+// click targets would miss the visible tab ends.
+func resultTabLabelWith(t *resultTab, active bool, suffix string) string {
+	title := resultTabTitle(t)
+	if suffix != "" {
+		title = title + " " + suffix
+	}
+	lbl := fmt.Sprintf(" %s ", title)
 	if active {
 		lbl = "[" + lbl[1:len(lbl)-1] + "]"
 	}
 	return lbl
+}
+
+// resultTabSuffix returns the annotation glyph for tab idx. Filter
+// state lives on the active m.table only, so inactive tabs never
+// carry a filter marker -- switching to them resets the table filter.
+func (m *mainLayer) resultTabSuffix(idx int) string {
+	if idx == m.activeResult && m.table.Filter() != "" {
+		return "⚲"
+	}
+	return ""
 }
 
 // resultTabHits returns per-tab click targets given the strip rect.
@@ -593,7 +615,7 @@ func (m *mainLayer) resultTabHits(r rect) []queryTabHit {
 	hits := make([]queryTabHit, 0, len(m.results))
 	col := r.col
 	for i, t := range m.results {
-		lbl := resultTabLabel(t, i == m.activeResult)
+		lbl := resultTabLabelWith(t, i == m.activeResult, m.resultTabSuffix(i))
 		remaining := r.col + r.w - col
 		if remaining < 3 {
 			break
@@ -614,7 +636,7 @@ func (m *mainLayer) drawResultTabs(c *cellbuf, r rect) {
 		return
 	}
 	for _, h := range m.resultTabHits(r) {
-		lbl := resultTabLabel(m.results[h.idx], h.idx == m.activeResult)
+		lbl := resultTabLabelWith(m.results[h.idx], h.idx == m.activeResult, m.resultTabSuffix(h.idx))
 		if len(lbl) > h.endCol-h.startCol+1 {
 			lbl = lbl[:h.endCol-h.startCol+1]
 		}
@@ -667,7 +689,7 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		m.saveActive(a)
 		return
 	}
-	if k.Kind == KeyF2 {
+	if k.Ctrl && k.Rune == 'r' {
 		sess := m.sessions[m.activeTab]
 		a.pushLayer(newRenameLayer(m.activeTab, sess.title))
 		return
@@ -709,7 +731,7 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 
 	// Ctrl+K is the global command-menu prefix. Works from any focus.
 	if k.Ctrl && k.Rune == 'k' {
-		m.pendingSpace = true
+		m.pendingMenu = true
 		return
 	}
 	// F11 toggles fullscreen editor mode. Available from any focus
@@ -753,11 +775,11 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		}
 	}
 
-	// Pending space-menu dispatch. Only reachable from Explorer/Results
-	// focus (space is a literal character in the Query editor).
-	if m.pendingSpace {
-		m.pendingSpace = false
-		m.handleSpace(a, k)
+	// Pending command-menu dispatch: Ctrl+K has been pressed and we are
+	// waiting on the second key. Reachable from any focus.
+	if m.pendingMenu {
+		m.pendingMenu = false
+		m.handleMenuPrefix(a, k)
 		return
 	}
 
@@ -1212,8 +1234,9 @@ func (m *mainLayer) promoteActiveIfPreview() {
 	}
 }
 
-// handleSpace dispatches the second key of the space-menu prefix.
-func (m *mainLayer) handleSpace(a *app, k Key) {
+// handleMenuPrefix dispatches the second key of the Ctrl+K command-menu
+// prefix.
+func (m *mainLayer) handleMenuPrefix(a *app, k Key) {
 	if k.Kind != KeyRune {
 		return
 	}
@@ -1243,7 +1266,7 @@ func (m *mainLayer) handleSpace(a *app, k Key) {
 		hl.reload(a)
 		a.pushLayer(hl)
 	case 'o':
-		a.pushLayer(newOpenLayer(""))
+		a.pushLayer(newOpenLayer(a, ""))
 	case 's':
 		m.saveActive(a)
 	case 'S':
@@ -1261,7 +1284,14 @@ func (m *mainLayer) handleSpace(a *app, k Key) {
 		}
 		a.pushLayer(newSaveLayer(m.activeTab, seed))
 	case 'p':
-		// Explain plan for current editor SQL.
+		// Explain plan for current editor SQL. Runs off the main loop
+		// because some drivers (MSSQL with SHOWPLAN_XML, Postgres on a
+		// big query) can take a noticeable beat; the spinner keeps the
+		// status line live.
+		sess := m.session
+		if sess == nil || sess.explainBusy {
+			return
+		}
 		sql := strings.TrimSpace(m.editor.buf.Text())
 		if sql == "" {
 			m.status = "nothing to explain"
@@ -1271,22 +1301,60 @@ func (m *mainLayer) handleSpace(a *app, k Key) {
 			m.status = "not connected"
 			return
 		}
-		tree, err := a.runExplain(sql)
-		if err != nil {
-			m.status = "explain: " + err.Error()
-			return
-		}
-		a.pushLayer(newExplainLayer(tree))
+		sess.explainBusy = true
+		sess.explainFrame = spinnerFrames[0]
+		m.status = "explain " + sess.explainFrame
+		conn := a.conn
+		done := make(chan struct{})
+		go runSpinner(a, done, func(a *app, frame string) {
+			if sess.explainBusy {
+				sess.explainFrame = frame
+				// Only overwrite the status if it's still ours; a
+				// separate status message (e.g. from another action)
+				// would otherwise get clobbered on every tick.
+				if a.conn == conn {
+					m := a.mainLayerPtr()
+					if m != nil && m.session == sess {
+						m.status = "explain " + frame
+					}
+				}
+			}
+		})
+		go func() {
+			tree, err := a.runExplain(sql)
+			close(done)
+			a.asyncCh <- func(a *app) {
+				sess.explainBusy = false
+				if a.conn != conn {
+					return
+				}
+				m := a.mainLayerPtr()
+				if err != nil {
+					if m != nil && m.session == sess {
+						m.status = "explain: " + err.Error()
+					}
+					return
+				}
+				if m != nil && m.session == sess {
+					m.status = ""
+				}
+				a.pushLayer(newExplainLayer(tree))
+			}
+		}()
 	case 'q':
 		a.quit = true
 	}
 }
 
 func (m *mainLayer) resultsTitle() string {
-	if m.table.Wrap() {
-		return "Results  [wrap]"
+	tags := ""
+	if m.table.Filter() != "" {
+		tags += " ⚲"
 	}
-	return "Results"
+	if m.table.Wrap() {
+		tags += "  [wrap]"
+	}
+	return "Results" + tags
 }
 
 // resultsRightInfo builds the top-right border label on the results panel.
@@ -1356,10 +1424,10 @@ func (m *mainLayer) statusText(a *app, width int) string {
 }
 
 // Hints is the Layer interface entry point for mainLayer. It dispatches on
-// the pendingSpace prefix and the focused panel, letting each branch build
+// the pendingMenu prefix and the focused panel, letting each branch build
 // a context-aware line that hides keys that wouldn't currently do anything.
 func (m *mainLayer) Hints(a *app) string {
-	if m.pendingSpace {
+	if m.pendingMenu {
 		return m.spaceMenuHints(a)
 	}
 	switch m.focus {
@@ -1422,7 +1490,7 @@ func (m *mainLayer) explorerHints(_ *app) string {
 		"Ctrl+Q=quit",
 		enterHint,
 		sHint,
-		"Space=menu",
+		"Ctrl+K=menu",
 	)
 }
 
@@ -1446,7 +1514,7 @@ func (m *mainLayer) resultsHints(a *app) string {
 			"F1=help",
 			"Ctrl+Q=quit",
 			"y=copy error",
-			"Space=menu",
+			"Ctrl+K=menu",
 		)
 	}
 	hasRows := m.table.RowCount() > 0
@@ -1455,7 +1523,7 @@ func (m *mainLayer) resultsHints(a *app) string {
 		"Ctrl+Q=quit",
 		hintIf(hasRows, "Enter=inspect"),
 		hintIf(hasRows, "y=copy"),
-		"Space=menu",
+		"Ctrl+K=menu",
 	)
 }
 

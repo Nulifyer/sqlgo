@@ -28,6 +28,13 @@ type openLayer struct {
 	// absolute path so marks survive filter changes.
 	marked map[string]bool
 
+	// scanning drives the spinner in the status line while the
+	// background walk is in flight. scanFrame holds the current
+	// braille frame; scanGen fences out stale goroutine results if
+	// the layer is somehow reused.
+	scanning  bool
+	scanFrame string
+
 	lastListTop int
 	lastListH   int
 	clicks      clickTracker
@@ -51,11 +58,55 @@ const openScanMaxDepth = 6
 // instantly.
 const openScanMaxFiles = 2000
 
-func newOpenLayer(seed string) *openLayer {
-	ol := &openLayer{search: newInput(seed), marked: map[string]bool{}}
-	ol.scan()
+func newOpenLayer(a *app, seed string) *openLayer {
+	ol := &openLayer{
+		search:    newInput(seed),
+		marked:    map[string]bool{},
+		scanning:  true,
+		scanFrame: spinnerFrames[0],
+	}
 	ol.filter()
+	ol.startScan(a)
 	return ol
+}
+
+// startScan walks the cwd for *.sql on a goroutine, posting the
+// discovered entries back via asyncCh. A spinner runs in parallel so
+// the status line stays live on big trees. Layer identity is checked
+// on each async callback so if the user Esc's the picker mid-walk the
+// stale result just gets dropped.
+func (ol *openLayer) startScan(a *app) {
+	done := make(chan struct{})
+	go runSpinner(a, done, func(a *app, frame string) {
+		if top, ok := a.topLayer().(*openLayer); ok && top == ol && ol.scanning {
+			ol.scanFrame = frame
+			ol.refreshStatus()
+		}
+	})
+	go func() {
+		entries, scanErr := scanSQLFiles()
+		close(done)
+		a.asyncCh <- func(a *app) {
+			if top, ok := a.topLayer().(*openLayer); !ok || top != ol {
+				return
+			}
+			ol.all = entries
+			if scanErr != "" {
+				ol.scanErr = scanErr
+			}
+			ol.scanning = false
+			ol.filter()
+		}
+	}()
+}
+
+// refreshStatus recomputes just the status line without retouching
+// the filter. Used during scan so each spinner tick lands a new frame
+// but doesn't rerun the substring match on a stable ol.all.
+func (ol *openLayer) refreshStatus() {
+	if ol.scanning {
+		ol.status = ol.scanFrame + " scanning for .sql files…"
+	}
 }
 
 // scan walks the current working directory looking for *.sql files. It
@@ -64,15 +115,18 @@ func newOpenLayer(seed string) *openLayer {
 // directory names from that skip set: each non-blank, non-# line is a
 // basename to skip, or a `!name` to re-include one of the defaults
 // (e.g. `!vendor` when a project keeps schema SQL under vendor/).
-func (ol *openLayer) scan() {
+// scanSQLFiles does the filesystem walk off the main goroutine.
+// Returns the discovered entries (sorted most-recent first) and, on
+// failure, a printable error string that gets surfaced on the picker.
+func scanSQLFiles() ([]openEntry, string) {
 	root, err := os.Getwd()
 	if err != nil {
-		ol.scanErr = "cwd: " + err.Error()
-		return
+		return nil, "cwd: " + err.Error()
 	}
 	skip := loadSkipSet(root)
 	rootDepth := strings.Count(filepath.Clean(root), string(filepath.Separator))
 	var out []openEntry
+	var scanErr string
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			if d != nil && d.IsDir() {
@@ -111,7 +165,7 @@ func (ol *openLayer) scan() {
 		return nil
 	})
 	if walkErr != nil {
-		ol.scanErr = "scan: " + walkErr.Error()
+		scanErr = "scan: " + walkErr.Error()
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].modUnix != out[j].modUnix {
@@ -119,7 +173,7 @@ func (ol *openLayer) scan() {
 		}
 		return out[i].rel < out[j].rel
 	})
-	ol.all = out
+	return out, scanErr
 }
 
 // defaultSkipDirs are the directory basenames we skip by default when
@@ -182,6 +236,8 @@ func (ol *openLayer) filter() {
 	}
 	ol.scroll = 0
 	switch {
+	case ol.scanning:
+		ol.status = ol.scanFrame + " scanning for .sql files…"
 	case ol.scanErr != "":
 		ol.status = ol.scanErr
 	case len(ol.all) == 0:

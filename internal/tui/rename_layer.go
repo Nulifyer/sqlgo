@@ -3,7 +3,7 @@ package tui
 import "strings"
 
 // renameLayer is a small modal overlay that edits the title of a query
-// tab. Invoked by F2 or by a double-click on the query tab strip. Enter
+// tab. Invoked by Ctrl+R or by a double-click on the query tab strip. Enter
 // commits, Esc cancels. Empty/whitespace input is treated as cancel so a
 // user who clears the field and presses Enter doesn't end up with a
 // blank tab label.

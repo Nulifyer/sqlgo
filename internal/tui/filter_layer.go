@@ -1,5 +1,12 @@
 package tui
 
+import "time"
+
+// filterDebounce is the quiet window after the last keystroke before the
+// table-wide filter recompute fires. Tuned for "feels live" but still
+// avoids reflowing a million-row result on every character.
+const filterDebounce = 120 * time.Millisecond
+
 // filterLayer is the modal overlay that prompts for a filter on the
 // current results buffer. Three syntaxes are recognized:
 //
@@ -13,6 +20,12 @@ package tui
 // FilterNote() and render as a dimmed note line inside the box.
 type filterLayer struct {
 	input *input
+	// gen counts keystrokes since the layer opened. The debounce
+	// goroutine captures the gen at scheduling time; on fire it
+	// re-checks against the current gen and skips the SetFilter call
+	// if a newer keystroke has arrived. Avoids piling up stale
+	// filter recomputes on a fast typist.
+	gen int
 }
 
 func newFilterLayer(seed string) *filterLayer {
@@ -86,12 +99,30 @@ func (fl *filterLayer) HandleKey(a *app, k Key) {
 		return
 	}
 	if k.Kind == KeyEnter {
-		// Commit the current filter (already live) and close.
+		// Apply any pending edit immediately so a fast typist who hits
+		// Enter before the debounce fires doesn't close the layer with
+		// a stale filter applied.
+		a.mainLayerPtr().table.SetFilter(fl.input.String())
 		a.popLayer()
 		return
 	}
 	fl.input.handle(k)
-	a.mainLayerPtr().table.SetFilter(fl.input.String())
+	fl.gen++
+	gen := fl.gen
+	want := fl.input.String()
+	go func() {
+		time.Sleep(filterDebounce)
+		a.asyncCh <- func(a *app) {
+			// Layer may have been popped, or another keystroke may
+			// have superseded this one -- in either case the newer
+			// path will (or did) apply the right filter.
+			top, ok := a.topLayer().(*filterLayer)
+			if !ok || top != fl || fl.gen != gen {
+				return
+			}
+			a.mainLayerPtr().table.SetFilter(want)
+		}
+	}()
 }
 
 func (fl *filterLayer) Hints(a *app) string {

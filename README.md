@@ -137,7 +137,7 @@ Open the command menu with `Ctrl+K` to connect, disconnect, export, view history
 | | `F8` | Key-debug overlay |
 | **Query editor** | `F5` | Run query |
 | | `Ctrl+C` | Cancel running query (copies selection when idle) |
-| | `Ctrl+S` / `F2` | Save tab / rename tab |
+| | `Ctrl+S` / `Ctrl+R` | Save tab / rename tab |
 | | `Ctrl+T` / `Ctrl+W` | New tab / close tab |
 | | `Ctrl+PgUp` / `Ctrl+PgDn` | Cycle query tabs |
 | | `F11` | Toggle fullscreen editor |
