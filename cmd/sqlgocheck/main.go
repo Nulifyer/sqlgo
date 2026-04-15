@@ -32,6 +32,7 @@ import (
 	_ "github.com/Nulifyer/sqlgo/internal/db/oracle"
 	_ "github.com/Nulifyer/sqlgo/internal/db/postgres"
 	_ "github.com/Nulifyer/sqlgo/internal/db/sqlite"
+	_ "github.com/Nulifyer/sqlgo/internal/db/sybase"
 )
 
 func main() {

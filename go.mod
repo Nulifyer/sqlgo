@@ -3,6 +3,7 @@ module github.com/Nulifyer/sqlgo
 go 1.26.2
 
 require (
+	github.com/Nulifyer/go-tds v0.1.8-0.20260415143714-e2ac700c7d15
 	github.com/atotto/clipboard v0.1.4
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/jackc/pgx/v5 v5.9.1
@@ -33,6 +34,7 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	gitlab.com/nyarla/go-crypt v0.0.0-20160106005555-d9a5dc2b789b // indirect
+	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
