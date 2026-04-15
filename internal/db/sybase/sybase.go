@@ -27,14 +27,15 @@ type driver struct{}
 func (driver) Name() string { return driverName }
 
 var capabilities = db.Capabilities{
-	SchemaDepth:          db.SchemaDepthSchemas,
-	LimitSyntax:          db.LimitSyntaxSelectTop,
-	IdentifierQuote:      '"',
-	SupportsCancel:       true,
-	SupportsTLS:          true,
-	ExplainFormat:        db.ExplainFormatNone,
-	Dialect:              sqltok.DialectSybase,
-	SupportsTransactions: true,
+	SchemaDepth:           db.SchemaDepthSchemas,
+	LimitSyntax:           db.LimitSyntaxSelectTop,
+	IdentifierQuote:       '"',
+	SupportsCancel:        true,
+	SupportsTLS:           true,
+	ExplainFormat:         db.ExplainFormatNone,
+	Dialect:               sqltok.DialectSybase,
+	SupportsTransactions:  true,
+	SupportsCrossDatabase: true,
 }
 
 func (driver) Capabilities() db.Capabilities { return capabilities }
@@ -53,6 +54,8 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		RoutinesQuery:     routinesQuery,
 		TriggersQuery:     triggersQuery,
 		DefinitionFetcher: fetchDefinition,
+		DatabaseListQuery: databaseListQuery,
+		UseDatabaseStmt:   useDatabaseStmt,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sybase: %w", err)
@@ -170,6 +173,25 @@ ORDER BY c.colid, c.number
 	qualified := quoteIdent(schema) + "." + quoteIdent(name)
 	drop := fmt.Sprintf("DROP %s %s\ngo\n", dropKw, qualified)
 	return drop + strings.TrimRight(body, "\r\n\t ;") + "\ngo\n", nil
+}
+
+// databaseListQuery lists user databases from master..sysdatabases,
+// filtering out the standard ASE system databases. status & 320 masks
+// offline (32) and suspect (256) states so the explorer never tries to
+// USE an unusable database.
+const databaseListQuery = `
+SELECT name
+FROM master..sysdatabases
+WHERE name NOT IN ('master','model','tempdb','sybsystemprocs','sybsystemdb','dbccdb')
+  AND (status & 320) = 0
+ORDER BY name
+`
+
+// useDatabaseStmt emits `use [dbname]`. ASE 15+ accepts bracketed
+// identifiers without requiring `set quoted_identifier on`. `]` inside
+// a name is doubled defensively; ASE disallows it in practice.
+func useDatabaseStmt(name string) string {
+	return "use [" + strings.ReplaceAll(name, "]", "]]") + "]"
 }
 
 func quoteIdent(s string) string {

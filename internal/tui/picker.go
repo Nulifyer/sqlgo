@@ -58,7 +58,21 @@ func (p *picker) draw(s *cellbuf, termW, termH int) {
 	if boxW < 30 {
 		boxW = 30
 	}
-	boxH := len(p.conns) + 8
+	// Wrap status first so the box can grow when the message is long
+	// (e.g. a full DSN error). Cap the wrapped block so it can't eat
+	// the whole dialog.
+	var statusLines []string
+	if p.status != "" {
+		statusLines = wrapText(p.status, boxW-4)
+		if len(statusLines) > 6 {
+			statusLines = statusLines[:6]
+		}
+	}
+	extraStatus := 0
+	if len(statusLines) > 1 {
+		extraStatus = len(statusLines) - 1
+	}
+	boxH := len(p.conns) + 8 + extraStatus
 	if boxH < 12 {
 		boxH = 12
 	}
@@ -89,7 +103,10 @@ func (p *picker) draw(s *cellbuf, termW, termH int) {
 	} else {
 		s.writeAt(cur, innerCol, "Select a connection:")
 		listTop := cur + 2
-		maxRows := boxH - 6
+		maxRows := boxH - 5 - len(statusLines)
+		if len(statusLines) == 0 {
+			maxRows = boxH - 6
+		}
 		if maxRows < 1 {
 			maxRows = 1
 		}
@@ -116,13 +133,16 @@ func (p *picker) draw(s *cellbuf, termW, termH int) {
 		}
 	}
 
-	// Transient status line inside the box (e.g. "connecting...",
-	// "save failed"). Key hints live in the bottom footer via Hints().
-	// Use the rune-aware truncate so a long DSN error doesn't cut a
-	// UTF-8 sequence mid-byte or drop without an ellipsis.
-	if p.status != "" {
+	// Transient status block inside the box (e.g. "connecting...",
+	// "connect failed: <DSN error>"). Wrapped so long messages stay
+	// legible instead of getting truncated. Key hints live in the
+	// bottom footer via Hints().
+	if len(statusLines) > 0 {
 		s.setFg(colorBorderFocused)
-		s.writeAt(r.row+r.h-2, innerCol, truncate(p.status, boxW-4))
+		startRow := r.row + r.h - 1 - len(statusLines)
+		for i, line := range statusLines {
+			s.writeAt(startRow+i, innerCol, line)
+		}
 		s.resetStyle()
 	}
 }

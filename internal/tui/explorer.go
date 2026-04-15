@@ -16,7 +16,8 @@ import (
 type explorerItem struct {
 	kind       explorerItemKind
 	label      string        // display text WITHOUT the indent/marker
-	schemaName string        // owning schema (set for all kinds)
+	catalog    string        // owning database for DB-tier mode; empty in single-DB mode
+	schemaName string        // owning schema (set for all kinds except itemDatabase)
 	subgroup   subgroupKind  // valid for itemSubgroup; also set on leaves so Toggle knows which group they belong to
 	table      db.TableRef   // valid only for itemTable / itemView
 	routine    db.RoutineRef // valid only for itemProcedure / itemFunction
@@ -34,6 +35,7 @@ const (
 	itemProcedure
 	itemFunction
 	itemTrigger
+	itemDatabase
 )
 
 // subgroupKind distinguishes the children a schema can have.
@@ -92,10 +94,24 @@ type explorer struct {
 	scroll   int            // first visible item
 	err      string         // non-empty when schema load failed
 	loading  string         // non-empty while a schema fetch is in flight; holds current spinner frame
+
+	// DB-tier mode (SupportsCrossDatabase + blank default database).
+	// dbMode flips rebuild into a top-level list of databases; each
+	// expanded entry draws the standard schema tier from dbSchemas[name].
+	dbMode    bool
+	databases []string
+	dbSchemas map[string]*db.SchemaInfo // catalog -> loaded schema (absent == not yet fetched)
+	dbLoading map[string]string         // catalog -> current spinner frame while a fetch is in flight
+	dbErr     map[string]string         // catalog -> load error message
 }
 
 func newExplorer() *explorer {
-	return &explorer{expanded: map[string]bool{}}
+	return &explorer{
+		expanded:  map[string]bool{},
+		dbSchemas: map[string]*db.SchemaInfo{},
+		dbLoading: map[string]string{},
+		dbErr:     map[string]string{},
+	}
 }
 
 // SetSchema replaces the displayed schema and resets cursor/scroll.
@@ -112,47 +128,72 @@ func (e *explorer) SetSchema(info *db.SchemaInfo, depth db.SchemaDepth) {
 	e.cursor = 0
 	e.scroll = 0
 	if info != nil {
-		defaultExpandedSubgroups := []subgroupKind{subgroupTables, subgroupViews}
-		seedSchema := func(s string) {
-			if _, seen := e.expanded[s]; !seen {
-				e.expanded[s] = true
-			}
-			for _, sg := range defaultExpandedSubgroups {
-				k := subgroupExpansionKey(s, sg)
-				if _, seen := e.expanded[k]; !seen {
-					e.expanded[k] = true
-				}
-			}
-		}
-		for _, t := range info.Tables {
-			seedSchema(t.Schema)
-		}
-		for _, r := range info.Routines {
-			seedSchema(r.Schema)
-		}
-		for _, tr := range info.Triggers {
-			seedSchema(tr.Schema)
-		}
-		if depth == db.SchemaDepthFlat {
-			for _, sg := range defaultExpandedSubgroups {
-				k := subgroupExpansionKey("", sg)
-				if _, seen := e.expanded[k]; !seen {
-					e.expanded[k] = true
-				}
-			}
-		}
-		// Sys pseudo-schema and all its subgroups start collapsed.
-		if _, seen := e.expanded[sysSchemaSentinel]; !seen {
-			e.expanded[sysSchemaSentinel] = false
-		}
+		e.seedExpansion("", info, depth)
 	}
 	e.rebuild()
 }
 
-// subgroupExpansionKey returns the map key used to track a subgroup's
-// expanded state. \x00 is a byte that can't appear in identifiers.
-func subgroupExpansionKey(schema string, sg subgroupKind) string {
-	return schema + "\x00" + sg.label()
+// seedExpansion marks schemas + default subgroups as expanded the first
+// time we see them under `catalog`. Shared by single-DB SetSchema and
+// per-DB SetDatabaseSchema so both tiers open to a usable default.
+func (e *explorer) seedExpansion(catalog string, info *db.SchemaInfo, depth db.SchemaDepth) {
+	defaultExpandedSubgroups := []subgroupKind{subgroupTables, subgroupViews}
+	seedSchema := func(s string) {
+		sk := schemaExpansionKey(catalog, s)
+		if _, seen := e.expanded[sk]; !seen {
+			e.expanded[sk] = true
+		}
+		for _, sg := range defaultExpandedSubgroups {
+			k := subgroupExpansionKey(catalog, s, sg)
+			if _, seen := e.expanded[k]; !seen {
+				e.expanded[k] = true
+			}
+		}
+	}
+	for _, t := range info.Tables {
+		seedSchema(t.Schema)
+	}
+	for _, r := range info.Routines {
+		seedSchema(r.Schema)
+	}
+	for _, tr := range info.Triggers {
+		seedSchema(tr.Schema)
+	}
+	if depth == db.SchemaDepthFlat {
+		for _, sg := range defaultExpandedSubgroups {
+			k := subgroupExpansionKey(catalog, "", sg)
+			if _, seen := e.expanded[k]; !seen {
+				e.expanded[k] = true
+			}
+		}
+	}
+	// Sys pseudo-schema and all its subgroups start collapsed.
+	sysKey := schemaExpansionKey(catalog, sysSchemaSentinel)
+	if _, seen := e.expanded[sysKey]; !seen {
+		e.expanded[sysKey] = false
+	}
+}
+
+// Expansion-key helpers. All three share the `expanded` map. Keys are
+// namespaced by a leading sentinel + optional catalog so DB-tier mode
+// can carry independent schema/subgroup state per database without
+// colliding with the legacy single-DB layout.
+//
+//	db key:       "\x02" + catalog
+//	schema key:   "\x03" + catalog + "\x01" + schema
+//	subgroup key: "\x04" + catalog + "\x01" + schema + "\x00" + sg.label()
+//
+// In single-DB mode catalog is the empty string.
+func dbExpansionKey(catalog string) string {
+	return "\x02" + catalog
+}
+
+func schemaExpansionKey(catalog, schema string) string {
+	return "\x03" + catalog + "\x01" + schema
+}
+
+func subgroupExpansionKey(catalog, schema string, sg subgroupKind) string {
+	return "\x04" + catalog + "\x01" + schema + "\x00" + sg.label()
 }
 
 // SetLoading shows an animated placeholder while a background schema
@@ -189,6 +230,116 @@ func (e *explorer) SetError(msg string) {
 	e.items = nil
 	e.cursor = 0
 	e.scroll = 0
+}
+
+// SetDatabases switches the explorer into DB-tier mode and seeds the
+// top-level list. Called once after ListDatabases returns. Preserves any
+// already-loaded per-DB schemas (dbSchemas) so a refresh doesn't wipe
+// expanded children; callers wanting a full reset should call SetSchema
+// with nil first.
+func (e *explorer) SetDatabases(names []string) {
+	e.dbMode = true
+	e.databases = append(e.databases[:0], names...)
+	e.info = nil
+	e.err = ""
+	e.loading = ""
+	e.cursor = 0
+	e.scroll = 0
+	e.rebuild()
+}
+
+// SetDatabaseSchema stores a loaded schema for one database and drops
+// any loading/error marker for it. Seeds default expansion under the
+// catalog so the user lands on open Tables/Views like single-DB mode.
+func (e *explorer) SetDatabaseSchema(catalog string, info *db.SchemaInfo) {
+	if info != nil {
+		e.seedExpansion(catalog, info, e.depth)
+	}
+	e.dbSchemas[catalog] = info
+	delete(e.dbLoading, catalog)
+	delete(e.dbErr, catalog)
+	e.rebuild()
+}
+
+// SetDatabaseError records a per-DB load failure. Clears any loading
+// marker so the placeholder flips from spinner to error text.
+func (e *explorer) SetDatabaseError(catalog, msg string) {
+	e.dbErr[catalog] = msg
+	delete(e.dbLoading, catalog)
+	e.rebuild()
+}
+
+// SetDatabaseLoading marks one DB as in-flight with the given spinner
+// frame. Passing an empty frame clears the marker without storing a
+// schema (used if the caller aborts before a result lands).
+func (e *explorer) SetDatabaseLoading(catalog, frame string) {
+	if frame == "" {
+		delete(e.dbLoading, catalog)
+	} else {
+		e.dbLoading[catalog] = frame
+		delete(e.dbErr, catalog)
+	}
+	e.rebuild()
+}
+
+// SetDatabaseLoadingFrame advances the spinner for a DB already marked
+// loading. No-op if the DB isn't currently loading so late ticks can't
+// resurrect a cleared placeholder.
+func (e *explorer) SetDatabaseLoadingFrame(catalog, frame string) {
+	if _, ok := e.dbLoading[catalog]; !ok {
+		return
+	}
+	e.dbLoading[catalog] = frame
+}
+
+// SelectedDatabase returns the catalog name under the cursor when it's
+// on a DB row. ok==false otherwise. Used by the main layer to know
+// which DB to fetch on expand.
+func (e *explorer) SelectedDatabase() (string, bool) {
+	if e.cursor < 0 || e.cursor >= len(e.items) {
+		return "", false
+	}
+	it := e.items[e.cursor]
+	if it.kind != itemDatabase {
+		return "", false
+	}
+	return it.catalog, true
+}
+
+// CursorCatalog returns the owning database of the item under the cursor,
+// or empty when the tree isn't in DB-tier mode or the row has no catalog
+// (e.g. single-DB drivers). Used by the main layer to auto-pin a query
+// tab's activeCatalog when the user opens a table/routine/trigger from a
+// specific DB subtree.
+func (e *explorer) CursorCatalog() string {
+	if e.cursor < 0 || e.cursor >= len(e.items) {
+		return ""
+	}
+	return e.items[e.cursor].catalog
+}
+
+// NeedsDatabaseLoad reports whether the cursor is on a DB row that is
+// expanded (or about to be, after a toggle) but has no schema loaded
+// and no in-flight fetch. The main layer calls this after Toggle to
+// decide whether to kick off SchemaForDatabase.
+func (e *explorer) NeedsDatabaseLoad() (string, bool) {
+	if !e.dbMode {
+		return "", false
+	}
+	cat, ok := e.SelectedDatabase()
+	if !ok {
+		return "", false
+	}
+	if !e.expanded[dbExpansionKey(cat)] {
+		return "", false
+	}
+	if _, loading := e.dbLoading[cat]; loading {
+		return "", false
+	}
+	if _, loaded := e.dbSchemas[cat]; loaded {
+		return "", false
+	}
+	return cat, true
 }
 
 // Selected returns the currently highlighted item, if any. ok==false means
@@ -297,8 +448,8 @@ func (e *explorer) MoveCursor(delta int) {
 	}
 }
 
-// Toggle expands or collapses the group under the cursor. Works on schemas
-// and on Tables/Views subgroups; no-op on leaves.
+// Toggle expands or collapses the group under the cursor. Works on
+// databases, schemas, and Tables/Views subgroups; no-op on leaves.
 func (e *explorer) Toggle() {
 	if e.cursor < 0 || e.cursor >= len(e.items) {
 		return
@@ -306,10 +457,12 @@ func (e *explorer) Toggle() {
 	it := e.items[e.cursor]
 	var key string
 	switch it.kind {
+	case itemDatabase:
+		key = dbExpansionKey(it.catalog)
 	case itemSchema:
-		key = it.schemaName
+		key = schemaExpansionKey(it.catalog, it.schemaName)
 	case itemSubgroup:
-		key = subgroupExpansionKey(it.schemaName, it.subgroup)
+		key = subgroupExpansionKey(it.catalog, it.schemaName, it.subgroup)
 	default:
 		return
 	}
@@ -317,11 +470,12 @@ func (e *explorer) Toggle() {
 
 	// Preserve the highlight across the rebuild.
 	targetKind := it.kind
+	targetCatalog := it.catalog
 	targetSchema := it.schemaName
 	targetSub := it.subgroup
 	e.rebuild()
 	for i, row := range e.items {
-		if row.kind != targetKind || row.schemaName != targetSchema {
+		if row.kind != targetKind || row.catalog != targetCatalog || row.schemaName != targetSchema {
 			continue
 		}
 		if targetKind == itemSubgroup && row.subgroup != targetSub {
@@ -353,9 +507,55 @@ func (e *explorer) Toggle() {
 // Subgroup headers are only emitted when their group has at least one entry.
 func (e *explorer) rebuild() {
 	e.items = nil
-	if e.info == nil {
-		return
+	if e.dbMode {
+		for _, name := range e.databases {
+			e.items = append(e.items, explorerItem{
+				kind:    itemDatabase,
+				label:   name,
+				catalog: name,
+			})
+			if !e.expanded[dbExpansionKey(name)] {
+				continue
+			}
+			if msg, ok := e.dbErr[name]; ok && msg != "" {
+				e.items = append(e.items, explorerItem{
+					kind:    itemSubgroup, // reuse for indent; treated as informational
+					label:   "(error: " + msg + ")",
+					catalog: name,
+				})
+				continue
+			}
+			if frame := e.dbLoading[name]; frame != "" {
+				e.items = append(e.items, explorerItem{
+					kind:    itemSubgroup,
+					label:   frame + " loading…",
+					catalog: name,
+				})
+				continue
+			}
+			info := e.dbSchemas[name]
+			if info == nil {
+				continue
+			}
+			e.emitSchemaTier(name, info, e.depth)
+		}
+	} else if e.info != nil {
+		e.emitSchemaTier("", e.info, e.depth)
 	}
+
+	if e.cursor >= len(e.items) {
+		e.cursor = len(e.items) - 1
+	}
+	if e.cursor < 0 {
+		e.cursor = 0
+	}
+}
+
+// emitSchemaTier flattens info into schema/subgroup/leaf rows under
+// catalog. Shared between single-DB rebuild and per-DB expansion in
+// dbMode. Leaves carry catalog on the row for display; BuildSelect
+// strips it from the scaffold so tabs can retarget via activeCatalog.
+func (e *explorer) emitSchemaTier(catalog string, info *db.SchemaInfo, depth db.SchemaDepth) {
 	type schemaBucket struct {
 		tables     []db.TableRef
 		views      []db.TableRef
@@ -379,7 +579,10 @@ func (e *explorer) rebuild() {
 		return b
 	}
 
-	for _, t := range e.info.Tables {
+	for _, t := range info.Tables {
+		if catalog != "" {
+			t.Catalog = catalog
+		}
 		target := touch(t.Schema, t.System)
 		if t.Kind == db.TableKindView {
 			target.views = append(target.views, t)
@@ -387,7 +590,7 @@ func (e *explorer) rebuild() {
 			target.tables = append(target.tables, t)
 		}
 	}
-	for _, r := range e.info.Routines {
+	for _, r := range info.Routines {
 		target := touch(r.Schema, r.System)
 		if r.Kind == db.RoutineKindProcedure {
 			target.procedures = append(target.procedures, r)
@@ -395,21 +598,21 @@ func (e *explorer) rebuild() {
 			target.functions = append(target.functions, r)
 		}
 	}
-	for _, tr := range e.info.Triggers {
+	for _, tr := range info.Triggers {
 		target := touch(tr.Schema, tr.System)
 		target.triggers = append(target.triggers, tr)
 	}
 	sort.Strings(schemas)
 
 	emit := func(schema string, b *schemaBucket) {
-		e.appendTableSubgroup(schema, subgroupTables, b.tables)
-		e.appendTableSubgroup(schema, subgroupViews, b.views)
-		e.appendRoutineSubgroup(schema, subgroupProcedures, b.procedures)
-		e.appendRoutineSubgroup(schema, subgroupFunctions, b.functions)
-		e.appendTriggerSubgroup(schema, b.triggers)
+		e.appendTableSubgroup(catalog, schema, subgroupTables, b.tables)
+		e.appendTableSubgroup(catalog, schema, subgroupViews, b.views)
+		e.appendRoutineSubgroup(catalog, schema, subgroupProcedures, b.procedures)
+		e.appendRoutineSubgroup(catalog, schema, subgroupFunctions, b.functions)
+		e.appendTriggerSubgroup(catalog, schema, b.triggers)
 	}
 
-	if e.depth == db.SchemaDepthFlat {
+	if depth == db.SchemaDepthFlat {
 		merged := &schemaBucket{}
 		for _, s := range schemas {
 			b := buckets[s]
@@ -425,9 +628,10 @@ func (e *explorer) rebuild() {
 			e.items = append(e.items, explorerItem{
 				kind:       itemSchema,
 				label:      s,
+				catalog:    catalog,
 				schemaName: s,
 			})
-			if !e.expanded[s] {
+			if !e.expanded[schemaExpansionKey(catalog, s)] {
 				continue
 			}
 			emit(s, buckets[s])
@@ -441,32 +645,27 @@ func (e *explorer) rebuild() {
 		e.items = append(e.items, explorerItem{
 			kind:       itemSchema,
 			label:      "Sys",
+			catalog:    catalog,
 			schemaName: sysSchemaSentinel,
 		})
-		if e.expanded[sysSchemaSentinel] {
+		if e.expanded[schemaExpansionKey(catalog, sysSchemaSentinel)] {
 			emit(sysSchemaSentinel, sysBucket)
 		}
 	}
-
-	if e.cursor >= len(e.items) {
-		e.cursor = len(e.items) - 1
-	}
-	if e.cursor < 0 {
-		e.cursor = 0
-	}
 }
 
-func (e *explorer) appendTableSubgroup(schema string, sg subgroupKind, entries []db.TableRef) {
+func (e *explorer) appendTableSubgroup(catalog, schema string, sg subgroupKind, entries []db.TableRef) {
 	if len(entries) == 0 {
 		return
 	}
 	e.items = append(e.items, explorerItem{
 		kind:       itemSubgroup,
 		label:      sg.label(),
+		catalog:    catalog,
 		schemaName: schema,
 		subgroup:   sg,
 	})
-	if !e.expanded[subgroupExpansionKey(schema, sg)] {
+	if !e.expanded[subgroupExpansionKey(catalog, schema, sg)] {
 		return
 	}
 	for _, t := range entries {
@@ -477,6 +676,7 @@ func (e *explorer) appendTableSubgroup(schema string, sg subgroupKind, entries [
 		e.items = append(e.items, explorerItem{
 			kind:       leafKind,
 			label:      t.Name,
+			catalog:    catalog,
 			schemaName: schema,
 			subgroup:   sg,
 			table:      t,
@@ -484,17 +684,18 @@ func (e *explorer) appendTableSubgroup(schema string, sg subgroupKind, entries [
 	}
 }
 
-func (e *explorer) appendRoutineSubgroup(schema string, sg subgroupKind, entries []db.RoutineRef) {
+func (e *explorer) appendRoutineSubgroup(catalog, schema string, sg subgroupKind, entries []db.RoutineRef) {
 	if len(entries) == 0 {
 		return
 	}
 	e.items = append(e.items, explorerItem{
 		kind:       itemSubgroup,
 		label:      sg.label(),
+		catalog:    catalog,
 		schemaName: schema,
 		subgroup:   sg,
 	})
-	if !e.expanded[subgroupExpansionKey(schema, sg)] {
+	if !e.expanded[subgroupExpansionKey(catalog, schema, sg)] {
 		return
 	}
 	leafKind := itemFunction
@@ -509,6 +710,7 @@ func (e *explorer) appendRoutineSubgroup(schema string, sg subgroupKind, entries
 		e.items = append(e.items, explorerItem{
 			kind:       leafKind,
 			label:      r.Name,
+			catalog:    catalog,
 			schemaName: schema,
 			subgroup:   sg,
 			routine:    r,
@@ -517,17 +719,18 @@ func (e *explorer) appendRoutineSubgroup(schema string, sg subgroupKind, entries
 	}
 }
 
-func (e *explorer) appendTriggerSubgroup(schema string, entries []db.TriggerRef) {
+func (e *explorer) appendTriggerSubgroup(catalog, schema string, entries []db.TriggerRef) {
 	if len(entries) == 0 {
 		return
 	}
 	e.items = append(e.items, explorerItem{
 		kind:       itemSubgroup,
 		label:      subgroupTriggers.label(),
+		catalog:    catalog,
 		schemaName: schema,
 		subgroup:   subgroupTriggers,
 	})
-	if !e.expanded[subgroupExpansionKey(schema, subgroupTriggers)] {
+	if !e.expanded[subgroupExpansionKey(catalog, schema, subgroupTriggers)] {
 		return
 	}
 	for _, tr := range entries {
@@ -538,6 +741,7 @@ func (e *explorer) appendTriggerSubgroup(schema string, entries []db.TriggerRef)
 		e.items = append(e.items, explorerItem{
 			kind:       itemTrigger,
 			label:      tr.Name,
+			catalog:    catalog,
 			schemaName: schema,
 			subgroup:   subgroupTriggers,
 			trigger:    tr,
@@ -630,22 +834,38 @@ func (e *explorer) draw(c *cellbuf, r rect, focused bool) {
 // leaves at 2. The Flat case is distinguished by an empty schemaName
 // on the subgroup / leaf (populated by rebuild()).
 func renderExplorerLine(it explorerItem, expanded map[string]bool) string {
+	dbIndent := ""
+	if it.catalog != "" && it.kind != itemDatabase {
+		dbIndent = "  "
+	}
 	switch it.kind {
-	case itemSchema:
+	case itemDatabase:
 		marker := "▸"
-		if expanded[it.schemaName] {
+		if expanded[dbExpansionKey(it.catalog)] {
 			marker = "▾"
 		}
 		return marker + " " + it.label
-	case itemSubgroup:
+	case itemSchema:
 		marker := "▸"
-		if expanded[subgroupExpansionKey(it.schemaName, it.subgroup)] {
+		if expanded[schemaExpansionKey(it.catalog, it.schemaName)] {
+			marker = "▾"
+		}
+		return dbIndent + marker + " " + it.label
+	case itemSubgroup:
+		// subgroup rows with a zero subgroup value are the informational
+		// loading/error placeholders emitted under a DB row — render
+		// them as plain indented text with no marker.
+		if it.subgroup == subgroupNone {
+			return dbIndent + "  " + it.label
+		}
+		marker := "▸"
+		if expanded[subgroupExpansionKey(it.catalog, it.schemaName, it.subgroup)] {
 			marker = "▾"
 		}
 		if it.schemaName == "" {
-			return marker + " " + it.label
+			return dbIndent + marker + " " + it.label
 		}
-		return "  " + marker + " " + it.label
+		return dbIndent + "  " + marker + " " + it.label
 	case itemTable, itemView, itemProcedure, itemFunction, itemTrigger:
 		leaf := "· "
 		switch it.kind {
@@ -663,9 +883,9 @@ func renderExplorerLine(it explorerItem, expanded map[string]bool) string {
 			body += " " + it.suffix
 		}
 		if it.schemaName == "" {
-			return "    " + body
+			return dbIndent + "    " + body
 		}
-		return "      " + body
+		return dbIndent + "      " + body
 	}
 	return it.label
 }
@@ -676,10 +896,14 @@ func renderExplorerLine(it explorerItem, expanded map[string]bool) string {
 // capability struct — no string-switch on Name() here.
 func QualifiedName(caps db.Capabilities, t db.TableRef) string {
 	open, close := quoteChars(caps.IdentifierQuote)
-	if t.Schema == "" {
-		return open + t.Name + close
+	parts := ""
+	if t.Catalog != "" {
+		parts = open + t.Catalog + close + "."
 	}
-	return open + t.Schema + close + "." + open + t.Name + close
+	if t.Schema == "" {
+		return parts + open + t.Name + close
+	}
+	return parts + open + t.Schema + close + "." + open + t.Name + close
 }
 
 // quoteChars returns the opening and closing identifier quote characters
@@ -702,6 +926,10 @@ func quoteChars(open rune) (string, string) {
 // the given table. The limit form (TOP vs LIMIT) and identifier quoting
 // both come from caps.
 func BuildSelect(caps db.Capabilities, t db.TableRef, limit int) string {
+	// Strip catalog so scaffold reruns cleanly under whatever DB the
+	// tab's activeCatalog routes to via USE-prepend. Three-part names
+	// would pin the query to the source DB.
+	t.Catalog = ""
 	name := QualifiedName(caps, t)
 	switch caps.LimitSyntax {
 	case db.LimitSyntaxSelectTop:

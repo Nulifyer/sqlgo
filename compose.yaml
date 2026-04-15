@@ -30,6 +30,39 @@ services:
     ports:
       - "11433:1433"
 
+  # One-shot init. Waits for the server, then creates two user DBs
+  # (SqlgoA, SqlgoB) so the per-tab activeCatalog flow has something
+  # to switch between. Idempotent -- re-run is a no-op.
+  mssql-init:
+    image: mcr.microsoft.com/mssql-tools18
+    container_name: sqlgo-mssql-init
+    depends_on:
+      - mssql
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        for i in $$(seq 1 30); do
+          /opt/mssql-tools18/bin/sqlcmd -S mssql -U sa -P 'SqlGo_dev_Pass1!' -C -Q "SELECT 1" && break
+          echo "waiting for mssql ($$i)..."; sleep 2
+        done
+        /opt/mssql-tools18/bin/sqlcmd -S mssql -U sa -P 'SqlGo_dev_Pass1!' -C -Q "
+          IF DB_ID('SqlgoA') IS NULL CREATE DATABASE SqlgoA;
+          IF DB_ID('SqlgoB') IS NULL CREATE DATABASE SqlgoB;
+        "
+        /opt/mssql-tools18/bin/sqlcmd -S mssql -d SqlgoA -U sa -P 'SqlGo_dev_Pass1!' -C -Q "
+          IF OBJECT_ID('dbo.widgets','U') IS NULL
+            CREATE TABLE dbo.widgets (id INT PRIMARY KEY, name NVARCHAR(50));
+          IF NOT EXISTS (SELECT 1 FROM dbo.widgets)
+            INSERT dbo.widgets VALUES (1,'alpha-A'),(2,'beta-A');
+        "
+        /opt/mssql-tools18/bin/sqlcmd -S mssql -d SqlgoB -U sa -P 'SqlGo_dev_Pass1!' -C -Q "
+          IF OBJECT_ID('dbo.gadgets','U') IS NULL
+            CREATE TABLE dbo.gadgets (id INT PRIMARY KEY, label NVARCHAR(50));
+          IF NOT EXISTS (SELECT 1 FROM dbo.gadgets)
+            INSERT dbo.gadgets VALUES (1,'gizmo-B'),(2,'widget-B');
+        "
+
   postgres:
     image: postgres:16-alpine
     container_name: sqlgo-postgres

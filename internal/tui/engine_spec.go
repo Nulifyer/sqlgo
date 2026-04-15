@@ -10,6 +10,11 @@ type engineSpec struct {
 	defaultPort int
 	defaultUser string
 	fields      []engineOption
+	// requiredCore lists core* field indices that must be non-empty
+	// at save time. Name + Driver are always required and need not
+	// be listed. Empty slice = only Name + Driver required (e.g.
+	// generic fallback for unknown drivers).
+	requiredCore []int
 }
 
 // engineOption describes one extra field shown below the core
@@ -17,11 +22,12 @@ type engineSpec struct {
 // typing swallowed) constrained to that set. First entry should
 // be "" when "driver default" is legitimate.
 type engineOption struct {
-	key    string
-	label  string
-	mask   bool
-	hint   string // focused help text (future)
-	values []string
+	key      string
+	label    string
+	mask     bool
+	hint     string // focused help text (future)
+	values   []string
+	required bool
 }
 
 // Enum value sets. Empty string first = "driver default".
@@ -45,6 +51,8 @@ var engineSpecs = []engineSpec{
 			{key: "TrustServerCertificate", label: "TrustServerCert", values: mssqlBoolValues},
 			{key: "app name", label: "App name"},
 		},
+		// Database optional: blank enables the cross-DB explorer tier.
+		requiredCore: []int{coreHost, corePort, coreUser, corePassword},
 	},
 	{
 		driver:      "postgres",
@@ -56,6 +64,8 @@ var engineSpecs = []engineSpec{
 			{key: "sslrootcert", label: "SSL root cert"},
 			{key: "application_name", label: "App name"},
 		},
+		// Postgres cannot cross databases on one connection; DB is required.
+		requiredCore: []int{coreHost, corePort, coreUser, corePassword, coreDatabase},
 	},
 	{
 		driver:      "mysql",
@@ -67,6 +77,8 @@ var engineSpecs = []engineSpec{
 			{key: "charset", label: "Charset"},
 			{key: "collation", label: "Collation"},
 		},
+		// Database optional: blank enables the cross-DB explorer tier.
+		requiredCore: []int{coreHost, corePort, coreUser, corePassword},
 	},
 	{
 		driver:      "sqlite",
@@ -76,6 +88,7 @@ var engineSpecs = []engineSpec{
 		fields:      []engineOption{
 			// cfg.Database holds the file path; no extra fields needed.
 		},
+		requiredCore: []int{coreDatabase},
 	},
 	{
 		driver:      "oracle",
@@ -86,6 +99,7 @@ var engineSpecs = []engineSpec{
 			// cfg.Database holds the Oracle service name. go-ora accepts
 			// extra knobs via cfg.Options (SSL, WALLET, PREFETCH_ROWS...).
 		},
+		requiredCore: []int{coreHost, corePort, coreUser, corePassword, coreDatabase},
 	},
 	{
 		driver:      "firebird",
@@ -96,6 +110,7 @@ var engineSpecs = []engineSpec{
 			{key: "role", label: "Role"},
 			{key: "charset", label: "Charset"},
 		},
+		requiredCore: []int{coreHost, corePort, coreUser, corePassword, coreDatabase},
 	},
 	{
 		driver:      "d1",
@@ -106,6 +121,7 @@ var engineSpecs = []engineSpec{
 			// cfg.User = account id, cfg.Database = D1 database id,
 			// cfg.Password = API token. Host overrides api.cloudflare.com.
 		},
+		requiredCore: []int{coreUser, corePassword, coreDatabase},
 	},
 	{
 		driver:      "libsql",
@@ -116,6 +132,7 @@ var engineSpecs = []engineSpec{
 			// cfg.Host holds the Turso database URL; cfg.Password the
 			// auth token. No extra fields.
 		},
+		requiredCore: []int{coreHost, corePassword},
 	},
 	{
 		driver:      "file",
@@ -125,6 +142,7 @@ var engineSpecs = []engineSpec{
 		fields:      []engineOption{
 			// cfg.Database holds a ';'-separated list of file paths.
 		},
+		requiredCore: []int{coreDatabase},
 	},
 }
 
@@ -171,6 +189,32 @@ func engineSpecFor(driver string) engineSpec {
 		}
 	}
 	return engineSpec{driver: driver, label: driver}
+}
+
+// coreLabels provides human-readable names for core* indices used
+// in validation error messages.
+var coreLabels = [...]string{
+	coreName:     "Name",
+	coreDriver:   "Driver",
+	coreHost:     "Host",
+	corePort:     "Port",
+	coreUser:     "User",
+	corePassword: "Password",
+	coreDatabase: "Database",
+}
+
+// coreRequired reports whether a core field index must be non-empty
+// for this spec. Name and Driver are always required.
+func (s engineSpec) coreRequired(idx int) bool {
+	if idx == coreName || idx == coreDriver {
+		return true
+	}
+	for _, r := range s.requiredCore {
+		if r == idx {
+			return true
+		}
+	}
+	return false
 }
 
 // driverIndex returns the index of driver in names, or 0 if not found.

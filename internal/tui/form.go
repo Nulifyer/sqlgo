@@ -16,11 +16,12 @@ type connForm struct {
 	title        string
 	originalName string // edit target; passed to SaveConnection as oldName
 
-	fixed       []formField
-	driverNames []string // from db.Registered(); drives the Driver cycler
-	driverIdx   int
-	engine      []formField
-	ssh         []formField
+	fixed        []formField
+	driverNames  []string // from db.Registered(); drives the Driver picker
+	driverIdx    int
+	driverChosen bool // false for new forms until the driver picker commits
+	engine       []formField
+	ssh          []formField
 
 	active int
 	status string
@@ -57,27 +58,38 @@ func newConnForm(title string, c *config.Connection) *connForm {
 		// (tests, mis-wired builds). Matches the pre-C1 default.
 		names = []string{"mssql"}
 	}
-	driver := names[0]
-	if c != nil && c.Driver != "" {
+	chosen := c != nil && c.Driver != ""
+	driver := ""
+	if chosen {
 		driver = c.Driver
 	}
-	idx := driverIndex(names, driver)
-	spec := engineSpecFor(names[idx])
+	idx := 0
+	var spec engineSpec
+	if chosen {
+		idx = driverIndex(names, driver)
+		spec = engineSpecFor(names[idx])
+	}
 
 	f := &connForm{
-		title:       title,
-		driverNames: names,
-		driverIdx:   idx,
+		title:        title,
+		driverNames:  names,
+		driverIdx:    idx,
+		driverChosen: chosen,
 	}
 	f.fixed = make([]formField, coreCount)
 	f.fixed[coreName] = formField{label: "Name", in: newInput("")}
 	f.fixed[coreDriver] = formField{label: "Driver", in: newInput(spec.driver)}
-	f.fixed[coreHost] = formField{label: "Host", in: newInput("localhost")}
-	f.fixed[corePort] = formField{label: "Port", in: newInput(strconv.Itoa(spec.defaultPort))}
-	f.fixed[coreUser] = formField{label: "User", in: newInput(spec.defaultUser)}
+	f.fixed[coreHost] = formField{label: "Host", in: newInput("")}
+	f.fixed[corePort] = formField{label: "Port", in: newInput("")}
+	f.fixed[coreUser] = formField{label: "User", in: newInput("")}
 	f.fixed[corePassword] = formField{label: "Password", in: newInput(""), mask: true}
 	f.fixed[coreDatabase] = formField{label: "Database", in: newInput("")}
-	f.engine = buildEngineFields(spec, nil)
+	if chosen {
+		f.fixed[coreHost].in.SetString("localhost")
+		f.fixed[corePort].in.SetString(strconv.Itoa(spec.defaultPort))
+		f.fixed[coreUser].in.SetString(spec.defaultUser)
+		f.engine = buildEngineFields(spec, nil)
+	}
 	f.ssh = buildSSHFields(config.SSHTunnel{})
 
 	if c != nil {
@@ -91,6 +103,11 @@ func newConnForm(title string, c *config.Connection) *connForm {
 		f.fixed[coreDatabase].in.SetString(c.Database)
 		f.engine = buildEngineFields(spec, c.Options)
 		f.ssh = buildSSHFields(c.SSH)
+	}
+	// New forms start on the driver row so the picker is one keypress away.
+	// With !chosen, allFields() collapses to a single driver row at index 0.
+	if !chosen {
+		f.active = 0
 	}
 	return f
 }
@@ -133,7 +150,12 @@ func buildSSHFields(t config.SSHTunnel) []formField {
 }
 
 // allFields returns all fields flat: fixed, engine, ssh.
+// Until a driver is picked only the driver row is visible so the rest
+// of the form can't be edited against unknown defaults.
 func (f *connForm) allFields() []*formField {
+	if !f.driverChosen {
+		return []*formField{&f.fixed[coreDriver]}
+	}
 	out := make([]*formField, 0, len(f.fixed)+len(f.engine)+len(f.ssh))
 	for i := range f.fixed {
 		out = append(out, &f.fixed[i])
@@ -147,14 +169,51 @@ func (f *connForm) allFields() []*formField {
 	return out
 }
 
-func (f *connForm) fixedLen() int  { return len(f.fixed) }
-func (f *connForm) engineLen() int { return len(f.engine) }
-func (f *connForm) sshLen() int    { return len(f.ssh) }
+func (f *connForm) fixedLen() int {
+	if !f.driverChosen {
+		return 1
+	}
+	return len(f.fixed)
+}
+func (f *connForm) engineLen() int {
+	if !f.driverChosen {
+		return 0
+	}
+	return len(f.engine)
+}
+func (f *connForm) sshLen() int {
+	if !f.driverChosen {
+		return 0
+	}
+	return len(f.ssh)
+}
 
-// onDriverCycler: active field is Driver row (Left/Right changes
-// engine + rebuilds).
-func (f *connForm) onDriverCycler() bool {
-	return f.active == coreDriver
+// onDriverRow reports whether the active field is the driver selector
+// row, regardless of whether other fields are currently gated.
+func (f *connForm) onDriverRow() bool {
+	ff := f.activeField()
+	return ff != nil && ff == &f.fixed[coreDriver]
+}
+
+// isFieldRequired reports whether a form field must be non-empty
+// per the active driver's engineSpec. Used to render the "*" marker
+// and kept in sync with toConnection's validation.
+func (f *connForm) isFieldRequired(field *formField) bool {
+	spec := engineSpecFor(f.fixed[coreDriver].in.String())
+	for i := range f.fixed {
+		if &f.fixed[i] == field {
+			return spec.coreRequired(i)
+		}
+	}
+	for i := range f.engine {
+		if &f.engine[i] == field {
+			if i < len(spec.fields) {
+				return spec.fields[i].required
+			}
+			return false
+		}
+	}
+	return false
 }
 
 func (f *connForm) activeField() *formField {
@@ -166,9 +225,9 @@ func (f *connForm) activeField() *formField {
 }
 
 // onEngineCycler: active field is a constrained engine option.
-// Driver row handled separately by onDriverCycler.
+// Driver row handled separately by onDriverRow (picker, not cycler).
 func (f *connForm) onEngineCycler() bool {
-	if f.onDriverCycler() {
+	if f.onDriverRow() {
 		return false
 	}
 	ff := f.activeField()
@@ -196,6 +255,35 @@ func cycleFieldValue(ff *formField, delta int) {
 	n := len(ff.values)
 	next := (idx + delta + n) % n
 	ff.in.SetString(ff.values[next])
+}
+
+// setDriver applies an absolute driver choice from the picker. On the
+// first pick it fills in defaults and flips driverChosen so the rest
+// of the form renders; on a later re-pick it behaves like cycleDriver
+// to preserve user-typed values.
+func (f *connForm) setDriver(name string) {
+	newIdx := driverIndex(f.driverNames, name)
+	if !f.driverChosen {
+		spec := engineSpecFor(f.driverNames[newIdx])
+		f.driverIdx = newIdx
+		f.driverChosen = true
+		f.fixed[coreDriver].in.SetString(spec.driver)
+		if f.fixed[coreHost].in.String() == "" {
+			f.fixed[coreHost].in.SetString("localhost")
+		}
+		if f.fixed[corePort].in.String() == "" {
+			f.fixed[corePort].in.SetString(strconv.Itoa(spec.defaultPort))
+		}
+		if f.fixed[coreUser].in.String() == "" {
+			f.fixed[coreUser].in.SetString(spec.defaultUser)
+		}
+		f.engine = buildEngineFields(spec, nil)
+		return
+	}
+	if newIdx == f.driverIdx {
+		return
+	}
+	f.cycleDriver(newIdx - f.driverIdx)
 }
 
 // cycleDriver swaps the engine spec, rebuilds engine fields
@@ -240,17 +328,27 @@ func (f *connForm) toConnection() (config.Connection, error) {
 	password := f.fixed[corePassword].in.String()
 	database := strings.TrimSpace(f.fixed[coreDatabase].in.String())
 
-	if name == "" {
-		return config.Connection{}, errSimple("name is required")
-	}
-	if driver == "" {
-		return config.Connection{}, errSimple("driver is required")
-	}
-	// sqlite uses cfg.Database as a file path; defaultPort==0 marks
-	// engines that don't need host.
 	spec := engineSpecFor(driver)
-	if host == "" && spec.defaultPort != 0 {
-		return config.Connection{}, errSimple("host is required")
+	// Required-field validation per driver. Password is not trimmed
+	// (leading/trailing whitespace can be meaningful) — only empty
+	// strings fail. Iterate in declaration order so the first missing
+	// field named is also the first visible one on the form.
+	values := [coreCount]string{
+		coreName:     name,
+		coreDriver:   driver,
+		coreHost:     host,
+		corePort:     portStr,
+		coreUser:     user,
+		corePassword: password,
+		coreDatabase: database,
+	}
+	for idx := 0; idx < coreCount; idx++ {
+		if !spec.coreRequired(idx) {
+			continue
+		}
+		if values[idx] == "" {
+			return config.Connection{}, errSimple(coreLabels[idx] + " is required")
+		}
 	}
 	port := 0
 	if portStr != "" {
@@ -272,13 +370,17 @@ func (f *connForm) toConnection() (config.Connection, error) {
 	}
 
 	// Engine-specific options collapse into the Options map. Empty
-	// values are dropped so save doesn't churn the JSON.
+	// values are dropped so save doesn't churn the JSON. Options
+	// flagged required block save when blank.
 	opts := map[string]string{}
 	for i, opt := range spec.fields {
 		if i >= len(f.engine) {
 			break
 		}
 		v := strings.TrimSpace(f.engine[i].in.String())
+		if opt.required && v == "" {
+			return config.Connection{}, errSimple(opt.label + " is required")
+		}
 		if v != "" {
 			opts[opt.key] = v
 		}
@@ -329,24 +431,21 @@ func (f *connForm) handle(k Key) (config.Connection, bool) {
 		f.prevField()
 		return config.Connection{}, false
 	case KeyLeft:
-		if f.onDriverCycler() {
-			f.cycleDriver(-1)
-			return config.Connection{}, false
-		}
 		if f.onEngineCycler() {
 			cycleFieldValue(f.activeField(), -1)
 			return config.Connection{}, false
 		}
 	case KeyRight:
-		if f.onDriverCycler() {
-			f.cycleDriver(1)
-			return config.Connection{}, false
-		}
 		if f.onEngineCycler() {
 			cycleFieldValue(f.activeField(), 1)
 			return config.Connection{}, false
 		}
 	case KeyEnter:
+		// Driver row Enter is intercepted by formLayer to push the picker;
+		// if we get it here something else routed the key, no-op.
+		if f.onDriverRow() {
+			return config.Connection{}, false
+		}
 		c, err := f.toConnection()
 		if err != nil {
 			f.status = err.Error()
@@ -362,8 +461,8 @@ func (f *connForm) handle(k Key) (config.Connection, bool) {
 		}
 		return c, true
 	}
-	// Cycler rows swallow printable chars (non-editable).
-	if f.onDriverCycler() || f.onEngineCycler() {
+	// Driver row (picker) and cycler rows swallow printable chars.
+	if f.onDriverRow() || f.onEngineCycler() {
 		return config.Connection{}, false
 	}
 	fields := f.allFields()
@@ -374,7 +473,7 @@ func (f *connForm) handle(k Key) (config.Connection, bool) {
 }
 
 func (f *connForm) draw(s *cellbuf, termW, termH int) {
-	labelW := 16
+	labelW := 20
 	valueW := 44
 	boxW := labelW + valueW + 6
 	if boxW > termW-dialogMargin {
@@ -422,7 +521,11 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 			break
 		}
 		lineRow := fieldTop + y
-		label := field.label + ":"
+		label := field.label
+		if f.isFieldRequired(field) {
+			label += " *"
+		}
+		label += ":"
 		if i == f.active {
 			s.setFg(colorBorderFocused)
 		} else {
@@ -435,15 +538,19 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 		if field.mask {
 			val = strings.Repeat("*", len([]rune(val)))
 		}
-		// Cycler rows render "‹ value ›". Empty → "(default)".
-		if i == coreDriver {
-			val = "‹ " + engineSpecFor(f.driverNames[f.driverIdx]).label + " ›"
+		isDriverRow := field == &f.fixed[coreDriver]
+		if isDriverRow {
+			if f.driverChosen {
+				val = "[ " + engineSpecFor(f.driverNames[f.driverIdx]).label + " ]"
+			} else {
+				val = "[ select driver... ]"
+			}
 		} else if field.isCycler() {
 			display := val
 			if display == "" {
 				display = "(default)"
 			}
-			val = "‹ " + display + " ›"
+			val = "< " + display + " >"
 		}
 
 		vCol := innerCol + labelW + 2
@@ -452,13 +559,35 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 			maxVal = 1
 		}
 		rs := []rune(val)
-		if len(rs) > maxVal {
+		// Scroll the visible window so the cursor stays in view. For
+		// driver/cycler rows there's no editing cursor, so just tail-slice.
+		editable := !isDriverRow && !field.isCycler()
+		cursorOffset := 0
+		if editable {
+			cur := field.in.cur
+			if cur > len(rs) {
+				cur = len(rs)
+			}
+			start := 0
+			if len(rs) > maxVal {
+				// Keep cursor visible: shift window so cur sits inside [start, start+maxVal].
+				start = cur - maxVal
+				if start < 0 {
+					start = 0
+				}
+				if start+maxVal > len(rs) {
+					start = len(rs) - maxVal
+				}
+				rs = rs[start : start+maxVal]
+			}
+			cursorOffset = cur - start
+		} else if len(rs) > maxVal {
 			rs = rs[len(rs)-maxVal:]
 		}
 		s.writeAt(lineRow, vCol, string(rs))
 
-		if i == f.active && i != coreDriver && !field.isCycler() {
-			cursorCol := vCol + len(rs)
+		if i == f.active && editable {
+			cursorCol := vCol + cursorOffset
 			if cursorCol > vCol+maxVal {
 				cursorCol = vCol + maxVal
 			}
@@ -468,8 +597,15 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 	}
 
 	if f.status != "" {
+		lines := wrapText(f.status, innerW)
+		if len(lines) > 4 {
+			lines = lines[:4]
+		}
 		s.setFg(colorBorderFocused)
-		s.writeAt(r.row+r.h-2, innerCol, truncate(f.status, innerW))
+		startRow := r.row + r.h - 1 - len(lines)
+		for i, line := range lines {
+			s.writeAt(startRow+i, innerCol, line)
+		}
 		s.resetStyle()
 	}
 }
@@ -507,6 +643,28 @@ func (fl *formLayer) HandleKey(a *app, k Key) {
 		a.popLayer()
 		return
 	}
+	// Driver row: Enter opens the searchable picker instead of
+	// saving. Any non-chosen state forces this path so the form
+	// can't be submitted without a driver.
+	if fl.f.onDriverRow() && k.Kind == KeyEnter {
+		a.pushLayer(newDriverPickerLayer(fl.f.driverNames, func(name string) {
+			fl.f.setDriver(name)
+		}))
+		return
+	}
+	// Pre-handle probe hotkeys before the form consumes the key. Only
+	// fire once a driver is chosen so the rest of the form actually has
+	// host/port to probe.
+	if fl.f.driverChosen && k.Ctrl && k.Kind == KeyRune {
+		switch k.Rune {
+		case 't':
+			fl.startTestNetwork(a)
+			return
+		case 'l':
+			fl.startTestAuth(a)
+			return
+		}
+	}
 	c, submit := fl.f.handle(k)
 	if !submit {
 		return
@@ -538,17 +696,21 @@ func (fl *formLayer) HandleKey(a *app, k Key) {
 func (fl *formLayer) Hints(a *app) string {
 	_ = a
 	_, canSave := fl.f.toConnection()
+	driver := ""
 	cycler := ""
-	if fl.f.onDriverCycler() {
-		cycler = "Lt/Rt=engine"
+	if fl.f.onDriverRow() {
+		driver = "Enter=pick driver"
 	} else if fl.f.onEngineCycler() {
 		cycler = "Lt/Rt=cycle"
 	}
 	return joinHints(
 		"Tab/Dn=next",
 		"Shift+Tab/Up=prev",
+		driver,
 		cycler,
-		hintIf(canSave == nil, "Enter/Ctrl+S=save"),
+		hintIf(canSave == nil && fl.f.driverChosen, "Ctrl+S=save"),
+		hintIf(fl.f.driverChosen, "Ctrl+T=test-net"),
+		hintIf(canSave == nil && fl.f.driverChosen, "Ctrl+L=test-auth"),
 		"Esc=cancel",
 	)
 }

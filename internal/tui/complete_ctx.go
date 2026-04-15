@@ -41,10 +41,11 @@ func (k clauseKind) String() string {
 // populated for derived refs (subquery-FROM aliases) whose column
 // list comes from the inner SELECT list, not the live schema.
 type tableScope struct {
-	schema string
-	name   string
-	alias  string
-	cols   []string
+	catalog string // set from session.activeCatalog so cache is per-DB
+	schema  string
+	name    string
+	alias   string
+	cols    []string
 }
 
 // cteDef is one CTE from a WITH clause. columns is populated only
@@ -755,7 +756,7 @@ func (c *columnCache) clear() {
 }
 
 func columnCacheKey(t tableScope) string {
-	return t.schema + "\x00" + t.name
+	return t.catalog + "\x00" + t.schema + "\x00" + t.name
 }
 
 // gatherCompletionsCtx picks candidate buckets by clause and
@@ -867,12 +868,12 @@ func (a *app) gatherQualified(ctx completionCtx) []completionItem {
 		return items
 	}
 
-	m := a.mainLayerPtr()
-	if m == nil || m.explorer == nil || m.explorer.info == nil {
+	tables := a.completionTables()
+	if len(tables) == 0 {
 		return nil
 	}
 	var items []completionItem
-	for _, t := range m.explorer.info.Tables {
+	for _, t := range tables {
 		if !strings.EqualFold(t.Schema, q) {
 			continue
 		}
@@ -948,13 +949,13 @@ func (a *app) functionCandidates() []completionItem {
 }
 
 func (a *app) schemaCandidates() []completionItem {
-	m := a.mainLayerPtr()
-	if m == nil || m.explorer == nil || m.explorer.info == nil {
+	tables := a.completionTables()
+	if len(tables) == 0 {
 		return nil
 	}
 	seen := map[string]struct{}{}
 	var out []completionItem
-	for _, t := range m.explorer.info.Tables {
+	for _, t := range tables {
 		if t.Schema == "" {
 			continue
 		}
@@ -971,12 +972,12 @@ func (a *app) schemaCandidates() []completionItem {
 // tableCandidates returns every table/view as both bare and
 // "schema.name" so either form completes.
 func (a *app) tableCandidates() []completionItem {
-	m := a.mainLayerPtr()
-	if m == nil || m.explorer == nil || m.explorer.info == nil {
+	tables := a.completionTables()
+	if len(tables) == 0 {
 		return nil
 	}
 	var out []completionItem
-	for _, t := range m.explorer.info.Tables {
+	for _, t := range tables {
 		kind := completeTable
 		if t.Kind == db.TableKindView {
 			kind = completeView
@@ -1063,6 +1064,9 @@ func (a *app) fetchColumnsFor(t tableScope) []db.Column {
 			return nil
 		}
 	}
+	if t.catalog == "" {
+		t.catalog = a.completionCatalog()
+	}
 	if cols, ok := a.columnCache.get(t); ok {
 		return cols
 	}
@@ -1076,7 +1080,23 @@ func (a *app) fetchColumnsFor(t tableScope) []db.Column {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	cols, err := a.conn.Columns(ctx, ref)
+	var (
+		cols []db.Column
+		err  error
+	)
+	// Route through ColumnsIn when the tab has a pinned catalog so the
+	// driver's session-scoped columns query (e.g. MSSQL's
+	// INFORMATION_SCHEMA.COLUMNS) runs against the right DB instead of
+	// whatever the pool's next conn lands in.
+	if t.catalog != "" {
+		if colr, ok := a.conn.(db.DatabaseColumner); ok {
+			cols, err = colr.ColumnsIn(ctx, t.catalog, ref)
+		} else {
+			cols, err = a.conn.Columns(ctx, ref)
+		}
+	} else {
+		cols, err = a.conn.Columns(ctx, ref)
+	}
 	if err != nil {
 		a.columnCache.put(t, nil)
 		return nil
@@ -1086,25 +1106,62 @@ func (a *app) fetchColumnsFor(t tableScope) []db.Column {
 }
 
 // resolveTableRef attaches a schema to a bare tableScope using
-// the explorer's loaded schema info.
+// the explorer's loaded schema info for the active catalog.
 func (a *app) resolveTableRef(t tableScope) db.TableRef {
-	m := a.mainLayerPtr()
-	if m == nil || m.explorer == nil || m.explorer.info == nil {
+	tables := a.completionTables()
+	if len(tables) == 0 {
 		return db.TableRef{Schema: t.schema, Name: t.name}
 	}
-	info := m.explorer.info
 	if t.schema != "" {
-		for _, tr := range info.Tables {
+		for _, tr := range tables {
 			if strings.EqualFold(tr.Schema, t.schema) && strings.EqualFold(tr.Name, t.name) {
 				return tr
 			}
 		}
 		return db.TableRef{Schema: t.schema, Name: t.name}
 	}
-	for _, tr := range info.Tables {
+	for _, tr := range tables {
 		if strings.EqualFold(tr.Name, t.name) {
 			return tr
 		}
 	}
 	return db.TableRef{Name: t.name}
+}
+
+// completionCatalog returns the active-tab catalog used to scope
+// autocomplete. Empty when no tab/session or no per-tab override; in
+// that case lookups fall through to the single-DB explorer.info path.
+func (a *app) completionCatalog() string {
+	m := a.mainLayerPtr()
+	if m == nil || m.session == nil {
+		return ""
+	}
+	return m.session.activeCatalog
+}
+
+// completionTables returns the table list to feed autocomplete. In
+// dbMode (SupportsCrossDatabase + blank login DB) it pulls from the
+// per-catalog schema map keyed by the tab's activeCatalog; otherwise
+// it returns the single-DB explorer.info.Tables.
+func (a *app) completionTables() []db.TableRef {
+	m := a.mainLayerPtr()
+	if m == nil || m.explorer == nil {
+		return nil
+	}
+	e := m.explorer
+	if e.dbMode {
+		cat := a.completionCatalog()
+		if cat == "" {
+			return nil
+		}
+		info := e.dbSchemas[cat]
+		if info == nil {
+			return nil
+		}
+		return info.Tables
+	}
+	if e.info == nil {
+		return nil
+	}
+	return e.info.Tables
 }

@@ -56,8 +56,8 @@ type mainLayer struct {
 	sessions  []*session
 	activeTab int
 
-	explorer     *explorer
-	focus        FocusTarget
+	explorer    *explorer
+	focus       FocusTarget
 	pendingMenu bool
 
 	// editorFullscreen hides the explorer and results panels and
@@ -211,6 +211,11 @@ func (m *mainLayer) handleLeftClick(a *app, t FocusTarget, msg MouseMsg, count i
 		m.explorer.SetCursor(idx)
 		if count >= 2 {
 			switch m.explorer.SelectedKind() {
+			case itemDatabase:
+				m.explorer.Toggle()
+				if cat, need := m.explorer.NeedsDatabaseLoad(); need {
+					a.loadDatabaseSchema(cat)
+				}
 			case itemSchema, itemSubgroup:
 				m.explorer.Toggle()
 			default:
@@ -499,6 +504,9 @@ func queryTabLabel(s *session, active bool) string {
 	title := s.title
 	if s.IsDirty() {
 		title = "● " + title
+	}
+	if s.activeCatalog != "" {
+		title = title + " (" + s.activeCatalog + ")"
 	}
 	lbl := fmt.Sprintf(" %s ", title)
 	if active {
@@ -837,6 +845,11 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 		return
 	case KeyEnter:
 		switch m.explorer.SelectedKind() {
+		case itemDatabase:
+			m.explorer.Toggle()
+			if cat, need := m.explorer.NeedsDatabaseLoad(); need {
+				a.loadDatabaseSchema(cat)
+			}
 		case itemSchema, itemSubgroup:
 			m.explorer.Toggle()
 		case itemView, itemProcedure, itemFunction, itemTrigger:
@@ -853,6 +866,21 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 			return
 		case 'R':
 			a.loadSchema()
+			return
+		case 'u':
+			// Pin the active query tab to the DB under the cursor
+			// (SSMS-style). Only meaningful on cross-DB drivers; on
+			// single-DB engines CursorCatalog returns "" and the
+			// tab's catalog is cleared, matching the "login default"
+			// state.
+			if m.session != nil {
+				m.session.activeCatalog = m.explorer.CursorCatalog()
+				if m.session.activeCatalog == "" {
+					m.status = "tab uses login default database"
+				} else {
+					m.status = "tab now uses " + m.session.activeCatalog
+				}
+			}
 			return
 		}
 	}
@@ -921,6 +949,9 @@ func (m *mainLayer) editObjectFromExplorer(a *app) {
 	sess.editSchema = schema
 	sess.editName = name
 	sess.editOriginal = body
+	if cat := m.explorer.CursorCatalog(); cat != "" {
+		sess.activeCatalog = cat
+	}
 	m.sessions = append(m.sessions, sess)
 	m.activeTab = len(m.sessions) - 1
 	m.session = sess
@@ -1220,6 +1251,9 @@ func (m *mainLayer) prefillSelectFromExplorer(a *app) {
 	sess := m.sessions[prev]
 	sess.title = t.Name
 	sess.editor.buf.SetText(sql)
+	if t.Catalog != "" {
+		sess.activeCatalog = t.Catalog
+	}
 	m.activeTab = prev
 	m.session = sess
 	m.focus = FocusQuery
@@ -1251,6 +1285,8 @@ func (m *mainLayer) handleMenuPrefix(a *app, k Key) {
 		a.pushLayer(newPickerLayer(a.connCache))
 	case 'x':
 		a.disconnect()
+	case 'd':
+		a.openCatalogLayer()
 	case 'e':
 		// Export is only meaningful with a live result buffer. Silently
 		// ignoring on an empty buffer matches how the space menu treats
@@ -1321,7 +1357,11 @@ func (m *mainLayer) handleMenuPrefix(a *app, k Key) {
 			}
 		})
 		go func() {
-			tree, err := a.runExplain(sql)
+			catalog := ""
+			if a.catalogPreamble(sess) != "" {
+				catalog = sess.activeCatalog
+			}
+			tree, err := a.runExplain(catalog, sql)
 			close(done)
 			a.asyncCh <- func(a *app) {
 				sess.explainBusy = false
@@ -1402,6 +1442,9 @@ func (m *mainLayer) statusText(a *app, width int) string {
 	conn := "○ (not connected)"
 	if a.activeConn != nil {
 		conn = "● " + a.activeConn.Name
+		if m.session != nil && m.session.activeCatalog != "" {
+			conn += " [" + m.session.activeCatalog + "]"
+		}
 	}
 	hints := a.topLayer().Hints(a)
 	prefix := fmt.Sprintf(" [%s]  %s  │  ", m.focus, conn)

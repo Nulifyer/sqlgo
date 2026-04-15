@@ -42,14 +42,15 @@ type driver struct{}
 func (driver) Name() string { return driverName }
 
 var capabilities = db.Capabilities{
-	SchemaDepth:          db.SchemaDepthSchemas,
-	LimitSyntax:          db.LimitSyntaxLimit,
-	IdentifierQuote:      '`',
-	SupportsCancel:       true,
-	SupportsTLS:          true,
-	ExplainFormat:        db.ExplainFormatMySQLJSON,
-	Dialect:              sqltok.DialectMySQL,
-	SupportsTransactions: true,
+	SchemaDepth:           db.SchemaDepthSchemas,
+	LimitSyntax:           db.LimitSyntaxLimit,
+	IdentifierQuote:       '`',
+	SupportsCancel:        true,
+	SupportsTLS:           true,
+	ExplainFormat:         db.ExplainFormatMySQLJSON,
+	Dialect:               sqltok.DialectMySQL,
+	SupportsTransactions:  true,
+	SupportsCrossDatabase: true,
 }
 
 func (driver) Capabilities() db.Capabilities { return capabilities }
@@ -69,6 +70,8 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		TriggersQuery:      triggersQuery,
 		IsPermissionDenied: isPermissionDenied,
 		DefinitionFetcher:  fetchDefinition,
+		DatabaseListQuery:  databaseListQuery,
+		UseDatabaseStmt:    useDatabaseStmt,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mysql: %w", err)
@@ -113,6 +116,22 @@ SELECT
 FROM information_schema.TRIGGERS
 ORDER BY TRIGGER_SCHEMA, EVENT_OBJECT_TABLE, TRIGGER_NAME;
 `
+
+// databaseListQuery returns user-visible schemas. information_schema,
+// mysql, performance_schema, sys are filtered so the explorer's DB
+// tier stays on user-owned databases.
+const databaseListQuery = `
+SELECT SCHEMA_NAME
+FROM information_schema.SCHEMATA
+WHERE SCHEMA_NAME NOT IN ('information_schema','mysql','performance_schema','sys')
+ORDER BY SCHEMA_NAME;
+`
+
+// useDatabaseStmt quotes the DB name with backticks. Embedded backticks
+// must be doubled per mysql identifier rules.
+func useDatabaseStmt(name string) string {
+	return "USE `" + strings.ReplaceAll(name, "`", "``") + "`"
+}
 
 // columnsQuery uses ? (positional mysql placeholders).
 const columnsQuery = `

@@ -98,7 +98,7 @@ func TestExplorerToggleCollapsesSubgroup(t *testing.T) {
 	e.cursor = target
 	e.Toggle()
 
-	key := subgroupExpansionKey("dbo", subgroupViews)
+	key := subgroupExpansionKey("", "dbo", subgroupViews)
 	if e.expanded[key] {
 		t.Fatalf("expected dbo/Views collapsed after toggle")
 	}

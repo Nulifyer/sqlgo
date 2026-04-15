@@ -93,6 +93,7 @@ func helpContent() []helpLine {
 		bind("e", "export results"),
 		bind("h", "history"),
 		bind("p", "explain plan"),
+		bind("d", "set active database (per tab)"),
 		bind("q", "quit"),
 		bind("Esc", "cancel"),
 	}

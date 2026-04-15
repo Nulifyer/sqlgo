@@ -101,6 +101,35 @@ type Capabilities struct {
 	// engine only suggests syntax it actually accepts (TOP for MSSQL,
 	// RETURNING for Postgres/SQLite, PRAGMA for SQLite, ...).
 	Dialect sqltok.Dialect
+
+	// SupportsCrossDatabase reports whether one connection can address
+	// multiple databases via 3-part names ([db].[schema].[table]) and a
+	// USE statement to switch context. True for MSSQL/MySQL/Sybase where
+	// the server hosts many databases; false for Postgres where each
+	// database needs its own connection. When true and Config.Database is
+	// blank, the explorer renders a top-level DB tier populated by the
+	// driver's DatabaseLister.
+	SupportsCrossDatabase bool
+}
+
+// DatabaseLister is an optional Conn capability: feature-detected via
+// type assertion so Conn stays narrow. Drivers where
+// Capabilities.SupportsCrossDatabase is true MUST implement this.
+type DatabaseLister interface {
+	// ListDatabases returns user-visible database names on this server.
+	// System/hidden databases (master, tempdb, msdb, model on mssql;
+	// information_schema, mysql, performance_schema, sys on mysql) are
+	// filtered out so the explorer tier stays readable.
+	ListDatabases(ctx context.Context) ([]string, error)
+	// SchemaForDatabase returns the schema listing for one database on
+	// this connection. Implementations typically pin a *sql.Conn, issue
+	// USE [db], then run the normal schema queries on the pinned conn.
+	SchemaForDatabase(ctx context.Context, database string) (*SchemaInfo, error)
+	// UseDatabaseStmt returns the driver-specific statement that switches
+	// the current session's active database (e.g. `USE [db]` on MSSQL).
+	// Callers prepend this to a batch to run a query against a non-default
+	// catalog without pinning a *sql.Conn.
+	UseDatabaseStmt(name string) string
 }
 
 // SchemaDepth describes the object hierarchy the explorer should render
@@ -188,6 +217,26 @@ type Conn interface {
 	Capabilities() Capabilities
 }
 
+// DatabaseExplainer is an optional capability. Cross-DB drivers (MSSQL,
+// MySQL, Sybase) implement it so EXPLAIN can run against a non-default
+// catalog without relying on whichever database the pool's next conn
+// happens to land in.
+type DatabaseExplainer interface {
+	// ExplainIn runs EXPLAIN for sql with the session's current database
+	// set to the given name first. Empty name is equivalent to Explain.
+	ExplainIn(ctx context.Context, database, sql string) ([][]any, error)
+}
+
+// DatabaseColumner is the column-fetch analogue of DatabaseExplainer.
+// Cross-DB drivers implement it so autocomplete's column lookup honors a
+// tab's activeCatalog — otherwise MSSQL's INFORMATION_SCHEMA.COLUMNS query
+// returns columns from the login DB, not the tab-pinned one.
+type DatabaseColumner interface {
+	// ColumnsIn returns columns for t with the session's current database
+	// switched to database first. Empty database is equivalent to Columns.
+	ColumnsIn(ctx context.Context, database string, t TableRef) ([]Column, error)
+}
+
 // ErrExplainUnsupported is returned by Conn.Explain for drivers whose
 // Capabilities report ExplainFormatNone.
 var ErrExplainUnsupported = errors.New("explain unsupported")
@@ -238,10 +287,17 @@ const (
 // information_schema, sqlite_* etc.) so the explorer can bucket
 // them under a "Sys" group instead of mixing with user objects.
 type TableRef struct {
-	Schema string
-	Name   string
-	Kind   TableKind
-	System bool
+	// Catalog is the containing database when the owning Conn's driver
+	// reports SupportsCrossDatabase and was opened with a blank default
+	// database. Empty for single-DB drivers (Postgres, SQLite, ...) or
+	// when the connection targeted a specific database. Rendered as the
+	// first part of a 3-part name ([catalog].[schema].[name]) and piped
+	// into USE [catalog] before column/definition lookups.
+	Catalog string
+	Schema  string
+	Name    string
+	Kind    TableKind
+	System  bool
 }
 
 // RoutineKind distinguishes stored procedures, functions, and aggregates.

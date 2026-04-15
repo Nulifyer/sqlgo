@@ -49,14 +49,15 @@ type driver struct{}
 func (driver) Name() string { return driverName }
 
 var capabilities = db.Capabilities{
-	SchemaDepth:          db.SchemaDepthSchemas,
-	LimitSyntax:          db.LimitSyntaxSelectTop,
-	IdentifierQuote:      '[',
-	SupportsCancel:       true,
-	SupportsTLS:          true,
-	ExplainFormat:        db.ExplainFormatMSSQLXML,
-	Dialect:              sqltok.DialectMSSQL,
-	SupportsTransactions: true,
+	SchemaDepth:           db.SchemaDepthSchemas,
+	LimitSyntax:           db.LimitSyntaxSelectTop,
+	IdentifierQuote:       '[',
+	SupportsCancel:        true,
+	SupportsTLS:           true,
+	ExplainFormat:         db.ExplainFormatMSSQLXML,
+	Dialect:               sqltok.DialectMSSQL,
+	SupportsTransactions:  true,
+	SupportsCrossDatabase: true,
 }
 
 func (driver) Capabilities() db.Capabilities { return capabilities }
@@ -77,6 +78,8 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		IsPermissionDenied: isPermissionDenied,
 		DefinitionFetcher:  fetchDefinition,
 		ExplainRunner:      runExplain,
+		DatabaseListQuery:  databaseListQuery,
+		UseDatabaseStmt:    useDatabaseStmt,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mssql: %w", err)
@@ -145,6 +148,23 @@ JOIN sys.schemas s ON s.schema_id = t.schema_id
 WHERE tr.parent_class = 1
 ORDER BY s.name, t.name, tr.name;
 `
+
+// databaseListQuery returns user-facing databases. Filters the four
+// system DBs (master=1, tempdb=2, model=3, msdb=4) via database_id.
+// state=0 keeps only ONLINE databases so the explorer doesn't try to
+// USE a restoring/offline one.
+const databaseListQuery = `
+SELECT name
+FROM sys.databases
+WHERE database_id > 4 AND state = 0
+ORDER BY name;
+`
+
+// useDatabaseStmt quotes the DB name with brackets. `]` inside a name
+// must be doubled.
+func useDatabaseStmt(name string) string {
+	return "USE [" + strings.ReplaceAll(name, "]", "]]") + "]"
+}
 
 // columnsQuery uses @p1/@p2 (go-mssqldb named placeholders).
 const columnsQuery = `

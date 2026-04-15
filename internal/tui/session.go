@@ -97,6 +97,14 @@ type session struct {
 	// the last load/save; IsDirty compares it against editor.buf.Text().
 	sourcePath string
 	savedText  string
+
+	// activeCatalog is the SSMS-style per-tab current database for
+	// cross-DB drivers (MSSQL, MySQL, Sybase). Empty means "use the
+	// login default". When set, runQueryUnsafe prepends the driver's
+	// USE statement to the batch so the query runs against this
+	// catalog even though connections aren't pinned per tab -- the
+	// next checkout from the pool re-applies USE.
+	activeCatalog string
 }
 
 // IsDirty reports whether the editor buffer has unsaved changes relative

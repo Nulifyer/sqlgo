@@ -32,7 +32,7 @@ type explainTree struct {
 // runExplain calls the connection's Explain and parses the rows
 // into an explainTree. ExplainFormatNone drivers return an
 // "unsupported" sentinel tree.
-func (a *app) runExplain(sql string) (*explainTree, error) {
+func (a *app) runExplain(catalog, sql string) (*explainTree, error) {
 	if a.conn == nil {
 		return nil, fmt.Errorf("no active connection")
 	}
@@ -45,7 +45,17 @@ func (a *app) runExplain(sql string) (*explainTree, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), explainTimeout)
 	defer cancel()
-	raw, err := a.conn.Explain(ctx, sql)
+	var raw [][]any
+	var err error
+	if catalog != "" {
+		if ex, ok := a.conn.(db.DatabaseExplainer); ok {
+			raw, err = ex.ExplainIn(ctx, catalog, sql)
+		} else {
+			raw, err = a.conn.Explain(ctx, sql)
+		}
+	} else {
+		raw, err = a.conn.Explain(ctx, sql)
+	}
 	if err != nil {
 		if errors.Is(err, db.ErrExplainUnsupported) {
 			return &explainTree{

@@ -710,6 +710,11 @@ func (a *app) disconnect() {
 	m := a.mainLayerPtr()
 	m.resetResults()
 	m.explorer.SetSchema(nil, db.SchemaDepthSchemas)
+	// Clear every tab's pinned catalog -- the old server is gone; a
+	// re-connect to a different server must not reuse stale DB names.
+	for _, s := range m.sessions {
+		s.activeCatalog = ""
+	}
 }
 
 // loadSchema fetches the schema list from the active connection and hands it
@@ -726,7 +731,45 @@ func (a *app) loadSchema() {
 	// Capture the current conn so a disconnect+reconnect during the
 	// fetch can't apply stale schema to the new connection.
 	conn := a.conn
-	depth := conn.Capabilities().SchemaDepth
+	caps := conn.Capabilities()
+	depth := caps.SchemaDepth
+
+	// Cross-DB drivers opened with a blank default database list
+	// databases at the root; each DB's schema is fetched lazily on
+	// expand via loadDatabaseSchema.
+	if caps.SupportsCrossDatabase && a.activeConn != nil && a.activeConn.Database == "" {
+		lister, ok := conn.(db.DatabaseLister)
+		if ok {
+			m.explorer.SetLoading()
+			done := make(chan struct{})
+			go runSpinner(a, done, func(a *app, frame string) {
+				if a.conn != conn {
+					return
+				}
+				a.mainLayerPtr().explorer.SetLoadingFrame(frame)
+			})
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), schemaTimeout)
+				defer cancel()
+				names, err := lister.ListDatabases(ctx)
+				close(done)
+				a.asyncCh <- func(a *app) {
+					if a.conn != conn {
+						return
+					}
+					m := a.mainLayerPtr()
+					if err != nil {
+						m.explorer.SetError(err.Error())
+						return
+					}
+					m.explorer.depth = depth
+					m.explorer.SetDatabases(names)
+				}
+			}()
+			return
+		}
+	}
+
 	m.explorer.SetLoading()
 	done := make(chan struct{})
 	go runSpinner(a, done, func(a *app, frame string) {
@@ -754,6 +797,48 @@ func (a *app) loadSchema() {
 				return
 			}
 			m.explorer.SetSchema(info, depth)
+		}
+	}()
+}
+
+// loadDatabaseSchema fetches one database's schema via the driver's
+// DatabaseLister and hands it to the explorer. Called when the user
+// expands a DB row in cross-DB mode. No-op if a fetch for the same
+// catalog is already in flight (dbLoading marker set).
+func (a *app) loadDatabaseSchema(catalog string) {
+	if a.conn == nil || catalog == "" {
+		return
+	}
+	lister, ok := a.conn.(db.DatabaseLister)
+	if !ok {
+		return
+	}
+	conn := a.conn
+	m := a.mainLayerPtr()
+	m.explorer.SetDatabaseLoading(catalog, spinnerFrames[0])
+
+	done := make(chan struct{})
+	go runSpinner(a, done, func(a *app, frame string) {
+		if a.conn != conn {
+			return
+		}
+		a.mainLayerPtr().explorer.SetDatabaseLoadingFrame(catalog, frame)
+	})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), schemaTimeout)
+		defer cancel()
+		info, err := lister.SchemaForDatabase(ctx, catalog)
+		close(done)
+		a.asyncCh <- func(a *app) {
+			if a.conn != conn {
+				return
+			}
+			m := a.mainLayerPtr()
+			if err != nil {
+				m.explorer.SetDatabaseError(catalog, err.Error())
+				return
+			}
+			m.explorer.SetDatabaseSchema(catalog, info)
 		}
 	}()
 }
@@ -792,6 +877,27 @@ func (a *app) runQuery() {
 // level; closing the Rows cursor throws away any buffered rows the
 // driver hasn't handed us yet. Skips the destructive-statement guard —
 // call runQuery for the guarded path.
+// catalogPreamble returns the `USE [db]` statement to prepend to the next
+// batch for sess, or "" if no routing is needed. Empty when: no active
+// connection, driver is single-DB, the login hard-coded a default DB
+// (connection already routes there), or the tab has no pinned catalog.
+func (a *app) catalogPreamble(sess *session) string {
+	if sess == nil || sess.activeCatalog == "" || a.conn == nil {
+		return ""
+	}
+	if a.activeConn != nil && a.activeConn.Database != "" {
+		return ""
+	}
+	if !a.conn.Capabilities().SupportsCrossDatabase {
+		return ""
+	}
+	lister, ok := a.conn.(db.DatabaseLister)
+	if !ok {
+		return ""
+	}
+	return lister.UseDatabaseStmt(sess.activeCatalog)
+}
+
 func (a *app) runQueryUnsafe() {
 	m := a.mainLayerPtr()
 	sess := m.session
@@ -806,6 +912,9 @@ func (a *app) runQueryUnsafe() {
 	if sql == "" {
 		sess.status = "nothing to run"
 		return
+	}
+	if pre := a.catalogPreamble(sess); pre != "" {
+		sql = pre + ";\n" + sql
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sess.cancel = cancel

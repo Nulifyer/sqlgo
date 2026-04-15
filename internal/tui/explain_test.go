@@ -157,7 +157,7 @@ func TestRunExplainSQLiteLive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tree, err := a.runExplain("SELECT * FROM widgets WHERE id = 1")
+	tree, err := a.runExplain("", "SELECT * FROM widgets WHERE id = 1")
 	if err != nil {
 		t.Fatalf("runExplain: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestRunExplainNoConnection(t *testing.T) {
 	t.Parallel()
 	a := &app{}
 	a.layers = []Layer{newMainLayer()}
-	_, err := a.runExplain("SELECT 1")
+	_, err := a.runExplain("", "SELECT 1")
 	if err == nil {
 		t.Error("expected error when disconnected")
 	}

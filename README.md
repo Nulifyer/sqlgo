@@ -167,6 +167,7 @@ Open the command menu with `Ctrl+K` to connect, disconnect, export, view history
 | | `e` | Export results |
 | | `h` | Query history |
 | | `p` | EXPLAIN current query |
+| | `d` | Set active database for this tab (SSMS-style) |
 | | `q` | Quit |
 
 

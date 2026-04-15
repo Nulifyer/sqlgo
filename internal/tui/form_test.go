@@ -154,6 +154,9 @@ func TestCyclerValueRoundTripsThroughToConnection(t *testing.T) {
 	f := newConnForm("test", &config.Connection{Driver: "postgres"})
 	f.fixed[coreName].in.SetString("test")
 	f.fixed[coreHost].in.SetString("db.example.com")
+	f.fixed[coreUser].in.SetString("u")
+	f.fixed[corePassword].in.SetString("p")
+	f.fixed[coreDatabase].in.SetString("d")
 	f.active = coreCount
 	// Step to "require".
 	for _, v := range postgresSSLModeValues {
@@ -181,6 +184,9 @@ func TestCyclerEmptyValueIsOmittedFromOptions(t *testing.T) {
 	f := newConnForm("test", &config.Connection{Driver: "postgres"})
 	f.fixed[coreName].in.SetString("test")
 	f.fixed[coreHost].in.SetString("db.example.com")
+	f.fixed[coreUser].in.SetString("u")
+	f.fixed[corePassword].in.SetString("p")
+	f.fixed[coreDatabase].in.SetString("d")
 	// Leave sslmode at its default empty.
 	c, err := f.toConnection()
 	if err != nil {
