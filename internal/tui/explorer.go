@@ -2,6 +2,7 @@ package tui
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 )
@@ -896,14 +897,23 @@ func renderExplorerLine(it explorerItem, expanded map[string]bool) string {
 // capability struct — no string-switch on Name() here.
 func QualifiedName(caps db.Capabilities, t db.TableRef) string {
 	open, close := quoteChars(caps.IdentifierQuote)
+	q := func(s string) string {
+		// Double any embedded close char so an identifier containing ']'
+		// (MSSQL), '`' (MySQL) or '"' (ANSI) round-trips correctly
+		// instead of prematurely terminating the quoted form.
+		if strings.Contains(s, close) {
+			s = strings.ReplaceAll(s, close, close+close)
+		}
+		return open + s + close
+	}
 	parts := ""
 	if t.Catalog != "" {
-		parts = open + t.Catalog + close + "."
+		parts = q(t.Catalog) + "."
 	}
 	if t.Schema == "" {
-		return parts + open + t.Name + close
+		return parts + q(t.Name)
 	}
-	return parts + open + t.Schema + close + "." + open + t.Name + close
+	return parts + q(t.Schema) + "." + q(t.Name)
 }
 
 // quoteChars returns the opening and closing identifier quote characters

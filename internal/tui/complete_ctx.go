@@ -733,32 +733,80 @@ func isBeingTyped(tok sqltok.Token, cursorOffset int) bool {
 
 // columnCache is the per-connection column store, populated
 // lazily on first completion request. Cleared on disconnect.
+// inflight tracks fetches currently running in a background
+// goroutine so concurrent openCompletion calls for the same
+// table dedupe onto a single DB round-trip. Entries expire
+// after columnCacheTTL so ALTER TABLE eventually becomes
+// visible without forcing a reconnect.
 type columnCache struct {
-	mu      sync.Mutex
-	entries map[string][]db.Column
+	mu       sync.Mutex
+	entries  map[string]columnCacheEntry
+	inflight map[string]struct{}
 }
 
+type columnCacheEntry struct {
+	cols      []db.Column
+	fetchedAt time.Time
+}
+
+// columnCacheTTL is how long a fetched column list stays
+// authoritative before the next miss triggers a refetch. Short
+// enough that schema edits become visible in the same session,
+// long enough that a burst of keystrokes doesn't hammer the DB.
+const columnCacheTTL = 5 * time.Minute
+
 func newColumnCache() *columnCache {
-	return &columnCache{entries: map[string][]db.Column{}}
+	return &columnCache{
+		entries:  map[string]columnCacheEntry{},
+		inflight: map[string]struct{}{},
+	}
 }
 
 func (c *columnCache) get(t tableScope) ([]db.Column, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	cols, ok := c.entries[columnCacheKey(t)]
-	return cols, ok
+	e, ok := c.entries[columnCacheKey(t)]
+	if !ok {
+		return nil, false
+	}
+	if time.Since(e.fetchedAt) > columnCacheTTL {
+		delete(c.entries, columnCacheKey(t))
+		return nil, false
+	}
+	return e.cols, true
 }
 
 func (c *columnCache) put(t tableScope, cols []db.Column) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[columnCacheKey(t)] = cols
+	c.entries[columnCacheKey(t)] = columnCacheEntry{cols: cols, fetchedAt: time.Now()}
+}
+
+// tryMarkInflight returns true when the caller became the owner
+// of the fetch for t (was not already in flight). Caller must
+// call clearInflight when its goroutine exits.
+func (c *columnCache) tryMarkInflight(t tableScope) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	k := columnCacheKey(t)
+	if _, ok := c.inflight[k]; ok {
+		return false
+	}
+	c.inflight[k] = struct{}{}
+	return true
+}
+
+func (c *columnCache) clearInflight(t tableScope) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.inflight, columnCacheKey(t))
 }
 
 func (c *columnCache) clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries = map[string][]db.Column{}
+	c.entries = map[string]columnCacheEntry{}
+	c.inflight = map[string]struct{}{}
 }
 
 func columnCacheKey(t tableScope) string {
@@ -1059,16 +1107,20 @@ func (a *app) aliasCandidates(ctx completionCtx) []completionItem {
 	return out
 }
 
-// fetchColumnsFor returns a table's columns from the cache, or
-// dials the live connection with a 1.5s deadline on miss. Errors
-// cache as empty so broken tables don't re-hit every keystroke.
+// fetchColumnsFor returns a table's columns from the cache. On a
+// miss it spawns a background goroutine to dial the live connection
+// (1.5s deadline) and returns nil immediately so the main loop never
+// blocks on a slow driver. The async callback populates the cache
+// and re-runs the active editor's completion so the popup refreshes
+// once results arrive. Concurrent misses for the same table dedupe
+// via the cache's inflight set. Errors cache as empty so broken
+// tables don't re-hit every keystroke.
 func (a *app) fetchColumnsFor(t tableScope) []db.Column {
-	if a == nil || a.columnCache == nil {
-		if a != nil {
-			a.columnCache = newColumnCache()
-		} else {
-			return nil
-		}
+	if a == nil {
+		return nil
+	}
+	if a.columnCache == nil {
+		a.columnCache = newColumnCache()
 	}
 	if t.catalog == "" {
 		t.catalog = a.completionCatalog()
@@ -1079,36 +1131,82 @@ func (a *app) fetchColumnsFor(t tableScope) []db.Column {
 	if a.conn == nil {
 		return nil
 	}
-
 	ref := a.resolveTableRef(t)
 	if ref.Name == "" {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	defer cancel()
-	var (
-		cols []db.Column
-		err  error
-	)
-	// Route through ColumnsIn when the tab has a pinned catalog so the
-	// driver's session-scoped columns query (e.g. MSSQL's
-	// INFORMATION_SCHEMA.COLUMNS) runs against the right DB instead of
-	// whatever the pool's next conn lands in.
-	if t.catalog != "" {
-		if colr, ok := a.conn.(db.DatabaseColumner); ok {
-			cols, err = colr.ColumnsIn(ctx, t.catalog, ref)
+	// Tests construct *app without an asyncCh, and for them the async
+	// path would deadlock on the first send. Fall back to a synchronous
+	// fetch so unit tests keep exercising the full cache path.
+	if a.asyncCh == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		defer cancel()
+		var (
+			cols []db.Column
+			err  error
+		)
+		if t.catalog != "" {
+			if colr, ok := a.conn.(db.DatabaseColumner); ok {
+				cols, err = colr.ColumnsIn(ctx, t.catalog, ref)
+			} else {
+				cols, err = a.conn.Columns(ctx, ref)
+			}
 		} else {
 			cols, err = a.conn.Columns(ctx, ref)
 		}
-	} else {
-		cols, err = a.conn.Columns(ctx, ref)
+		if err != nil {
+			a.columnCache.put(t, nil)
+			return nil
+		}
+		a.columnCache.put(t, cols)
+		return cols
 	}
-	if err != nil {
-		a.columnCache.put(t, nil)
+	if !a.columnCache.tryMarkInflight(t) {
 		return nil
 	}
-	a.columnCache.put(t, cols)
-	return cols
+	conn := a.conn
+	cache := a.columnCache
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		defer cancel()
+		var (
+			cols []db.Column
+			err  error
+		)
+		// Route through ColumnsIn when the tab has a pinned catalog so
+		// the driver's session-scoped columns query (e.g. MSSQL's
+		// INFORMATION_SCHEMA.COLUMNS) runs against the right DB instead
+		// of whatever the pool's next conn lands in.
+		if t.catalog != "" {
+			if colr, ok := conn.(db.DatabaseColumner); ok {
+				cols, err = colr.ColumnsIn(ctx, t.catalog, ref)
+			} else {
+				cols, err = conn.Columns(ctx, ref)
+			}
+		} else {
+			cols, err = conn.Columns(ctx, ref)
+		}
+		a.asyncCh <- func(a *app) {
+			cache.clearInflight(t)
+			if a.conn != conn {
+				return
+			}
+			if err != nil {
+				cache.put(t, nil)
+				return
+			}
+			cache.put(t, cols)
+			// Refresh the active editor's completion popup so the
+			// newly-arrived columns become visible without requiring
+			// another keystroke.
+			if m := a.mainLayerPtr(); m != nil && m.session != nil && m.focus == FocusQuery {
+				if e := m.session.editor; e != nil && e.complete != nil {
+					e.openCompletion(a)
+				}
+			}
+		}
+	}()
+	return nil
 }
 
 // resolveTableRef attaches a schema to a bare tableScope using

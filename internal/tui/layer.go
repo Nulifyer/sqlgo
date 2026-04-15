@@ -1,5 +1,7 @@
 package tui
 
+import "reflect"
+
 // Layer is a drawable, input-handling slice of the UI. The app keeps a
 // stack of layers; each frame every layer draws into its own cell buffer
 // and the screen composites them bottom-to-top. The topmost layer
@@ -65,7 +67,17 @@ func (a *app) effectiveView() View {
 	return defaultView()
 }
 
+// pushLayer adds l to the top of the stack. A double-push of the same
+// concrete type is dropped: the original stays on top. This prevents a
+// key-repeat (F2 held, Ctrl+O bounced) from stacking two copies of the
+// same modal, which would then require two Escapes to close.
 func (a *app) pushLayer(l Layer) {
+	if len(a.layers) > 0 {
+		top := a.layers[len(a.layers)-1]
+		if reflect.TypeOf(top) == reflect.TypeOf(l) {
+			return
+		}
+	}
 	a.layers = append(a.layers, l)
 }
 

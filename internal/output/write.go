@@ -12,8 +12,16 @@ import (
 
 // Write serializes a single result set to w in the requested format.
 // rows can be empty; a header-only file is valid output for every
-// format.
+// format. Delegates to WriteWith with zero Options so the formats
+// that don't need them (everything except MarkdownQuery / SQLInsert)
+// keep their original one-line call site.
 func Write(w io.Writer, cols []db.Column, rows [][]string, format Format) error {
+	return WriteWith(w, cols, rows, format, Options{})
+}
+
+// WriteWith is the long form that lets callers pass format-specific
+// parameters. Formats that don't need Options ignore them.
+func WriteWith(w io.Writer, cols []db.Column, rows [][]string, format Format, opts Options) error {
 	switch format {
 	case CSV:
 		return writeDelimited(w, cols, rows, ',')
@@ -27,6 +35,12 @@ func Write(w io.Writer, cols []db.Column, rows [][]string, format Format) error 
 		return writeJSONL(w, cols, rows)
 	case Table:
 		return writeTable(w, cols, rows)
+	case MarkdownQuery:
+		return writeMarkdownQuery(w, cols, rows, opts.Query)
+	case SQLInsert:
+		return writeSQLInsert(w, cols, rows, opts.TableName)
+	case HTML:
+		return writeHTML(w, cols, rows)
 	}
 	return fmt.Errorf("output: unknown format %d", format)
 }
@@ -188,6 +202,111 @@ func writeMarkdown(w io.Writer, cols []db.Column, rows [][]string) error {
 		return fmt.Errorf("output markdown: %w", err)
 	}
 	return nil
+}
+
+// writeMarkdownQuery emits the originating SQL inside a ```sql fenced
+// code block followed by the standard Markdown table. An empty query
+// is skipped so the output is still a well-formed Markdown document.
+func writeMarkdownQuery(w io.Writer, cols []db.Column, rows [][]string, query string) error {
+	if query != "" {
+		q := strings.TrimRight(query, "\r\n")
+		if _, err := io.WriteString(w, "```sql\n"+q+"\n```\n\n"); err != nil {
+			return fmt.Errorf("output markdown+query: %w", err)
+		}
+	}
+	return writeMarkdown(w, cols, rows)
+}
+
+// writeSQLInsert emits one INSERT statement per row. Identifiers are
+// double-quoted (ANSI) since the target dialect isn't known here; the
+// values are single-quoted with embedded quotes doubled. NULL literals
+// are not reconstructible from the string row buffer -- callers who
+// need true NULLs should export to JSON/JSONL and re-import through a
+// typed loader.
+func writeSQLInsert(w io.Writer, cols []db.Column, rows [][]string, table string) error {
+	if table == "" {
+		table = "results"
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("INSERT INTO \"")
+	b.WriteString(strings.ReplaceAll(table, "\"", "\"\""))
+	b.WriteString("\" (")
+	for i, c := range cols {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteByte('"')
+		b.WriteString(strings.ReplaceAll(c.Name, "\"", "\"\""))
+		b.WriteByte('"')
+	}
+	b.WriteString(") VALUES ")
+	header := b.String()
+
+	var out strings.Builder
+	for _, row := range rows {
+		out.WriteString(header)
+		out.WriteByte('(')
+		for i := range cols {
+			if i > 0 {
+				out.WriteString(", ")
+			}
+			cell := ""
+			if i < len(row) {
+				cell = row[i]
+			}
+			out.WriteByte('\'')
+			out.WriteString(strings.ReplaceAll(cell, "'", "''"))
+			out.WriteByte('\'')
+		}
+		out.WriteString(");\n")
+	}
+	if _, err := io.WriteString(w, out.String()); err != nil {
+		return fmt.Errorf("output sql: %w", err)
+	}
+	return nil
+}
+
+// writeHTML emits a minimal standalone document with a single <table>.
+// No CSS -- consumers paste it into a styled report or an email; any
+// structural tweaks belong in the enclosing template, not here.
+func writeHTML(w io.Writer, cols []db.Column, rows [][]string) error {
+	var b strings.Builder
+	b.WriteString("<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>results</title></head><body>\n<table>\n<thead><tr>")
+	for _, c := range cols {
+		b.WriteString("<th>")
+		b.WriteString(escapeHTML(c.Name))
+		b.WriteString("</th>")
+	}
+	b.WriteString("</tr></thead>\n<tbody>\n")
+	for _, row := range rows {
+		b.WriteString("<tr>")
+		for i := range cols {
+			cell := ""
+			if i < len(row) {
+				cell = row[i]
+			}
+			b.WriteString("<td>")
+			b.WriteString(escapeHTML(cell))
+			b.WriteString("</td>")
+		}
+		b.WriteString("</tr>\n")
+	}
+	b.WriteString("</tbody>\n</table>\n</body></html>\n")
+	if _, err := io.WriteString(w, b.String()); err != nil {
+		return fmt.Errorf("output html: %w", err)
+	}
+	return nil
+}
+
+func escapeHTML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
+	return s
 }
 
 // escapeMarkdownCell turns a raw cell into something safe for the GFM

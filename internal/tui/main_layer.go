@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -56,9 +57,10 @@ type mainLayer struct {
 	sessions  []*session
 	activeTab int
 
-	explorer    *explorer
-	focus       FocusTarget
-	pendingMenu bool
+	explorer      *explorer
+	focus         FocusTarget
+	pendingMenu   bool
+	pendingMenuID int
 
 	// editorFullscreen hides the explorer and results panels and
 	// expands the query editor to fill the terminal (minus the status
@@ -77,6 +79,11 @@ type mainLayer struct {
 	// panel mid-drag still extends the selection instead of scrolling
 	// something else.
 	dragTarget FocusTarget
+
+	// ddlBusy gates the Explorer 'e' action while a Definition fetch
+	// is in flight, so a repeat press can't stack duplicate goroutines
+	// or open duplicate tabs when the DB is slow.
+	ddlBusy bool
 }
 
 // View turns on bracketed paste so multi-line SQL pasted into the
@@ -356,6 +363,88 @@ func (m *mainLayer) saveActive(a *app) {
 	}
 	sess.savedText = text
 	m.status = fmt.Sprintf("saved %d bytes to %s", len(text), sess.sourcePath)
+}
+
+// saveAsActive pushes a Save As dialog seeded from the active tab's
+// current source path (if any) or its title. Extracted so the editor-
+// focus Alt+S bind and any future menu path share the exact same seed
+// logic.
+func (m *mainLayer) saveAsActive(a *app) {
+	seed := ""
+	if m.activeTab >= 0 && m.activeTab < len(m.sessions) {
+		sess := m.sessions[m.activeTab]
+		if sess.sourcePath != "" {
+			seed = sess.sourcePath
+		} else {
+			seed = sess.title
+			if !strings.HasSuffix(strings.ToLower(seed), ".sql") {
+				seed += ".sql"
+			}
+		}
+	}
+	a.pushLayer(newSaveLayer(m.activeTab, seed))
+}
+
+// runExplainPlan kicks off an EXPLAIN for the active editor buffer.
+// Runs off the main loop because some drivers (MSSQL SHOWPLAN_XML,
+// Postgres on a big query) take a noticeable beat; the spinner keeps
+// the status line live. No-op if there's no connection, no SQL, or an
+// explain is already in flight on this session.
+func (m *mainLayer) runExplainPlan(a *app) {
+	sess := m.session
+	if sess == nil || sess.explainBusy {
+		return
+	}
+	sql := strings.TrimSpace(m.editor.buf.Text())
+	if sql == "" {
+		m.status = "nothing to explain"
+		return
+	}
+	if a.conn == nil {
+		m.status = "not connected"
+		return
+	}
+	sess.explainBusy = true
+	sess.explainFrame = spinnerFrames[0]
+	m.status = "explain " + sess.explainFrame
+	conn := a.conn
+	done := make(chan struct{})
+	go runSpinner(a, done, func(a *app, frame string) {
+		if sess.explainBusy {
+			sess.explainFrame = frame
+			if a.conn == conn {
+				m := a.mainLayerPtr()
+				if m != nil && m.session == sess {
+					m.status = "explain " + frame
+				}
+			}
+		}
+	})
+	go func() {
+		catalog := ""
+		if a.catalogPreamble(sess) != "" {
+			catalog = sess.activeCatalog
+		}
+		tree, err := a.runExplain(conn, catalog, sql)
+		close(done)
+		a.asyncCh <- func(a *app) {
+			sess.explainBusy = false
+			if a.conn != conn {
+				return
+			}
+			m := a.mainLayerPtr()
+			if err != nil {
+				if m != nil && m.session == sess {
+					m.status = "explain: " + err.Error()
+				}
+				return
+			}
+			if m != nil && m.session == sess {
+				m.status = ""
+			}
+			a.pushLayer(newExplainLayer(tree))
+		}
+	}()
 }
 
 // findTabByPath returns the index of a session whose sourcePath matches
@@ -681,6 +770,16 @@ func (m *mainLayer) drawFullscreen(a *app, c *cellbuf) {
 }
 
 func (m *mainLayer) HandleKey(a *app, k Key) {
+	// Pending command-menu dispatch runs FIRST. Ctrl+K arms the menu;
+	// the very next keystroke belongs to it regardless of content, so no
+	// other binding can leak through and leave pendingMenu set. A non-
+	// rune or unrecognized second key falls through handleMenuPrefix as
+	// a silent no-op, which doubles as "cancel the menu".
+	if m.pendingMenu {
+		m.pendingMenu = false
+		m.handleMenuPrefix(a, k)
+		return
+	}
 	// Ctrl+C cancels a running query. When no query is running, it
 	// falls through so the editor can use Ctrl+C as "copy selection"
 	// without stealing it back from the cancel binding.
@@ -688,18 +787,49 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		a.cancelQuery()
 		return
 	}
-	if k.Kind == KeyF5 {
+	// F5 runs the current editor buffer. Gated on editor focus so it
+	// doesn't fire while the user is navigating the Explorer tree or
+	// paging through results.
+	if k.Kind == KeyF5 && m.focus == FocusQuery {
 		a.runQuery()
 		return
 	}
-	// Ctrl+S saves the active tab. If the tab was loaded from or
-	// previously saved to a file, write to that path directly; otherwise
-	// push the Save As dialog to prompt for one.
-	if k.Ctrl && k.Rune == 's' {
+	// F9 opens an EXPLAIN plan for the current editor buffer. Editor-
+	// focus only for the same reason as F5.
+	if k.Kind == KeyF9 && m.focus == FocusQuery {
+		m.runExplainPlan(a)
+		return
+	}
+	// Ctrl+S saves the active tab. Gated on editor focus so the key
+	// stays free to mean "copy selection"-ish things (or nothing) when
+	// other panes are focused. If the tab was loaded from or previously
+	// saved to a file, write to that path directly; otherwise push the
+	// Save As dialog to prompt for one.
+	if k.Ctrl && k.Rune == 's' && m.focus == FocusQuery {
 		m.saveActive(a)
 		return
 	}
-	if k.Ctrl && k.Rune == 'r' {
+	// Ctrl+O opens a file picker rooted at the current directory. Editor
+	// focus only -- "o" in the Explorer tree or Results grid is already
+	// used as a typeable character in filters.
+	if k.Ctrl && k.Rune == 'o' && m.focus == FocusQuery {
+		a.pushLayer(newOpenLayer(a, ""))
+		return
+	}
+	// Ctrl+E exports the active result buffer. Gated on results focus so
+	// 'e' typed in the editor isn't eaten when the user accidentally
+	// holds Ctrl.
+	if k.Ctrl && k.Rune == 'e' && m.focus == FocusResults {
+		if !m.table.HasColumns() {
+			m.status = "nothing to export"
+			return
+		}
+		a.pushLayer(newExportLayer(a))
+		return
+	}
+	// Ctrl+R renames the active tab. Editor-focus only so it doesn't
+	// clash with the Explorer "R = refresh schema" muscle memory.
+	if k.Ctrl && k.Rune == 'r' && m.focus == FocusQuery {
 		sess := m.sessions[m.activeTab]
 		a.pushLayer(newRenameLayer(m.activeTab, sess.title))
 		return
@@ -709,17 +839,15 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		a.pushLayer(newGotoLayer(row))
 		return
 	}
-	// Query-tab management. Global so the user can switch tabs from
-	// any focus without first returning to the Query pane. Ctrl+T new,
-	// Ctrl+W closes the active tab, Ctrl+PgUp/PgDn cycle.
-	if k.Ctrl && k.Kind == KeyRune && k.Rune == 't' {
+	// Query-tab management. Editor-focus only so the tab keys don't fire
+	// while the user is navigating another pane. Ctrl+PgUp/PgDn still
+	// works from Results (for result-set cycling) via the block below.
+	if k.Ctrl && k.Kind == KeyRune && k.Rune == 't' && m.focus == FocusQuery {
 		m.newTab()
-		m.focus = FocusQuery
 		return
 	}
-	if k.Ctrl && k.Kind == KeyRune && k.Rune == 'w' {
+	if k.Ctrl && k.Kind == KeyRune && k.Rune == 'w' && m.focus == FocusQuery {
 		m.closeTab(m.activeTab)
-		m.focus = FocusQuery
 		return
 	}
 	// Ctrl+PgUp / Ctrl+PgDn cycle the "tab-like thing" in the focused
@@ -745,8 +873,22 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 	}
 
 	// Ctrl+K is the global command-menu prefix. Works from any focus.
+	// Arming bumps pendingMenuID so the timeout goroutine can tell whether
+	// the chord is still the one it was spawned for (a fresh Ctrl+K while
+	// already armed resets the clock; an action that consumes the chord
+	// leaves a stale ID the timeout will ignore).
 	if k.Ctrl && k.Rune == 'k' {
 		m.pendingMenu = true
+		m.pendingMenuID++
+		id := m.pendingMenuID
+		go func() {
+			time.Sleep(chordTimeout)
+			a.asyncCh <- func(a *app) {
+				if m.pendingMenu && m.pendingMenuID == id {
+					m.pendingMenu = false
+				}
+			}
+		}()
 		return
 	}
 	// F11 toggles fullscreen editor mode. Available from any focus
@@ -783,19 +925,26 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 			// has content; silently ignored otherwise. The buffer's
 			// own undo stack covers Alt+Z for "that looks worse,
 			// give me my original back".
-			if m.editor.buf.LineCount() > 1 || len(m.editor.buf.Line(0)) > 0 {
+			if m.focus == FocusQuery && (m.editor.buf.LineCount() > 1 || len(m.editor.buf.Line(0)) > 0) {
 				m.formatQuery()
 			}
 			return
+		case 's', 'S':
+			// Alt+S = Save As. Terminals collapse Ctrl+Shift+S to
+			// Ctrl+S, so Alt+S stands in for the "save a copy" bind.
+			if m.focus == FocusQuery {
+				m.saveAsActive(a)
+			}
+			return
+		case 'd', 'D':
+			// Alt+D opens the active-database picker for the focused
+			// tab. Editor-gated so the Explorer's typeable 'd' stays
+			// free.
+			if m.focus == FocusQuery {
+				a.openCatalogLayer()
+			}
+			return
 		}
-	}
-
-	// Pending command-menu dispatch: Ctrl+K has been pressed and we are
-	// waiting on the second key. Reachable from any focus.
-	if m.pendingMenu {
-		m.pendingMenu = false
-		m.handleMenuPrefix(a, k)
-		return
 	}
 
 	// Query panel is non-modal: every keystroke goes straight to the
@@ -903,12 +1052,15 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 // editObjectFromExplorer fetches the DDL for the view/procedure/function/
 // trigger under the cursor and opens a new non-preview tab pre-filled with
 // it. Tags the session with editKind/editSchema/editName so the Apply flow
-// (Phase 1.5) can diff + re-run against the source object. Sync fetch with
-// a short timeout; if the driver returns ErrDefinitionUnsupported the
-// status line explains and no tab is opened.
+// (Phase 1.5) can diff + re-run against the source object. The fetch runs
+// in a background goroutine; the tab is opened in the asyncCh callback so
+// a slow driver can't stall the main loop.
 func (m *mainLayer) editObjectFromExplorer(a *app) {
 	if a.conn == nil {
 		m.status = "not connected"
+		return
+	}
+	if m.ddlBusy {
 		return
 	}
 	var kind, schema, name string
@@ -941,35 +1093,61 @@ func (m *mainLayer) editObjectFromExplorer(a *app) {
 		m.status = "edit: select a view, routine, or trigger"
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	body, err := a.conn.Definition(ctx, kind, schema, name)
-	if err != nil {
-		if errors.Is(err, db.ErrDefinitionUnsupported) {
-			m.status = "edit: " + kind + " not supported by this driver"
-			return
-		}
-		m.status = "edit: " + err.Error()
-		return
-	}
-	sess := newSession()
 	label := name
 	if schema != "" {
 		label = schema + "." + name
 	}
-	sess.title = label
-	sess.editor.buf.SetText(body)
-	sess.editKind = kind
-	sess.editSchema = schema
-	sess.editName = name
-	sess.editOriginal = body
-	if cat := m.explorer.CursorCatalog(); cat != "" {
-		sess.activeCatalog = cat
-	}
-	m.sessions = append(m.sessions, sess)
-	m.activeTab = len(m.sessions) - 1
-	m.session = sess
-	m.focus = FocusQuery
+	catalog := m.explorer.CursorCatalog()
+	conn := a.conn
+	m.ddlBusy = true
+	m.status = "edit " + label + " " + spinnerFrames[0]
+	done := make(chan struct{})
+	go runSpinner(a, done, func(a *app, frame string) {
+		mm := a.mainLayerPtr()
+		if mm == nil || !mm.ddlBusy || a.conn != conn {
+			return
+		}
+		mm.status = "edit " + label + " " + frame
+	})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		body, err := conn.Definition(ctx, kind, schema, name)
+		close(done)
+		a.asyncCh <- func(a *app) {
+			mm := a.mainLayerPtr()
+			if mm == nil {
+				return
+			}
+			mm.ddlBusy = false
+			if a.conn != conn {
+				return
+			}
+			if err != nil {
+				if errors.Is(err, db.ErrDefinitionUnsupported) {
+					mm.status = "edit: " + kind + " not supported by this driver"
+					return
+				}
+				mm.status = "edit: " + err.Error()
+				return
+			}
+			sess := newSession()
+			sess.title = label
+			sess.editor.buf.SetText(body)
+			sess.editKind = kind
+			sess.editSchema = schema
+			sess.editName = name
+			sess.editOriginal = body
+			if catalog != "" {
+				sess.activeCatalog = catalog
+			}
+			mm.sessions = append(mm.sessions, sess)
+			mm.activeTab = len(mm.sessions) - 1
+			mm.session = sess
+			mm.focus = FocusQuery
+			mm.status = ""
+		}
+	}()
 }
 
 // handleResultsKey processes keys when the Results panel is focused.
@@ -1123,6 +1301,11 @@ func (m *mainLayer) handleResultsErrorKey(a *app, k Key) {
 		return
 	case KeyHome:
 		m.resultsErrScroll = 0
+		return
+	case KeyEnd:
+		// Drawing clamps resultsErrScroll to len(lines)-1, so an
+		// intentionally-huge value is the simplest "scroll to bottom".
+		m.resultsErrScroll = math.MaxInt32
 		return
 	}
 	if k.Alt && k.Kind == KeyRune && (k.Rune == 'a' || k.Rune == 'A') {
@@ -1299,102 +1482,10 @@ func (m *mainLayer) handleMenuPrefix(a *app, k Key) {
 		a.pushLayer(newPickerLayer(a.connCache))
 	case 'x':
 		a.disconnect()
-	case 'd':
-		a.openCatalogLayer()
-	case 'e':
-		// Export is only meaningful with a live result buffer. Silently
-		// ignoring on an empty buffer matches how the space menu treats
-		// the rest of the actions -- the hint line already hides the
-		// key in that state.
-		if !m.table.HasColumns() {
-			m.status = "nothing to export"
-			return
-		}
-		a.pushLayer(newExportLayer("results.csv"))
 	case 'h':
 		hl := newHistoryLayer()
 		hl.reload(a)
 		a.pushLayer(hl)
-	case 'o':
-		a.pushLayer(newOpenLayer(a, ""))
-	case 's':
-		m.saveActive(a)
-	case 'S':
-		seed := ""
-		if m.activeTab >= 0 && m.activeTab < len(m.sessions) {
-			sess := m.sessions[m.activeTab]
-			if sess.sourcePath != "" {
-				seed = sess.sourcePath
-			} else {
-				seed = sess.title
-				if !strings.HasSuffix(strings.ToLower(seed), ".sql") {
-					seed += ".sql"
-				}
-			}
-		}
-		a.pushLayer(newSaveLayer(m.activeTab, seed))
-	case 'p':
-		// Explain plan for current editor SQL. Runs off the main loop
-		// because some drivers (MSSQL with SHOWPLAN_XML, Postgres on a
-		// big query) can take a noticeable beat; the spinner keeps the
-		// status line live.
-		sess := m.session
-		if sess == nil || sess.explainBusy {
-			return
-		}
-		sql := strings.TrimSpace(m.editor.buf.Text())
-		if sql == "" {
-			m.status = "nothing to explain"
-			return
-		}
-		if a.conn == nil {
-			m.status = "not connected"
-			return
-		}
-		sess.explainBusy = true
-		sess.explainFrame = spinnerFrames[0]
-		m.status = "explain " + sess.explainFrame
-		conn := a.conn
-		done := make(chan struct{})
-		go runSpinner(a, done, func(a *app, frame string) {
-			if sess.explainBusy {
-				sess.explainFrame = frame
-				// Only overwrite the status if it's still ours; a
-				// separate status message (e.g. from another action)
-				// would otherwise get clobbered on every tick.
-				if a.conn == conn {
-					m := a.mainLayerPtr()
-					if m != nil && m.session == sess {
-						m.status = "explain " + frame
-					}
-				}
-			}
-		})
-		go func() {
-			catalog := ""
-			if a.catalogPreamble(sess) != "" {
-				catalog = sess.activeCatalog
-			}
-			tree, err := a.runExplain(catalog, sql)
-			close(done)
-			a.asyncCh <- func(a *app) {
-				sess.explainBusy = false
-				if a.conn != conn {
-					return
-				}
-				m := a.mainLayerPtr()
-				if err != nil {
-					if m != nil && m.session == sess {
-						m.status = "explain: " + err.Error()
-					}
-					return
-				}
-				if m != nil && m.session == sess {
-					m.status = ""
-				}
-				a.pushLayer(newExplainLayer(tree))
-			}
-		}()
 	case 'q':
 		a.quit = true
 	}
@@ -1495,7 +1586,7 @@ func (m *mainLayer) statusText(a *app, width int) string {
 // a context-aware line that hides keys that wouldn't currently do anything.
 func (m *mainLayer) Hints(a *app) string {
 	if m.pendingMenu {
-		return m.spaceMenuHints(a)
+		return m.commandMenuHints(a)
 	}
 	switch m.focus {
 	case FocusExplorer:
@@ -1505,11 +1596,8 @@ func (m *mainLayer) Hints(a *app) string {
 	case FocusResults:
 		return m.resultsHints(a)
 	}
-	return joinHints("Ctrl+Q=quit", hintAlwaysFocus())
+	return joinHints("F1=help", "Ctrl+Q=quit")
 }
-
-// hintAlwaysFocus is the universal panel-switch hint shown on every line.
-func hintAlwaysFocus() string { return "Alt+1/2/3=focus" }
 
 // joinHints concatenates non-empty pieces with two spaces between them.
 // Empty strings are dropped so callers can write `hint(cond, "...")`
@@ -1566,12 +1654,18 @@ func (m *mainLayer) queryHints(a *app) string {
 	connected := a.conn != nil
 	running := m.running
 	hasText := m.editor.buf.LineCount() > 1 || len(m.editor.buf.Line(0)) > 0
+	hasSource := false
+	if m.activeTab >= 0 && m.activeTab < len(m.sessions) {
+		hasSource = m.sessions[m.activeTab].sourcePath != ""
+	}
 	return joinHints(
 		"F1=help",
 		"Ctrl+Q=quit",
 		hintIf(connected && !running, "F5=run"),
 		hintIf(running, "Ctrl+C=cancel"),
 		hintIf(hasText, "Alt+F=format"),
+		hintIf(hasText || hasSource, "Ctrl+S=save"),
+		hintIf(hasSource, "Ctrl+K S=save as"),
 		"Ctrl+T=new tab",
 	)
 }
@@ -1591,21 +1685,17 @@ func (m *mainLayer) resultsHints(a *app) string {
 		"Ctrl+Q=quit",
 		hintIf(hasRows, "Enter=inspect"),
 		hintIf(hasRows, "y=copy"),
+		hintIf(m.table.HasColumns(), "Ctrl+E=export"),
 		"Ctrl+K=menu",
 	)
 }
 
-func (m *mainLayer) spaceMenuHints(a *app) string {
-	hasText := m.editor.buf.LineCount() > 1 || len(m.editor.buf.Line(0)) > 0
+func (m *mainLayer) commandMenuHints(a *app) string {
+	_ = m
 	return joinHints(
 		"c=connect",
 		hintIf(a.conn != nil, "x=disconnect"),
-		"o=open",
-		"s=save",
-		"S=save as",
-		hintIf(m.table.HasColumns(), "e=export"),
 		"h=history",
-		hintIf(a.conn != nil && hasText, "p=explain"),
 		"q=quit",
 		"Esc=cancel",
 	)

@@ -349,6 +349,10 @@ func buildDebugBinds() []debugBind {
 		kb("Selection", "Shift+Right", KeyRight, false, false, true),
 		kb("Selection", "Shift+Home", KeyHome, false, false, true),
 		kb("Selection", "Shift+End", KeyEnd, false, false, true),
+		kb("Selection", "Ctrl+Shift+Left", KeyLeft, true, false, true),
+		kb("Selection", "Ctrl+Shift+Right", KeyRight, true, false, true),
+		kb("Selection", "Ctrl+Shift+Home", KeyHome, true, false, true),
+		kb("Selection", "Ctrl+Shift+End", KeyEnd, true, false, true),
 
 		// Word / buffer jumps
 		kb("Word/Buffer", "Ctrl+Left", KeyLeft, true, false, false),
@@ -378,15 +382,20 @@ func buildDebugBinds() []debugBind {
 		rb("Actions", "Ctrl+F", 'f', true, false),
 		rb("Actions", "Ctrl+G", 'g', true, false),
 		rb("Actions", "Ctrl+L", 'l', true, false),
+		rb("Actions", "Ctrl+O", 'o', true, false),
+		rb("Actions", "Ctrl+R", 'r', true, false),
 		rb("Actions", "Ctrl+S", 's', true, false),
 		rb("Actions", "Ctrl+Space", ' ', true, false),
 
 		// Menu / focus
 		rb("Menu/Focus", "Ctrl+K", 'k', true, false),
+		rb("Menu/Focus", "Ctrl+E", 'e', true, false),
 		rb("Menu/Focus", "Alt+1", '1', false, true),
 		rb("Menu/Focus", "Alt+2", '2', false, true),
 		rb("Menu/Focus", "Alt+3", '3', false, true),
 		rb("Menu/Focus", "Alt+F", 'f', false, true),
+		rb("Menu/Focus", "Alt+S", 's', false, true),
+		rb("Menu/Focus", "Alt+D", 'd', false, true),
 		rb("Menu/Focus", "Alt+A", 'a', false, true),
 
 		// Line ops
@@ -399,11 +408,11 @@ func buildDebugBinds() []debugBind {
 
 		// Function keys
 		kb("Function", "F5", KeyF5, false, false, false),
+		kb("Function", "F9", KeyF9, false, false, false),
 		kb("Function", "F11", KeyF11, false, false, false),
 
 		// Mouse
 		mb("Mouse", "Left click", MouseButtonLeft, MouseActionPress),
-		mb("Mouse", "Right click", MouseButtonRight, MouseActionPress),
 		mb("Mouse", "Middle click", MouseButtonMiddle, MouseActionPress),
 		mb("Mouse", "Wheel up", MouseButtonWheelUp, MouseActionPress),
 		mb("Mouse", "Wheel down", MouseButtonWheelDown, MouseActionPress),

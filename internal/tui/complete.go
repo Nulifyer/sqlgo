@@ -294,8 +294,17 @@ func fuzzyScore(needle, haystack string) (int, []int, bool) {
 	if n > m {
 		return 0, nil, false
 	}
+	// Cap haystack length so pathological inputs (e.g. a pasted multi-KB
+	// identifier or a long literal string surfaced as a candidate) can't
+	// run the O(n*m^2) DP into seconds. 128 runes is more than any real
+	// SQL identifier and keeps worst-case work bounded.
+	const fuzzyHayCap = 128
+	if m > fuzzyHayCap {
+		hOrig = hOrig[:fuzzyHayCap]
+		m = fuzzyHayCap
+	}
 	nLow := []rune(strings.ToLower(needle))
-	hLow := []rune(strings.ToLower(haystack))
+	hLow := []rune(strings.ToLower(string(hOrig)))
 
 	// Prefix fast path. All-sequential matches, flat big score
 	// minus a length tiebreak so shorter prefix hits still win.

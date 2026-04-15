@@ -186,33 +186,46 @@ const (
 )
 
 // Conn is a live database connection. NOT required to be
-// concurrent-safe; the TUI serializes per connection.
+// concurrent-safe; the TUI serializes per connection. Every method
+// below assumes the caller holds exclusive use of this Conn for the
+// duration of the call. Running two methods on the same Conn from
+// different goroutines is undefined behavior -- callers that want
+// parallelism MUST open additional Conns.
 type Conn interface {
 	io.Closer
+	// Ping verifies the connection is alive. Caller must serialize.
 	Ping(ctx context.Context) error
-	// Query returns a streaming cursor. Caller MUST Close().
+	// Query returns a streaming cursor. Caller MUST Close() it before
+	// issuing another Query/Exec/Schema/Columns/Definition/Explain call
+	// on the same Conn -- many drivers pin a single server cursor and
+	// overlapping calls either error or deadlock.
 	Query(ctx context.Context, sql string) (Rows, error)
 	// Exec runs a non-row statement. Placeholder style is
-	// driver-specific.
+	// driver-specific. Caller must serialize with any other Conn call.
 	Exec(ctx context.Context, sql string, args ...any) error
 	// Schema returns user-visible tables/views. Flat engines
-	// return everything under a synthetic schema.
+	// return everything under a synthetic schema. Caller must serialize.
 	Schema(ctx context.Context) (*SchemaInfo, error)
 	// Columns returns ordered columns for one table. Callers
-	// should cache -- the editor hits this on every trigger.
+	// should cache -- the editor hits this on every trigger. Caller
+	// must serialize with any other Conn call.
 	Columns(ctx context.Context, t TableRef) ([]Column, error)
 	// Definition returns runnable DDL for a single object.
 	// kind is one of "view", "procedure", "function", "trigger".
 	// The returned text is an engine-appropriate re-creatable form:
 	// mssql uses CREATE OR ALTER, postgres uses CREATE OR REPLACE
 	// (or DROP + CREATE for triggers), mysql/sqlite use DROP + CREATE.
-	// Returns an error for unsupported kinds or drivers.
+	// Returns an error for unsupported kinds or drivers. Caller must
+	// serialize with any other Conn call.
 	Definition(ctx context.Context, kind, schema, name string) (string, error)
 	// Explain returns raw plan rows for sql. Shape is engine-specific:
 	// callers dispatch on Capabilities().ExplainFormat to parse. Adapters
 	// that set ExplainFormatNone return ErrExplainUnsupported so the TUI
-	// can skip the feature cleanly.
+	// can skip the feature cleanly. Caller must serialize.
 	Explain(ctx context.Context, sql string) ([][]any, error)
+	// Driver and Capabilities are the only safe-to-call-concurrently
+	// methods on Conn: both return immutable values captured at Open
+	// time and do no I/O.
 	Driver() string
 	Capabilities() Capabilities
 }

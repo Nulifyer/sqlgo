@@ -124,7 +124,7 @@ Launch the TUI:
 sqlgo
 ```
 
-Open the command menu with `Ctrl+K` to connect, disconnect, export, view history, and run `EXPLAIN`. Everything else is keyboard-driven; press `F1` for an in-app help overlay.
+Open the command menu with `Ctrl+K` for global actions (connect, disconnect, history, quit). Focus-scoped actions (save, open, export, explain, set active DB) are direct binds on the panel that owns them -- see the table below. Press `F1` for an in-app help overlay.
 
 ### Keybindings
 
@@ -136,8 +136,12 @@ Open the command menu with `Ctrl+K` to connect, disconnect, export, view history
 | | `F1` | Help overlay |
 | | `F8` | Key-debug overlay |
 | **Query editor** | `F5` | Run query |
+| | `F9` | EXPLAIN current query |
 | | `Ctrl+C` | Cancel running query (copies selection when idle) |
-| | `Ctrl+S` / `Ctrl+R` | Save tab / rename tab |
+| | `Ctrl+O` | Open SQL file |
+| | `Ctrl+S` / `Alt+S` | Save tab / save as |
+| | `Ctrl+R` | Rename tab |
+| | `Alt+D` | Set active database for this tab (SSMS-style) |
 | | `Ctrl+T` / `Ctrl+W` | New tab / close tab |
 | | `Ctrl+PgUp` / `Ctrl+PgDn` | Cycle query tabs |
 | | `F11` | Toggle fullscreen editor |
@@ -155,26 +159,48 @@ Open the command menu with `Ctrl+K` to connect, disconnect, export, view history
 | | `Home` | Smart home (toggle indent / col 0) |
 | | `Esc` | Collapse multi-cursor |
 | | `Ctrl+Left` / `Ctrl+Right` | Word-jump |
+| | `Ctrl+Backspace` / `Ctrl+Delete` | Delete word left / right |
 | | `Shift+Arrow` / `Shift+Home/End` | Extend selection |
+| | `Ctrl+Shift+Left` / `Ctrl+Shift+Right` | Extend selection by word |
+| | `Ctrl+Shift+Home` / `Ctrl+Shift+End` | Extend selection to buffer start / end |
 | | `Ctrl+L` | Clear editor |
 | **Explorer** | `Enter` | SELECT for tables / views; open DDL for routines / triggers |
 | | `s` | Generate `SELECT` for table / view |
 | | `e` | Open DDL for view / routine / trigger |
+| | `u` | Pin active database to cursor |
 | | `R` | Refresh schema |
-| **Results** | `Arrows` / `PgUp/PgDn` / `Home/End` | Navigate cells |
+| **Results** | `Ctrl+E` | Export results |
+| | `Arrows` / `PgUp/PgDn` / `Home/End` | Navigate cells |
 | | `Enter` | Inspect cell |
 | | `y` / `Y` / `Alt+A` | Copy cell / row / all (TSV) |
 | | `s` | Cycle sort on column |
 | | `/` | Filter rows |
 | | `w` | Toggle word-wrap |
 | | `Ctrl+PgUp` / `Ctrl+PgDn` | Cycle result-set tabs |
+| | `Shift+double-click` | Copy row |
+| **Cell inspector** | `Up`/`Dn`/`PgUp`/`PgDn` | Scroll |
+| | `Home` / `End` | Scroll to top / bottom |
+| | `y` | Copy cell |
+| **EXPLAIN overlay** | `Up`/`Dn`/`PgUp`/`PgDn` | Move selection |
+| | `Home` / `End` | First / last node |
+| | `Space` | Toggle collapse node |
+| | `r` | Toggle raw output |
+| **Query history** | `Up`/`Dn`/`PgUp`/`PgDn` | Move selection |
+| | `type` | Search filter |
+| | `Enter` | Paste into editor |
+| | `d` | Delete entry |
+| | `X` | Clear all (two-press) |
+| | `Tab` | Toggle scope (this conn / all) |
+| **Connection form** | `Ctrl+T` | Test network |
+| | `Ctrl+L` | Test auth |
+| | `Ctrl+S` | Save |
+| **Connection picker** | `a` / `e` / `x` | Add / edit / delete |
+| | `K` | Unlink keyring entry |
+| **Safety prompts** | confirm run: `y` / `n` / `Esc` / `Tab` / `Enter` | Run destructive DML/DDL guard |
+| | SSH trust: `y` / `n` / `Esc` / `Enter` | TOFU host-key accept (Enter arms, then confirms) |
+| **Query tabs** | `Double-click tab` | Rename |
 | **Command menu** (`Ctrl+K`) | `c` / `x` | Connect / Disconnect |
-| | `o` | Open SQL file |
-| | `s` / `S` | Save / Save as |
-| | `e` | Export results |
 | | `h` | Query history |
-| | `p` | EXPLAIN current query |
-| | `d` | Set active database for this tab (SSMS-style) |
 | | `q` | Quit |
 
 

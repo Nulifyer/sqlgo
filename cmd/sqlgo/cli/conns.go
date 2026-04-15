@@ -333,8 +333,12 @@ func connsAdd(argv []string, stdin io.Reader, stderr io.Writer, update bool) Exi
 			if err := secret.System().Set(name, pw); err == nil {
 				c.Password = secret.Placeholder
 			} else {
-				c.Password = pw
-				stderrf(stderr, "keyring unavailable, storing password in plaintext: %v", err)
+				// Refuse the silent fallback: anyone who asked for keyring
+				// storage deserves to know it failed, not to discover months
+				// later that credentials are sitting in a plaintext store.
+				// Force them to opt in to plaintext with --keyring=false.
+				stderrf(stderr, "keyring unavailable: %v\nrerun with --keyring=false to store in plaintext", err)
+				return ExitConn
 			}
 		} else {
 			c.Password = pw

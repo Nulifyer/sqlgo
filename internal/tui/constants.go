@@ -17,11 +17,20 @@ const (
 const (
 	resultChanBuf = 8
 	inputChanBuf  = 8
+	// asyncChanBuf sizes the goroutine -> main-loop callback queue.
+	// Senders use a non-blocking select where dropping is safe (spinner
+	// frames); blocking sends (one-shot completions) rely on the main
+	// loop draining quickly. 16 is enough headroom for a few concurrent
+	// probes + a spinner without the main loop falling behind.
+	asyncChanBuf = 16
 )
 
 // UI cadence.
 const (
 	progressThrottle = 50 * time.Millisecond
+	// chordTimeout is how long a two-key prefix (Ctrl+K, ...) stays armed
+	// before it silently disarms. Matches VSCode's default.
+	chordTimeout = 1 * time.Second
 )
 
 // Layout geometry shared across the main view.

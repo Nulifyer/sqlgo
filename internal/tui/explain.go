@@ -31,15 +31,17 @@ type explainTree struct {
 
 // runExplain calls the connection's Explain and parses the rows
 // into an explainTree. ExplainFormatNone drivers return an
-// "unsupported" sentinel tree.
-func (a *app) runExplain(catalog, sql string) (*explainTree, error) {
-	if a.conn == nil {
+// "unsupported" sentinel tree. Accepts an explicit conn so the
+// goroutine path can't have a.conn swapped underneath it by a
+// reconnect mid-fetch; the caller captures a.conn before spawning.
+func (a *app) runExplain(conn db.Conn, catalog, sql string) (*explainTree, error) {
+	if conn == nil {
 		return nil, fmt.Errorf("no active connection")
 	}
-	caps := a.conn.Capabilities()
+	caps := conn.Capabilities()
 	if caps.ExplainFormat == db.ExplainFormatNone {
 		return &explainTree{
-			root: &explainNode{label: "EXPLAIN not supported for " + a.conn.Driver()},
+			root: &explainNode{label: "EXPLAIN not supported for " + conn.Driver()},
 		}, nil
 	}
 
@@ -48,18 +50,18 @@ func (a *app) runExplain(catalog, sql string) (*explainTree, error) {
 	var raw [][]any
 	var err error
 	if catalog != "" {
-		if ex, ok := a.conn.(db.DatabaseExplainer); ok {
+		if ex, ok := conn.(db.DatabaseExplainer); ok {
 			raw, err = ex.ExplainIn(ctx, catalog, sql)
 		} else {
-			raw, err = a.conn.Explain(ctx, sql)
+			raw, err = conn.Explain(ctx, sql)
 		}
 	} else {
-		raw, err = a.conn.Explain(ctx, sql)
+		raw, err = conn.Explain(ctx, sql)
 	}
 	if err != nil {
 		if errors.Is(err, db.ErrExplainUnsupported) {
 			return &explainTree{
-				root: &explainNode{label: "EXPLAIN not supported for " + a.conn.Driver()},
+				root: &explainNode{label: "EXPLAIN not supported for " + conn.Driver()},
 			}, nil
 		}
 		return nil, fmt.Errorf("explain: %w", err)

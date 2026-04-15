@@ -32,6 +32,18 @@ const (
 	// the full result to compute column widths, so it is not suitable
 	// for streaming large exports.
 	Table
+	// MarkdownQuery writes the source SQL inside a ```sql code block
+	// followed by the Markdown table. Useful for pasting result
+	// snapshots into PRs/notebooks with the originating query.
+	// Requires Options.Query.
+	MarkdownQuery
+	// SQLInsert writes INSERT statements for each row, quoted for the
+	// target dialect (defaults to ANSI double quotes). Uses
+	// Options.TableName, falling back to "results".
+	SQLInsert
+	// HTML writes a minimal standalone <table> document. Good for
+	// emailing or embedding in a report viewer.
+	HTML
 )
 
 // String returns the canonical name used in UI copy and CLI flags.
@@ -49,8 +61,28 @@ func (f Format) String() string {
 		return "jsonl"
 	case Table:
 		return "table"
+	case MarkdownQuery:
+		return "markdown+query"
+	case SQLInsert:
+		return "sql"
+	case HTML:
+		return "html"
 	}
 	return "unknown"
+}
+
+// Options carries format-specific parameters that don't fit in the row
+// buffer. Fields are only consulted by the formats that need them
+// (Query by MarkdownQuery; TableName by SQLInsert) and are otherwise
+// ignored, so callers can pass a single Options struct regardless of
+// the chosen format.
+type Options struct {
+	// Query is the SQL that produced the rows. Emitted inside a ```sql
+	// code block above the table when format == MarkdownQuery.
+	Query string
+	// TableName is the identifier used in the INSERT statement when
+	// format == SQLInsert. Empty means "results".
+	TableName string
 }
 
 // FormatFromPath picks a format from a filename's extension. Unknown
@@ -69,6 +101,10 @@ func FormatFromPath(path string) (Format, bool) {
 		return Markdown, true
 	case ".jsonl", ".ndjson":
 		return JSONL, true
+	case ".sql":
+		return SQLInsert, true
+	case ".html", ".htm":
+		return HTML, true
 	}
 	return CSV, false
 }
@@ -90,8 +126,39 @@ func FormatFromName(name string) (Format, error) {
 		return JSONL, nil
 	case "table":
 		return Table, nil
+	case "markdown+query", "md+query", "md-query":
+		return MarkdownQuery, nil
+	case "sql", "insert":
+		return SQLInsert, nil
+	case "html":
+		return HTML, nil
 	}
 	return 0, fmt.Errorf("unknown format %q", name)
+}
+
+// DefaultExt returns the filename extension (including the leading
+// dot) conventionally associated with f. Used by the export UI to
+// auto-sync the path extension when the user cycles formats.
+func (f Format) DefaultExt() string {
+	switch f {
+	case CSV:
+		return ".csv"
+	case TSV:
+		return ".tsv"
+	case JSON:
+		return ".json"
+	case JSONL:
+		return ".jsonl"
+	case Markdown, MarkdownQuery:
+		return ".md"
+	case SQLInsert:
+		return ".sql"
+	case HTML:
+		return ".html"
+	case Table:
+		return ".txt"
+	}
+	return ""
 }
 
 // columnNames extracts the header slice once so each writer doesn't

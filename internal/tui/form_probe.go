@@ -12,6 +12,8 @@ import (
 
 	"github.com/Nulifyer/sqlgo/internal/config"
 	"github.com/Nulifyer/sqlgo/internal/db"
+	"github.com/Nulifyer/sqlgo/internal/secret"
+	"github.com/Nulifyer/sqlgo/internal/sshtunnel"
 )
 
 // probeTimeout bounds each test button so the form never hangs on a
@@ -155,6 +157,24 @@ func (fl *formLayer) startTestAuth(a *app) {
 		f.status = "auth: " + err.Error()
 		return
 	}
+	// Resolve keyring placeholders up front; the goroutine has no
+	// safe way to touch a.secrets from off the main loop.
+	if c.Password == secret.Placeholder && a.secrets != nil {
+		if resolved, err := a.secrets.Get(c.Name); err == nil {
+			c.Password = resolved
+		} else {
+			f.status = "auth: keyring get: " + err.Error()
+			return
+		}
+	}
+	if c.SSH.Password == secret.Placeholder && a.secrets != nil {
+		if resolved, err := a.secrets.Get(sshKeyringAccount(c.Name)); err == nil {
+			c.SSH.Password = resolved
+		} else {
+			f.status = "auth: ssh keyring get: " + err.Error()
+			return
+		}
+	}
 	f.status = "testing auth..."
 	go func() {
 		msg := probeAuth(c)
@@ -179,6 +199,30 @@ func probeAuth(c config.Connection) string {
 		Password: c.Password,
 		Database: c.Database,
 		Options:  c.Options,
+	}
+	// Mirror connectTo's tunnel path so an SSH-jumped connection is
+	// actually tested through the tunnel instead of being dialed
+	// direct -- the latter either fails (firewall) or silently hits
+	// the wrong host, both of which make the auth button lie.
+	var tunnel *sshtunnel.Tunnel
+	if c.SSH.Host != "" {
+		tcfg := sshtunnel.Config{
+			SSHHost:     c.SSH.Host,
+			SSHPort:     c.SSH.Port,
+			SSHUser:     c.SSH.User,
+			SSHPassword: c.SSH.Password,
+			SSHKeyPath:  c.SSH.KeyPath,
+			TargetHost:  c.Host,
+			TargetPort:  c.Port,
+		}
+		t, terr := sshtunnel.Open(tcfg)
+		if terr != nil {
+			return "auth: ssh tunnel: " + terr.Error()
+		}
+		tunnel = t
+		defer tunnel.Close()
+		cfg.Host = t.LocalHost
+		cfg.Port = t.LocalPort
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()

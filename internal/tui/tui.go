@@ -129,6 +129,11 @@ type app struct {
 	// Cleared on disconnect so fresh schema wins.
 	columnCache *columnCache
 
+	// schemaLoading is set while loadSchema has a fetch in flight so a
+	// second R-press (or rapid reconnect) doesn't spawn a second
+	// goroutine racing the first. Cleared by the completion callback.
+	schemaLoading bool
+
 	quit bool
 }
 
@@ -325,7 +330,7 @@ func Run(opts Options) error {
 		// Buffer a handful of events so a fast-streaming query doesn't
 		// stall the drain goroutine on a non-blocking progress send.
 		resultCh:         make(chan queryEvent, resultChanBuf),
-		asyncCh:          make(chan func(*app), 16),
+		asyncCh:          make(chan func(*app), asyncChanBuf),
 		clipboard:        clipboard.System(),
 		secrets:          sec,
 		secretsAvailable: secAvail,
@@ -641,7 +646,13 @@ func runSpinner(a *app, done <-chan struct{}, apply func(a *app, frame string)) 
 		case <-t.C:
 			i++
 			frame := spinnerFrames[i%len(spinnerFrames)]
-			a.asyncCh <- func(a *app) { apply(a, frame) }
+			// Non-blocking send: dropping a frame under backpressure is
+			// fine (next tick paints anyway), but blocking would stall
+			// the spinner goroutine and delay the final "done" apply.
+			select {
+			case a.asyncCh <- func(a *app) { apply(a, frame) }:
+			default:
+			}
 		}
 	}
 }
@@ -694,6 +705,24 @@ func (a *app) disconnect() {
 	if a.conn == nil {
 		return
 	}
+	// Cancel any in-flight queries so their goroutines unblock on the
+	// soon-to-be-closed conn and exit instead of lingering to write
+	// stale events into the new connection's channel.
+	m := a.mainLayerPtr()
+	if m != nil {
+		for _, s := range m.sessions {
+			if s.running && s.cancel != nil {
+				s.cancel()
+			}
+			// Clear running/cancel here too: after we swap a.resultCh
+			// below, any late evtDone from the cancelled goroutine lands
+			// in the abandoned channel and never reaches handleQueryEvent,
+			// so without this the session stays "running" forever and F5
+			// is locked on the next connection.
+			s.running = false
+			s.cancel = nil
+		}
+	}
 	_ = a.conn.Close()
 	a.conn = nil
 	// Close the tunnel after the db conn so any lingering reads on
@@ -707,13 +736,20 @@ func (a *app) disconnect() {
 	if a.columnCache != nil {
 		a.columnCache.clear()
 	}
-	m := a.mainLayerPtr()
-	m.resetResults()
-	m.explorer.SetSchema(nil, db.SchemaDepthSchemas)
-	// Clear every tab's pinned catalog -- the old server is gone; a
-	// re-connect to a different server must not reuse stale DB names.
-	for _, s := range m.sessions {
-		s.activeCatalog = ""
+	// Swap the result channel so any stragglers from the old connection's
+	// query goroutines write into an abandoned buffer rather than landing
+	// in the new connection's dispatch loop. The old goroutines captured
+	// their own resultCh pointer at spawn time (tui.go runQueryAsync) so
+	// this swap can't desync a live writer from its channel.
+	a.resultCh = make(chan queryEvent, resultChanBuf)
+	if m != nil {
+		m.resetResults()
+		m.explorer.SetSchema(nil, db.SchemaDepthSchemas)
+		// Clear every tab's pinned catalog -- the old server is gone; a
+		// re-connect to a different server must not reuse stale DB names.
+		for _, s := range m.sessions {
+			s.activeCatalog = ""
+		}
 	}
 }
 
@@ -728,6 +764,10 @@ func (a *app) loadSchema() {
 		m.explorer.SetSchema(nil, db.SchemaDepthSchemas)
 		return
 	}
+	if a.schemaLoading {
+		return
+	}
+	a.schemaLoading = true
 	// Capture the current conn so a disconnect+reconnect during the
 	// fetch can't apply stale schema to the new connection.
 	conn := a.conn
@@ -754,6 +794,7 @@ func (a *app) loadSchema() {
 				names, err := lister.ListDatabases(ctx)
 				close(done)
 				a.asyncCh <- func(a *app) {
+					a.schemaLoading = false
 					if a.conn != conn {
 						return
 					}
@@ -787,6 +828,7 @@ func (a *app) loadSchema() {
 		info, err := conn.Schema(ctx)
 		close(done)
 		a.asyncCh <- func(a *app) {
+			a.schemaLoading = false
 			// Drop the result if the connection has changed underneath us.
 			if a.conn != conn {
 				return

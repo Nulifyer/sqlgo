@@ -44,6 +44,17 @@ func newResultTab(title string) *resultTab {
 // via promoted fields without touching the ~136 call sites. Tab switching
 // swaps this pointer. results is the ordered list of tabs for the current
 // query; activeResult indexes into it.
+//
+// Async callback ownership rule: when a goroutine posts a closure to
+// a.asyncCh that touches a session, it MUST re-read the session pointer
+// from m.sessions[...] inside the callback rather than closing over a
+// captured *session at spawn time. By the time the callback runs the
+// user may have closed the tab or switched the active session, and a
+// captured pointer will silently write to an abandoned session (stale
+// row counts, ghost "running…" states). The query-runner path in
+// main_layer.go is the canonical example: it captures the session
+// *index* and the pre-spawn conn, then dereferences both inside the
+// callback and drops the event if either has changed.
 type session struct {
 	// title is the label shown on the query tab strip ("Query 1",
 	// "Query 2", ...). Auto-generated on new tab; not user-editable yet.
