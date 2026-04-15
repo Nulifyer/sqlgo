@@ -112,6 +112,26 @@ func mapErr(err error) error {
 	return err
 }
 
+// Resolve returns the real password for an account. When stored is the
+// Placeholder sentinel, the value is fetched from the supplied store
+// (typically System()); otherwise stored is already plaintext and is
+// returned as-is. A nil store with a placeholder is an explicit error
+// so callers fail loudly rather than silently dialling with the
+// sentinel string.
+func Resolve(store Store, account, stored string) (string, error) {
+	if stored != Placeholder {
+		return stored, nil
+	}
+	if store == nil {
+		return "", errors.New("secret: password in keyring but no store available")
+	}
+	v, err := store.Get(account)
+	if err != nil {
+		return "", err
+	}
+	return v, nil
+}
+
 // NewMemory returns an in-process secret store. Useful for tests and
 // for sqlgo runs in headless environments where no OS keyring is
 // reachable. Not persisted across runs.

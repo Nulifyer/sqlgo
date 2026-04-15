@@ -1,4 +1,4 @@
-package tui
+package output
 
 import (
 	"bytes"
@@ -9,32 +9,58 @@ import (
 	"github.com/Nulifyer/sqlgo/internal/db"
 )
 
-var exportCols = []db.Column{{Name: "id"}, {Name: "name"}}
-var exportRows = [][]string{
+var testCols = []db.Column{{Name: "id"}, {Name: "name"}}
+var testRows = [][]string{
 	{"1", "alice"},
-	{"2", "bo|b"},            // pipe in markdown must be escaped
-	{"3", "line1\nline2"},    // newline in markdown must become <br>
+	{"2", "bo|b"},
+	{"3", "line1\nline2"},
 }
 
-func TestExportFormatFromPath(t *testing.T) {
+func TestFormatFromPath(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		path  string
-		want  ExportFormat
+		want  Format
 		known bool
 	}{
-		{"out.csv", ExportCSV, true},
-		{"out.tsv", ExportTSV, true},
-		{"out.json", ExportJSON, true},
-		{"out.md", ExportMarkdown, true},
-		{"out.markdown", ExportMarkdown, true},
-		{"out.txt", ExportCSV, false}, // default
-		{"out", ExportCSV, false},
+		{"out.csv", CSV, true},
+		{"out.tsv", TSV, true},
+		{"out.json", JSON, true},
+		{"out.md", Markdown, true},
+		{"out.markdown", Markdown, true},
+		{"out.txt", CSV, false},
+		{"out", CSV, false},
 	}
 	for _, tc := range cases {
-		got, known := exportFormatFromPath(tc.path)
+		got, known := FormatFromPath(tc.path)
 		if got != tc.want || known != tc.known {
-			t.Errorf("exportFormatFromPath(%q) = (%v,%v), want (%v,%v)", tc.path, got, known, tc.want, tc.known)
+			t.Errorf("FormatFromPath(%q) = (%v,%v), want (%v,%v)", tc.path, got, known, tc.want, tc.known)
+		}
+	}
+}
+
+func TestFormatFromName(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want Format
+		ok   bool
+	}{
+		{"csv", CSV, true},
+		{"TSV", TSV, true},
+		{" json ", JSON, true},
+		{"md", Markdown, true},
+		{"markdown", Markdown, true},
+		{"yaml", 0, false},
+	}
+	for _, tc := range cases {
+		got, err := FormatFromName(tc.in)
+		if (err == nil) != tc.ok {
+			t.Errorf("FormatFromName(%q) err=%v, want ok=%v", tc.in, err, tc.ok)
+			continue
+		}
+		if tc.ok && got != tc.want {
+			t.Errorf("FormatFromName(%q) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
 }
@@ -42,8 +68,8 @@ func TestExportFormatFromPath(t *testing.T) {
 func TestWriteCSV(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if err := writeExport(&buf, exportCols, exportRows, ExportCSV); err != nil {
-		t.Fatalf("writeExport: %v", err)
+	if err := Write(&buf, testCols, testRows, CSV); err != nil {
+		t.Fatalf("Write: %v", err)
 	}
 	want := "id,name\n1,alice\n2,bo|b\n3,\"line1\nline2\"\n"
 	if buf.String() != want {
@@ -54,10 +80,9 @@ func TestWriteCSV(t *testing.T) {
 func TestWriteTSV(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if err := writeExport(&buf, exportCols, exportRows, ExportTSV); err != nil {
-		t.Fatalf("writeExport: %v", err)
+	if err := Write(&buf, testCols, testRows, TSV); err != nil {
+		t.Fatalf("Write: %v", err)
 	}
-	// encoding/csv uses \r\n line endings by default regardless of delimiter.
 	if !strings.Contains(buf.String(), "id\tname") {
 		t.Errorf("tsv missing header: %q", buf.String())
 	}
@@ -69,8 +94,8 @@ func TestWriteTSV(t *testing.T) {
 func TestWriteJSON(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if err := writeExport(&buf, exportCols, exportRows, ExportJSON); err != nil {
-		t.Fatalf("writeExport: %v", err)
+	if err := Write(&buf, testCols, testRows, JSON); err != nil {
+		t.Fatalf("Write: %v", err)
 	}
 	var got jsonResult
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
@@ -93,11 +118,10 @@ func TestWriteJSON(t *testing.T) {
 func TestWriteMarkdown(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if err := writeExport(&buf, exportCols, exportRows, ExportMarkdown); err != nil {
-		t.Fatalf("writeExport: %v", err)
+	if err := Write(&buf, testCols, testRows, Markdown); err != nil {
+		t.Fatalf("Write: %v", err)
 	}
 	out := buf.String()
-	// Header + separator + 3 data rows = 5 lines.
 	if lines := strings.Count(out, "\n"); lines != 5 {
 		t.Errorf("line count = %d, want 5\n%s", lines, out)
 	}
@@ -107,11 +131,9 @@ func TestWriteMarkdown(t *testing.T) {
 	if !strings.Contains(out, "| --- | --- |") {
 		t.Errorf("missing separator row: %s", out)
 	}
-	// Pipe must be escaped in "bo|b".
 	if !strings.Contains(out, `bo\|b`) {
 		t.Errorf("pipe not escaped: %s", out)
 	}
-	// Newline must become <br>.
 	if !strings.Contains(out, "line1<br>line2") {
 		t.Errorf("newline not escaped: %s", out)
 	}
@@ -120,8 +142,8 @@ func TestWriteMarkdown(t *testing.T) {
 func TestWriteMarkdownEmptyRows(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if err := writeExport(&buf, exportCols, nil, ExportMarkdown); err != nil {
-		t.Fatalf("writeExport: %v", err)
+	if err := Write(&buf, testCols, nil, Markdown); err != nil {
+		t.Fatalf("Write: %v", err)
 	}
 	out := buf.String()
 	if !strings.Contains(out, "| id | name |") || !strings.Contains(out, "| --- | --- |") {

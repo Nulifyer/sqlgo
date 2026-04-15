@@ -170,6 +170,100 @@ Open the command menu with `Ctrl+K` to connect, disconnect, export, view history
 | | `q` | Quit |
 
 
+## Scripting (non-TUI)
+
+sqlgo also runs headless. When the first argument is a known verb, nothing in the TUI is loaded -- the binary behaves like `psql`/`mysql` for shell scripts and CI jobs.
+
+| Verb | Purpose |
+|---|---|
+| `exec` | run SQL and print results (default: table on a tty, TSV on a pipe) |
+| `export` | run SQL and write results to a file or stdout (default: CSV) |
+| `conns` | manage saved connections (`list`, `show`, `add`, `set`, `rm`, `test`, `import`, `export`) |
+| `history` | inspect query history (`list`, `search`, `clear`) |
+
+Common flags (shared by `exec` and `export`):
+
+| Flag | Effect |
+|---|---|
+| `-c NAME` / `--conn NAME` | use a saved connection |
+| `--dsn URL` | inline `scheme://user:pass@host:port/db?opt=val` |
+| `-q SQL` / `--query SQL` | inline SQL |
+| `-f PATH` / `--file PATH` | read SQL from a file (`-` for stdin) |
+| `--format FMT` | `csv` / `tsv` / `json` / `jsonl` / `markdown` / `table` |
+| `-o PATH` / `--output PATH` | output file (format inferred from extension unless `--format` set) |
+| `--max-rows N` | stop after N rows (exit 5) |
+| `--timeout DUR` | abort each statement after DUR |
+| `--allow-unsafe` | permit destructive DML/DDL (UPDATE/DELETE without WHERE, TRUNCATE, DROP) |
+| `--continue-on-error` | keep running remaining statements on failure |
+| `--record-history` | append to the history store (off by default for CLI) |
+| `--password-stdin` | read the connection password from stdin |
+
+Password precedence: `--password-stdin` > `$SQLGO_PASSWORD` > DSN / keyring.
+
+DSN schemes: `postgres://`, `mysql://`, `mssql://` (or `sqlserver://`), `sqlite://`, `oracle://`, `firebird://`, `libsql://`, `d1://`. Postgres aliases (`cockroachdb`, `supabase`, `neon`, `yugabytedb`, `timescaledb`) and MySQL alias (`mariadb`) are also accepted as schemes and as driver names under `conns add --driver`.
+
+### `conns` subcommands
+
+| Subcommand | Flags |
+|---|---|
+| `list` \| `ls` | `--format FMT` |
+| `show NAME` | -- |
+| `add NAME` | `--driver NAME` (required), `--host`, `--port`, `--user`, `--database`, `--option k=v` (repeatable), `--password-stdin`, `--keyring=true\|false` (default true), `--force`, `--ssh-host`, `--ssh-port`, `--ssh-user`, `--ssh-key PATH`, `--ssh-password-stdin` |
+| `set NAME` | same flags as `add`; upserts an existing connection. Only fields whose flag is supplied are overwritten |
+| `rm NAME` | `--force` (suppress error if missing) |
+| `test NAME` | `--timeout DUR` (default 10s), `--password-stdin` |
+| `import` | `-i FILE` / `--input FILE` (default stdin) |
+| `export` | `-o FILE` / `--output FILE` (default stdout) |
+
+Passwords default to the OS keyring. When the keyring is unavailable the password is stored in plaintext in the store with a warning on stderr; pass `--keyring=false` to force plaintext. `--ssh-password-stdin` reads *after* the db password when both `--password-stdin` and `--ssh-password-stdin` are set; use `$SQLGO_SSH_PASSWORD` as the env equivalent.
+
+### `history` subcommands
+
+| Subcommand | Flags |
+|---|---|
+| `list` \| `ls` | `-c NAME` / `--conn NAME`, `--limit N` (default 50), `--format FMT` |
+| `search QUERY` | `-c NAME` / `--conn NAME`, `--limit N` (default 50), `--format FMT`; QUERY can appear before or after flags |
+| `clear` | `-c NAME` / `--conn NAME` (scope to one connection), `--force` (required) |
+
+`exec` and `export` do not record history unless `--record-history` is passed -- CLI-driven queries stay out of the ring by default.
+
+Examples:
+
+```sh
+# Saved connection, auto-detected stdin, human-readable table output
+sqlgo exec -c prod -q "select version()"
+
+# Piped SQL file, CSV to a file
+cat report.sql | sqlgo export -c prod -o report.csv
+
+# Inline DSN, JSONL for downstream tools
+sqlgo export --dsn "postgres://me@db.local:5432/app" -q "select * from users" --format jsonl
+
+# Save a new connection (password read from stdin, stored in OS keyring)
+echo -n "$PGPASSWORD" | sqlgo conns add prod --driver postgres \
+    --host db.local --port 5432 --user me --database app --password-stdin
+
+# Verify the connection is reachable
+sqlgo conns test prod
+
+# Backup / restore connections
+sqlgo conns export -o conns.json
+sqlgo conns import -i conns.json
+```
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | usage / argument error |
+| `2` | connection / store error |
+| `3` | query error |
+| `4` | refused: unsafe mutation without `--allow-unsafe` |
+| `5` | `--max-rows` cap reached (partial output flushed) |
+
+sqlgo never opens an implicit transaction. `BEGIN` / `COMMIT` / `ROLLBACK` are yours to type.
+
 ## Storage
 
 sqlgo keeps per-user state in the platform-native data directory:

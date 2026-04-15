@@ -9,12 +9,14 @@ import (
 	"github.com/Nulifyer/sqlgo/internal/db"
 
 	// Base drivers must register before we alias them.
+	_ "github.com/Nulifyer/sqlgo/internal/db/mssql"
 	_ "github.com/Nulifyer/sqlgo/internal/db/mysql"
 	_ "github.com/Nulifyer/sqlgo/internal/db/postgres"
 )
 
 func init() {
 	db.RegisterAlias("mariadb", "mysql")
+	db.RegisterAlias("sqlserver", "mssql")
 	db.RegisterAlias("cockroachdb", "postgres")
 	db.RegisterAlias("supabase", "postgres")
 	db.RegisterAlias("neon", "postgres")

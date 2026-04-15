@@ -145,21 +145,14 @@ func (a *app) refreshConnections() error {
 	return nil
 }
 
-// resolvePassword returns the real password for a saved connection. When
-// the stored password is the sqlgo keyring placeholder, we fetch the
-// value from the OS secret store; otherwise the stored string is
-// already the plaintext. Errors bubble up so the caller can show the
-// user exactly why a connect failed.
+// resolvePassword returns the real password for a saved connection,
+// delegating to secret.Resolve so the CLI can share the same fetch
+// logic. Errors are wrapped with the connection name so the user sees
+// exactly which connect failed and why.
 func (a *app) resolvePassword(c config.Connection) (string, error) {
-	if c.Password != secret.Placeholder {
-		return c.Password, nil
-	}
-	if a.secrets == nil {
-		return "", fmt.Errorf("password in keyring but no secret store available")
-	}
-	pass, err := a.secrets.Get(c.Name)
+	pass, err := secret.Resolve(a.secrets, c.Name, c.Password)
 	if err != nil {
-		return "", fmt.Errorf("keyring get %q: %w", c.Name, err)
+		return "", fmt.Errorf("password for %q: %w", c.Name, err)
 	}
 	return pass, nil
 }

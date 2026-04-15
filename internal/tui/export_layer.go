@@ -3,6 +3,8 @@ package tui
 import (
 	"fmt"
 	"os"
+
+	"github.com/Nulifyer/sqlgo/internal/output"
 )
 
 // exportLayer is the modal overlay that prompts for an export path and
@@ -67,7 +69,7 @@ func (el *exportLayer) Draw(a *app, c *cellbuf) {
 	// which one their current path would produce.
 	c.writeAt(cur+3, innerCol, truncate("Extensions: .csv  .tsv  .json  .md", boxW-4))
 	fmtName := "csv (default)"
-	if f, ok := exportFormatFromPath(el.path.String()); ok {
+	if f, ok := output.FormatFromPath(el.path.String()); ok {
 		fmtName = f.String()
 	}
 	c.writeAt(cur+4, innerCol, truncate("Format:     "+fmtName, boxW-4))
@@ -111,7 +113,7 @@ func (el *exportLayer) save(a *app) {
 		return
 	}
 
-	format, known := exportFormatFromPath(path)
+	format, known := output.FormatFromPath(path)
 	cols, rows := m.table.Snapshot()
 
 	f, err := os.Create(path)
@@ -119,7 +121,7 @@ func (el *exportLayer) save(a *app) {
 		el.status = "create failed: " + err.Error()
 		return
 	}
-	if err := writeExport(f, cols, rows, format); err != nil {
+	if err := output.Write(f, cols, rows, format); err != nil {
 		_ = f.Close()
 		el.status = "write failed: " + err.Error()
 		return

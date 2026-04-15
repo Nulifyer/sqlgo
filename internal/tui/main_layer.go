@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
+	"github.com/Nulifyer/sqlgo/internal/output"
 	"github.com/Nulifyer/sqlgo/internal/sqltok"
 )
 
@@ -1005,7 +1006,7 @@ func (m *mainLayer) handleResultsKey(a *app, k Key) {
 // copyAllResults serializes the entire visible result buffer (after
 // filter + sort) as TSV and places it on the system clipboard. Sibling
 // of the cell-level 'y' and row-level 'Y' yanks; uses the shared
-// writeExport writer so the clipboard payload matches what the TSV
+// output.Write so the clipboard payload matches what the TSV
 // export-to-file path would produce.
 func (m *mainLayer) copyAllResults(a *app) {
 	if !m.table.HasColumns() {
@@ -1014,7 +1015,7 @@ func (m *mainLayer) copyAllResults(a *app) {
 	}
 	cols, rows := m.table.Snapshot()
 	var buf bytes.Buffer
-	if err := writeExport(&buf, cols, rows, ExportTSV); err != nil {
+	if err := output.Write(&buf, cols, rows, output.TSV); err != nil {
 		m.status = "copy all: " + err.Error()
 		return
 	}
