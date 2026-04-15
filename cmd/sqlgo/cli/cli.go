@@ -33,7 +33,7 @@ const (
 // initial-query seed).
 func IsVerb(name string) bool {
 	switch name {
-	case "exec", "export", "conns", "history":
+	case "exec", "export", "conns", "history", "version":
 		return true
 	}
 	return false
@@ -58,6 +58,8 @@ func Dispatch(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode
 		return runConns(argv[1:], stdin, stdout, stderr)
 	case "history":
 		return runHistory(argv[1:], stdout, stderr)
+	case "version":
+		return runVersion(argv[1:], stdout)
 	}
 	fmt.Fprintf(stderr, "sqlgo: unknown verb %q\n", verb)
 	return ExitUsage

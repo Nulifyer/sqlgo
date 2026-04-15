@@ -180,6 +180,7 @@ sqlgo also runs headless. When the first argument is a known verb, nothing in th
 | `export` | run SQL and write results to a file or stdout (default: CSV) |
 | `conns` | manage saved connections (`list`, `show`, `add`, `set`, `rm`, `test`, `import`, `export`) |
 | `history` | inspect query history (`list`, `search`, `clear`) |
+| `version` | print sqlgo version (also `--version` / `-v`) |
 
 Common flags (shared by `exec` and `export`):
 

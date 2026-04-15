@@ -24,7 +24,7 @@ func runHistory(argv []string, stdout, stderr io.Writer) ExitCode {
 	sub, rest := argv[0], argv[1:]
 	switch sub {
 	case "list", "ls":
-		return historyList(rest, stdout, stderr, "")
+		return historyList(rest, stdout, stderr)
 	case "search":
 		return historySearch(rest, stdout, stderr)
 	case "clear":
@@ -48,7 +48,7 @@ subcommands:
 `)
 }
 
-func historyList(argv []string, stdout, stderr io.Writer, defaultQuery string) ExitCode {
+func historyList(argv []string, stdout, stderr io.Writer) ExitCode {
 	fs := flag.NewFlagSet("history list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (

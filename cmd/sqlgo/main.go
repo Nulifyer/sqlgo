@@ -13,14 +13,21 @@ func main() {
 	// Verb dispatch happens before flag.Parse so the verb's own flags
 	// don't collide with the TUI's. Bare "sqlgo" and "sqlgo file.sql"
 	// keep their existing meaning.
-	if len(os.Args) > 1 && cli.IsVerb(os.Args[1]) {
-		os.Exit(int(cli.Dispatch(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)))
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--version", "-v":
+			os.Exit(int(cli.Dispatch([]string{"version"}, os.Stdin, os.Stdout, os.Stderr)))
+		}
+		if cli.IsVerb(os.Args[1]) {
+			os.Exit(int(cli.Dispatch(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)))
+		}
 	}
 
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintf(out, "usage: %s [file.sql]\n", os.Args[0])
-		fmt.Fprintf(out, "       %s <verb> [flags]    verbs: exec, export, conns, history\n", os.Args[0])
+		fmt.Fprintf(out, "       %s <verb> [flags]    verbs: exec, export, conns, history, version\n", os.Args[0])
+		fmt.Fprintf(out, "       %s --version\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
