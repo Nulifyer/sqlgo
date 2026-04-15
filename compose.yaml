@@ -13,6 +13,7 @@
 #   Oracle   -> 11521
 #   Firebird -> 13050
 #   libSQL   -> 18080 (hrana HTTP)
+#   Sybase   -> 15000
 #   sshd     -> 12222
 #
 # The integration test suite in internal/db/<driver>/ reads these
@@ -140,6 +141,17 @@ services:
       SQLD_HTTP_LISTEN_ADDR: 0.0.0.0:8080
     ports:
       - "18080:8080"
+
+  # Sybase ASE 16 dev edition. datagrip/sybase is the image JetBrains
+  # uses for DataGrip's sybase connector tests; boots cleanly on
+  # Podman/Linux hosts where the nguoianphu image segfaults. Ships a
+  # preseeded `testdb` database owned by `tester`/`guest1234`. First
+  # boot takes ~60s while dataserver initializes.
+  sybase:
+    image: datagrip/sybase:16.0
+    container_name: sqlgo-sybase
+    ports:
+      - "15000:5000"
 
   # sshd is the bastion used by the sshtunnel integration test. It
   # forwards to the postgres service on the compose network so the
