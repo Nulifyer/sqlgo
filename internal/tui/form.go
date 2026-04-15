@@ -377,7 +377,7 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 	labelW := 16
 	valueW := 44
 	boxW := labelW + valueW + 6
-	if boxW > termW - dialogMargin {
+	if boxW > termW-dialogMargin {
 		boxW = termW - dialogMargin
 	}
 

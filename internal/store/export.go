@@ -46,4 +46,3 @@ func (s *Store) ImportJSON(ctx context.Context, r io.Reader) (int, error) {
 	}
 	return len(f.Connections), nil
 }
-

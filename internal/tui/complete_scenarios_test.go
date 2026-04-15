@@ -172,9 +172,9 @@ func TestAnalyzeCursorContextJoinOn(t *testing.T) {
 func TestAnalyzeCursorContextGroupByOrderByHaving(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
-		"group by":  "SELECT count(*) FROM users GROUP BY ",
-		"order by":  "SELECT id FROM users ORDER BY ",
-		"having":    "SELECT id FROM users GROUP BY id HAVING ",
+		"group by": "SELECT count(*) FROM users GROUP BY ",
+		"order by": "SELECT id FROM users ORDER BY ",
+		"having":   "SELECT id FROM users GROUP BY id HAVING ",
 	}
 	for name, text := range cases {
 		t.Run(name, func(t *testing.T) {

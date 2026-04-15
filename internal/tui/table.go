@@ -1310,7 +1310,6 @@ func displayWidth(s string) int {
 	return n
 }
 
-
 // stringifyCell converts a driver-returned value into a display string.
 // Keeps escape chars intact for the draw path to style; control chars
 // below space are stripped.

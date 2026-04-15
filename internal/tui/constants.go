@@ -47,7 +47,6 @@ const (
 	maxTCPPort     = 65535
 )
 
-
 // Overlay sizing guard. Every modal dialog caps its width/height at
 // (term - dialogMargin) so there's always a couple of rows/cols of
 // surrounding context visible.

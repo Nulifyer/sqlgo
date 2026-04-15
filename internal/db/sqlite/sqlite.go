@@ -36,11 +36,11 @@ type driver struct{}
 func (driver) Name() string { return driverName }
 
 var capabilities = db.Capabilities{
-	SchemaDepth:     db.SchemaDepthFlat,
-	LimitSyntax:     db.LimitSyntaxLimit,
-	IdentifierQuote: '"',
-	SupportsCancel:  true,
-	SupportsTLS:     false,
+	SchemaDepth:          db.SchemaDepthFlat,
+	LimitSyntax:          db.LimitSyntaxLimit,
+	IdentifierQuote:      '"',
+	SupportsCancel:       true,
+	SupportsTLS:          false,
 	ExplainFormat:        db.ExplainFormatSQLiteRows,
 	Dialect:              sqltok.DialectSQLite,
 	SupportsTransactions: true,

@@ -37,11 +37,11 @@ type driver struct{}
 func (driver) Name() string { return driverName }
 
 var capabilities = db.Capabilities{
-	SchemaDepth:     db.SchemaDepthSchemas,
-	LimitSyntax:     db.LimitSyntaxLimit,
-	IdentifierQuote: '"',
-	SupportsCancel:  true,
-	SupportsTLS:     true,
+	SchemaDepth:          db.SchemaDepthSchemas,
+	LimitSyntax:          db.LimitSyntaxLimit,
+	IdentifierQuote:      '"',
+	SupportsCancel:       true,
+	SupportsTLS:          true,
 	ExplainFormat:        db.ExplainFormatPostgresJSON,
 	Dialect:              sqltok.DialectPostgres,
 	SupportsTransactions: true,

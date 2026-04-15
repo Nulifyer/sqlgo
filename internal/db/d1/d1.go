@@ -419,7 +419,7 @@ type rowsIter struct {
 }
 
 func (r *rowsIter) Columns() []db.Column { return r.cols }
-func (r *rowsIter) Next() bool            { return r.i < len(r.rows) }
+func (r *rowsIter) Next() bool           { return r.i < len(r.rows) }
 func (r *rowsIter) Scan() ([]any, error) {
 	if r.i >= len(r.rows) {
 		return nil, errors.New("scan past end")

@@ -1324,7 +1324,7 @@ func (m *mainLayer) resultsRightInfo(_ *app) string {
 
 // statusText builds the footer line. Layout:
 //
-//	 [focus]  connection  |  <hints from topmost layer>    (<transient status>)
+//	[focus]  connection  |  <hints from topmost layer>    (<transient status>)
 //
 // Hints come first so critical keys (Ctrl+Q=quit, Alt+1/2/3=focus) survive
 // right-edge truncation on narrow terminals. The parenthesized status is

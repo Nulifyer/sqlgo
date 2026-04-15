@@ -386,7 +386,6 @@ func kindBonus(k completionKind) int {
 	return 0
 }
 
-
 // wordBeforeCursor returns the ident chars ending at col. A
 // leading '.' is not consumed ("dbo.use|" → "use", col 4).
 func wordBeforeCursor(line []rune, col int) (prefix string, startCol int) {

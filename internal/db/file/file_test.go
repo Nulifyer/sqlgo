@@ -63,11 +63,11 @@ func TestOpenLoadsCSV(t *testing.T) {
 func TestSplitPaths(t *testing.T) {
 	t.Parallel()
 	cases := map[string][]string{
-		"":                  nil,
-		"a.csv":             {"a.csv"},
-		"a.csv;b.csv":       {"a.csv", "b.csv"},
-		"a.csv, b.csv":      {"a.csv", "b.csv"},
-		"  a.csv  ; ":       {"a.csv"},
+		"":             nil,
+		"a.csv":        {"a.csv"},
+		"a.csv;b.csv":  {"a.csv", "b.csv"},
+		"a.csv, b.csv": {"a.csv", "b.csv"},
+		"  a.csv  ; ":  {"a.csv"},
 	}
 	for in, want := range cases {
 		got := splitPaths(in)

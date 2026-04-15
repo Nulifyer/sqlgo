@@ -15,13 +15,13 @@ import (
 // explorer's `expanded` map keyed by expansionKey(item).
 type explorerItem struct {
 	kind       explorerItemKind
-	label      string       // display text WITHOUT the indent/marker
-	schemaName string       // owning schema (set for all kinds)
-	subgroup   subgroupKind // valid for itemSubgroup; also set on leaves so Toggle knows which group they belong to
-	table      db.TableRef  // valid only for itemTable / itemView
+	label      string        // display text WITHOUT the indent/marker
+	schemaName string        // owning schema (set for all kinds)
+	subgroup   subgroupKind  // valid for itemSubgroup; also set on leaves so Toggle knows which group they belong to
+	table      db.TableRef   // valid only for itemTable / itemView
 	routine    db.RoutineRef // valid only for itemProcedure / itemFunction
 	trigger    db.TriggerRef // valid only for itemTrigger
-	suffix     string       // optional trailing hint (e.g. "(denied)", "AFTER INSERT on foo")
+	suffix     string        // optional trailing hint (e.g. "(denied)", "AFTER INSERT on foo")
 }
 
 type explorerItemKind int
@@ -716,4 +716,3 @@ func itoa(n int) string {
 	}
 	return string(buf[i:])
 }
-

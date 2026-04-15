@@ -30,12 +30,12 @@ const (
 // scope with 'X' (two-press confirmation). Tab toggles between the
 // current-connection scope and the all-connections scope.
 type historyLayer struct {
-	search    *input
-	entries   []store.HistoryEntry
-	selected  int
-	scroll    int
-	scope     historyScope
-	status    string
+	search   *input
+	entries  []store.HistoryEntry
+	selected int
+	scroll   int
+	scope    historyScope
+	status   string
 	// clearArmed is a transient flag: pressing 'X' the first time
 	// arms the confirmation, a second press within the confirmation
 	// window actually wipes. Any other keypress disarms.

@@ -236,11 +236,11 @@ func TestMoneyFormat(t *testing.T) {
 func TestSlugify(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
-		"Apex Industries":       "apex-industries",
-		"Northstar Supply Co":   "northstar-supply-co",
-		"  Weird!! Chars &&& ":  "weird-chars",
-		"a.b.c":                 "a-b-c",
-		"ALL CAPS":              "all-caps",
+		"Apex Industries":      "apex-industries",
+		"Northstar Supply Co":  "northstar-supply-co",
+		"  Weird!! Chars &&& ": "weird-chars",
+		"a.b.c":                "a-b-c",
+		"ALL CAPS":             "all-caps",
 	}
 	for in, want := range cases {
 		if got := slugify(in); got != want {

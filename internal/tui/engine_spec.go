@@ -73,7 +73,7 @@ var engineSpecs = []engineSpec{
 		label:       "SQLite",
 		defaultPort: 0,
 		defaultUser: "",
-		fields: []engineOption{
+		fields:      []engineOption{
 			// cfg.Database holds the file path; no extra fields needed.
 		},
 	},
@@ -82,7 +82,7 @@ var engineSpecs = []engineSpec{
 		label:       "Oracle",
 		defaultPort: 1521,
 		defaultUser: "system",
-		fields: []engineOption{
+		fields:      []engineOption{
 			// cfg.Database holds the Oracle service name. go-ora accepts
 			// extra knobs via cfg.Options (SSL, WALLET, PREFETCH_ROWS...).
 		},
@@ -102,7 +102,7 @@ var engineSpecs = []engineSpec{
 		label:       "Cloudflare D1",
 		defaultPort: 0,
 		defaultUser: "",
-		fields: []engineOption{
+		fields:      []engineOption{
 			// cfg.User = account id, cfg.Database = D1 database id,
 			// cfg.Password = API token. Host overrides api.cloudflare.com.
 		},
@@ -112,7 +112,7 @@ var engineSpecs = []engineSpec{
 		label:       "libSQL / Turso",
 		defaultPort: 0,
 		defaultUser: "",
-		fields: []engineOption{
+		fields:      []engineOption{
 			// cfg.Host holds the Turso database URL; cfg.Password the
 			// auth token. No extra fields.
 		},
@@ -122,7 +122,7 @@ var engineSpecs = []engineSpec{
 		label:       "File (CSV/TSV/JSONL)",
 		defaultPort: 0,
 		defaultUser: "",
-		fields: []engineOption{
+		fields:      []engineOption{
 			// cfg.Database holds a ';'-separated list of file paths.
 		},
 	},

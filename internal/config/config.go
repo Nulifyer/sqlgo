@@ -106,4 +106,3 @@ func dataRoot() (string, error) {
 		return filepath.Join(home, ".local", "share"), nil
 	}
 }
-

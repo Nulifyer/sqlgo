@@ -19,6 +19,7 @@ import (
 //     by not using os.Stdin.Read.
 //  2. The Win32 ReadFile path itself, at the ConDrv driver layer
 //     (microsoft/terminal#4958) -- raw mode does not disable this.
+//
 // ReadConsoleW is the only documented API that never processes ^Z,
 // so we use it and decode the UTF-16 result to UTF-8 bytes.
 //

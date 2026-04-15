@@ -43,10 +43,18 @@ func (i *input) Delete() {
 	i.runes = i.runes[:len(i.runes)-1]
 }
 
-func (i *input) MoveLeft()  { if i.cur > 0 { i.cur-- } }
-func (i *input) MoveRight() { if i.cur < len(i.runes) { i.cur++ } }
-func (i *input) MoveHome()  { i.cur = 0 }
-func (i *input) MoveEnd()   { i.cur = len(i.runes) }
+func (i *input) MoveLeft() {
+	if i.cur > 0 {
+		i.cur--
+	}
+}
+func (i *input) MoveRight() {
+	if i.cur < len(i.runes) {
+		i.cur++
+	}
+}
+func (i *input) MoveHome() { i.cur = 0 }
+func (i *input) MoveEnd()  { i.cur = len(i.runes) }
 
 // handle applies an ordinary typing keypress to the input. Returns true if
 // the key was consumed. Form-level keys (Tab, Enter, Esc) must be filtered

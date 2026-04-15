@@ -52,7 +52,7 @@ func (p *picker) moveDown() {
 
 func (p *picker) draw(s *cellbuf, termW, termH int) {
 	boxW := 70
-	if boxW > termW - dialogMargin {
+	if boxW > termW-dialogMargin {
 		boxW = termW - dialogMargin
 	}
 	if boxW < 30 {
@@ -62,7 +62,7 @@ func (p *picker) draw(s *cellbuf, termW, termH int) {
 	if boxH < 12 {
 		boxH = 12
 	}
-	if boxH > termH - dialogMargin {
+	if boxH > termH-dialogMargin {
 		boxH = termH - dialogMargin
 	}
 	row := (termH - boxH) / 2

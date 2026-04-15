@@ -134,12 +134,12 @@ func TestLoadJSONL(t *testing.T) {
 func TestTableNameSanitization(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
-		"sales.csv":       "sales",
-		"sales 2024.csv":  "sales_2024",
-		"01-raw.csv":      "t_01_raw",
-		"weird!@#.jsonl":  "weird___",
-		"/path/to/x.tsv":  "x",
-		"no-ext":          "no_ext",
+		"sales.csv":      "sales",
+		"sales 2024.csv": "sales_2024",
+		"01-raw.csv":     "t_01_raw",
+		"weird!@#.jsonl": "weird___",
+		"/path/to/x.tsv": "x",
+		"no-ext":         "no_ext",
 	}
 	for in, want := range cases {
 		if got := TableName(in); got != want {

@@ -76,8 +76,8 @@ func explainParse(format db.ExplainFormat, rows [][]any) (*explainTree, error) {
 // BatchSequence -> Batch -> Statements -> StmtSimple, each with a
 // QueryPlan containing a single root RelOp. RelOp nests recursively.
 type mssqlShowPlan struct {
-	XMLName   xml.Name       `xml:"ShowPlanXML"`
-	Batches   []mssqlBatch   `xml:"BatchSequence>Batch"`
+	XMLName xml.Name     `xml:"ShowPlanXML"`
+	Batches []mssqlBatch `xml:"BatchSequence>Batch"`
 }
 
 type mssqlBatch struct {
@@ -85,10 +85,10 @@ type mssqlBatch struct {
 }
 
 type mssqlStmt struct {
-	StatementText     string       `xml:"StatementText,attr"`
-	StatementType     string       `xml:"StatementType,attr"`
-	StatementSubTreeCost string    `xml:"StatementSubTreeCost,attr"`
-	QueryPlan         *mssqlQPlan  `xml:"QueryPlan"`
+	StatementText        string      `xml:"StatementText,attr"`
+	StatementType        string      `xml:"StatementType,attr"`
+	StatementSubTreeCost string      `xml:"StatementSubTreeCost,attr"`
+	QueryPlan            *mssqlQPlan `xml:"QueryPlan"`
 }
 
 type mssqlQPlan struct {

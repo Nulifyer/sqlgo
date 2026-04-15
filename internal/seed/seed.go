@@ -149,8 +149,8 @@ const (
 type colDef struct {
 	name     string
 	typ      colType
-	size     int  // length for colText, precision for colDecimal
-	scale    int  // for colDecimal
+	size     int // length for colText, precision for colDecimal
+	scale    int // for colDecimal
 	nullable bool
 	pk       bool
 }
@@ -722,12 +722,12 @@ type user struct {
 }
 
 type purchaseOrder struct {
-	id          int
-	customerID  int
-	employeeID  int
-	orderDate   time.Time
-	status      string
-	totalCents  int64
+	id         int
+	customerID int
+	employeeID int
+	orderDate  time.Time
+	status     string
+	totalCents int64
 }
 
 type purchaseOrderItem struct {

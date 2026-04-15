@@ -49,11 +49,11 @@ type driver struct{}
 func (driver) Name() string { return driverName }
 
 var capabilities = db.Capabilities{
-	SchemaDepth:     db.SchemaDepthSchemas,
-	LimitSyntax:     db.LimitSyntaxSelectTop,
-	IdentifierQuote: '[',
-	SupportsCancel:  true,
-	SupportsTLS:     true,
+	SchemaDepth:          db.SchemaDepthSchemas,
+	LimitSyntax:          db.LimitSyntaxSelectTop,
+	IdentifierQuote:      '[',
+	SupportsCancel:       true,
+	SupportsTLS:          true,
 	ExplainFormat:        db.ExplainFormatMSSQLXML,
 	Dialect:              sqltok.DialectMSSQL,
 	SupportsTransactions: true,

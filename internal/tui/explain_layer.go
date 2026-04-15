@@ -18,8 +18,8 @@ type explainLayer struct {
 // explainRow is one displayed line. depth drives indent; node is
 // the source node so expand/collapse can toggle its children.
 type explainRow struct {
-	node    *explainNode
-	depth   int
+	node     *explainNode
+	depth    int
 	isDetail bool // true for the dim sub-lines under a node label
 }
 

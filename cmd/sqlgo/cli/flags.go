@@ -33,12 +33,12 @@ type commonFlags struct {
 	Output string
 
 	// Execution tuning.
-	AllowUnsafe      bool
-	ContinueOnError  bool
-	RecordHistory    bool
-	Timeout          time.Duration
-	MaxRows          int
-	PasswordStdin    bool
+	AllowUnsafe     bool
+	ContinueOnError bool
+	RecordHistory   bool
+	Timeout         time.Duration
+	MaxRows         int
+	PasswordStdin   bool
 }
 
 // registerCommon adds the shared flag set to fs. exec and export each

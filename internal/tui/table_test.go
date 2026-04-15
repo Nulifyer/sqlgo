@@ -331,11 +331,11 @@ func TestDisplayWidthCountsWideAndEscapes(t *testing.T) {
 		want int
 	}{
 		{"hello", 5},
-		{"你好", 4},                  // 2+2
-		{"a你b", 4},                  // 1+2+1
-		{"🎉", 2},                    // party popper
-		{"café", 4},                  // precomposed: 4 cells
-		{"cafe\u0301", 4},            // combining mark contributes 0 width
+		{"你好", 4},                // 2+2
+		{"a你b", 4},               // 1+2+1
+		{"🎉", 2},                 // party popper
+		{"café", 4},              // precomposed: 4 cells
+		{"cafe\u0301", 4},        // combining mark contributes 0 width
 		{"tab\there", 3 + 2 + 4}, // "tab" + \t (2 cells) + "here"
 	}
 	for _, tc := range cases {

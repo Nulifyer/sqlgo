@@ -357,8 +357,8 @@ type aliasDriver struct {
 	base Driver
 }
 
-func (a aliasDriver) Name() string                               { return a.name }
-func (a aliasDriver) Capabilities() Capabilities                 { return a.base.Capabilities() }
+func (a aliasDriver) Name() string               { return a.name }
+func (a aliasDriver) Capabilities() Capabilities { return a.base.Capabilities() }
 func (a aliasDriver) Open(ctx context.Context, cfg Config) (Conn, error) {
 	return a.base.Open(ctx, cfg)
 }
