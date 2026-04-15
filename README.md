@@ -181,6 +181,7 @@ sqlgo also runs headless. When the first argument is a known verb, nothing in th
 | `conns` | manage saved connections (`list`, `show`, `add`, `set`, `rm`, `test`, `import`, `export`) |
 | `history` | inspect query history (`list`, `search`, `clear`) |
 | `version` | print sqlgo version (also `--version` / `-v`) |
+| `completion` | print shell-completion script for `bash` / `zsh` / `fish` / `powershell` (alias `pwsh`) |
 
 Common flags (shared by `exec` and `export`):
 
@@ -264,6 +265,28 @@ Exit codes:
 | `5` | `--max-rows` cap reached (partial output flushed) |
 
 sqlgo never opens an implicit transaction. `BEGIN` / `COMMIT` / `ROLLBACK` are yours to type.
+
+### Shell completion
+
+`sqlgo completion <shell>` prints a completion script to stdout. Saved connection names are completed dynamically via a hidden `sqlgo __complete conns` helper.
+
+```sh
+# bash (session)
+source <(sqlgo completion bash)
+# bash (persistent)
+sqlgo completion bash > ~/.local/share/bash-completion/completions/sqlgo
+
+# zsh -- save as _sqlgo on your $fpath
+sqlgo completion zsh > ~/.zfunc/_sqlgo
+
+# fish
+sqlgo completion fish > ~/.config/fish/completions/sqlgo.fish
+```
+
+```powershell
+# PowerShell -- add to $PROFILE
+sqlgo completion pwsh | Out-String | Invoke-Expression
+```
 
 ## Storage
 

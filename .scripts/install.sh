@@ -109,3 +109,8 @@ esac
 
 echo ""
 echo "sqlgo ${TAG} installed!"
+echo ""
+echo "Shell completion (optional):"
+echo "  bash: sqlgo completion bash > ~/.local/share/bash-completion/completions/sqlgo"
+echo "  zsh:  sqlgo completion zsh  > \"\${fpath[1]}/_sqlgo\"   # then: compinit"
+echo "  fish: sqlgo completion fish > ~/.config/fish/completions/sqlgo.fish"

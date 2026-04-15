@@ -34,7 +34,7 @@ const (
 func IsVerb(name string) bool {
 	switch name {
 	case "exec", "export", "open", "edit", "conns", "history", "version",
-		"help", "-h", "--help":
+		"help", "-h", "--help", "completion", "__complete":
 		return true
 	}
 	return false
@@ -67,6 +67,10 @@ func Dispatch(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode
 		return runVersion(argv[1:], stdout)
 	case "help", "-h", "--help":
 		return runHelp(argv[1:], stdin, stdout, stderr)
+	case "completion":
+		return runCompletion(argv[1:], stdout, stderr)
+	case "__complete":
+		return runHiddenComplete(argv[1:], stdout, stderr)
 	}
 	fmt.Fprintf(stderr, "sqlgo: unknown verb %q\n", verb)
 	return ExitUsage

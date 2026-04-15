@@ -114,3 +114,7 @@ if ((Test-Path $legacyDb) -and (-not (Test-Path $newDb))) {
 
 Write-Host "`nsqlgo $tag installed!" -ForegroundColor Cyan
 Write-Host "Open a new terminal and run 'sqlgo'." -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Shell completion (optional):" -ForegroundColor Cyan
+Write-Host "  Add this line to your PowerShell `$PROFILE:"
+Write-Host "    sqlgo completion pwsh | Out-String | Invoke-Expression"

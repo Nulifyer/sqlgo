@@ -37,8 +37,9 @@ verbs:
   edit      launch the TUI with FILE.sql preloaded in the editor
   conns     manage saved connections (list, show, add, set, rm, test, import, export)
   history   inspect query history (list, search, clear)
-  version   print sqlgo version
-  help      show this message or per-verb help
+  version     print sqlgo version
+  help        show this message or per-verb help
+  completion  print shell-completion script for bash|zsh|fish|powershell|pwsh
 
 exit codes:
   0  ok
