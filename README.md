@@ -145,14 +145,21 @@ Open the command menu with `Ctrl+K` to connect, disconnect, export, view history
 | | `Ctrl+Z` / `Ctrl+Y` | Undo / Redo |
 | | `Ctrl+Space` | Autocomplete |
 | | `Ctrl+F` | Find / replace |
+| | `Ctrl+G` | Go to line |
 | | `Ctrl+A` / `Ctrl+X` / `Ctrl+V` | Select all / cut / paste |
 | | `Ctrl+Alt+Up/Dn` | Add multi-cursor line |
+| | `Alt+Up/Dn` | Move line up / down |
+| | `Shift+Alt+Up/Dn` | Duplicate line up / down |
+| | `Ctrl+D` | Select word under cursor |
+| | `Ctrl+U` | Clear selection |
+| | `Home` | Smart home (toggle indent / col 0) |
 | | `Esc` | Collapse multi-cursor |
 | | `Ctrl+Left` / `Ctrl+Right` | Word-jump |
 | | `Shift+Arrow` / `Shift+Home/End` | Extend selection |
 | | `Ctrl+L` | Clear editor |
-| **Explorer** | `Enter` | SELECT for tables; open DDL for views / routines / triggers |
-| | `s` | Generate `SELECT` for table |
+| **Explorer** | `Enter` | SELECT for tables / views; open DDL for routines / triggers |
+| | `s` | Generate `SELECT` for table / view |
+| | `e` | Open DDL for view / routine / trigger |
 | | `R` | Refresh schema |
 | **Results** | `Arrows` / `PgUp/PgDn` / `Home/End` | Navigate cells |
 | | `Enter` | Inspect cell |

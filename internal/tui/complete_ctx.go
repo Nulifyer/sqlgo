@@ -61,6 +61,7 @@ type completionCtx struct {
 	clause    clauseKind
 	inScope   []tableScope
 	ctes      []cteDef
+	catalog   string // "c" in "c.s.name" (three-part names, MSSQL/Sybase)
 	qualifier string // "x" in "x.name"
 	prefix    string // identifier chars under cursor
 	startCol  int    // rune col where prefix starts
@@ -76,9 +77,14 @@ func analyzeCursorContext(text string, cursorOffset int) completionCtx {
 
 	tokens := sqltok.TokenizeText(text)
 
-	// Suppress inside string or comment.
+	// Suppress inside string or comment. Bracketed identifiers
+	// (MSSQL/Sybase "[name]") lex as String but are identifier-typing
+	// context for completion — never suppress inside them.
 	for _, t := range tokens {
 		if t.Kind != sqltok.String && t.Kind != sqltok.Comment {
+			continue
+		}
+		if t.Kind == sqltok.String && strings.HasPrefix(t.Text, "[") {
 			continue
 		}
 		if cursorOffset > t.StartCol && cursorOffset <= t.EndCol {
@@ -868,7 +874,7 @@ func (a *app) gatherQualified(ctx completionCtx) []completionItem {
 		return items
 	}
 
-	tables := a.completionTables()
+	tables := a.completionTablesFor(ctx.catalog)
 	if len(tables) == 0 {
 		return nil
 	}
@@ -1137,6 +1143,36 @@ func (a *app) completionCatalog() string {
 		return ""
 	}
 	return m.session.activeCatalog
+}
+
+// completionTablesFor returns the table list for a specific catalog
+// when non-empty (three-part "cat.schema.name" completions); falls
+// back to completionTables() when empty.
+func (a *app) completionTablesFor(cat string) []db.TableRef {
+	if cat == "" {
+		return a.completionTables()
+	}
+	m := a.mainLayerPtr()
+	if m == nil || m.explorer == nil {
+		return nil
+	}
+	e := m.explorer
+	if e.dbMode {
+		info := e.dbSchemas[cat]
+		if info == nil {
+			return nil
+		}
+		return info.Tables
+	}
+	// Single-DB mode: only honor the catalog qualifier if it names
+	// the current DB; otherwise no suggestions.
+	if e.info == nil {
+		return nil
+	}
+	if active := a.completionCatalog(); active != "" && !strings.EqualFold(active, cat) {
+		return nil
+	}
+	return e.info.Tables
 }
 
 // completionTables returns the table list to feed autocomplete. In

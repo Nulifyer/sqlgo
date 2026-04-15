@@ -218,6 +218,8 @@ func (m *mainLayer) handleLeftClick(a *app, t FocusTarget, msg MouseMsg, count i
 				}
 			case itemSchema, itemSubgroup:
 				m.explorer.Toggle()
+			case itemProcedure, itemFunction, itemTrigger:
+				m.editObjectFromExplorer(a)
 			default:
 				m.prefillSelectFromExplorer(a)
 			}
@@ -444,7 +446,7 @@ func (m *mainLayer) Draw(a *app, c *cellbuf) {
 		return
 	}
 	p := computeLayout(a.term.width, a.term.height)
-	drawFrame(c, p.explorer, "Explorer", m.focus == FocusExplorer)
+	drawFrame(c, p.explorer, m.explorerTitle(a), m.focus == FocusExplorer)
 	drawFrameInfo(c, p.query, "", m.queryRightInfo(), m.focus == FocusQuery)
 	resultsTitle := ""
 	if len(m.results) == 0 {
@@ -702,6 +704,11 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		a.pushLayer(newRenameLayer(m.activeTab, sess.title))
 		return
 	}
+	if k.Ctrl && k.Kind == KeyRune && k.Rune == 'g' && m.focus == FocusQuery {
+		row, _ := m.editor.buf.Cursor()
+		a.pushLayer(newGotoLayer(row))
+		return
+	}
 	// Query-tab management. Global so the user can switch tabs from
 	// any focus without first returning to the Query pane. Ctrl+T new,
 	// Ctrl+W closes the active tab, Ctrl+PgUp/PgDn cycle.
@@ -827,8 +834,9 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 }
 
 // handleExplorerKey processes keys when the Explorer panel is focused in
-// NORMAL mode. Up/Down move, Enter expands a schema or prefills a SELECT
-// for the highlighted table, and 's' does the same without needing Enter.
+// NORMAL mode. Up/Down move, Enter expands a schema, prefills a SELECT for
+// tables and views, or opens the DDL for routines/triggers. 's' always
+// prefills a SELECT; 'e' opens the DDL for views/routines/triggers.
 func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 	switch k.Kind {
 	case KeyUp:
@@ -852,7 +860,7 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 			}
 		case itemSchema, itemSubgroup:
 			m.explorer.Toggle()
-		case itemView, itemProcedure, itemFunction, itemTrigger:
+		case itemProcedure, itemFunction, itemTrigger:
 			m.editObjectFromExplorer(a)
 		default:
 			m.prefillSelectFromExplorer(a)
@@ -863,6 +871,12 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 		switch k.Rune {
 		case 's':
 			m.prefillSelectFromExplorer(a)
+			return
+		case 'e':
+			switch m.explorer.SelectedKind() {
+			case itemView, itemProcedure, itemFunction, itemTrigger:
+				m.editObjectFromExplorer(a)
+			}
 			return
 		case 'R':
 			a.loadSchema()
@@ -1430,24 +1444,34 @@ func (m *mainLayer) resultsRightInfo(_ *app) string {
 	return fmt.Sprintf("%d rows / %d cols / %s%s", m.lastRowCount, m.lastColCount, m.lastElapsed.Round(time.Millisecond), suffix)
 }
 
+// explorerTitle returns the text painted on the Explorer panel's top
+// border. Reuses the connection indicator that used to live in the
+// footer so the active connection (and per-tab catalog) stays visible
+// while freeing footer room for hints.
+func (m *mainLayer) explorerTitle(a *app) string {
+	if a.activeConn == nil {
+		return "○ (not connected)"
+	}
+	title := "● " + a.activeConn.Name
+	if m.session != nil && m.session.activeCatalog != "" {
+		title += " [" + m.session.activeCatalog + "]"
+	}
+	return title
+}
+
 // statusText builds the footer line. Layout:
 //
-//	[focus]  connection  |  <hints from topmost layer>    (<transient status>)
+//	[focus]  |  <hints from topmost layer>    (<transient status>)
 //
-// Hints come first so critical keys (Ctrl+Q=quit, Alt+1/2/3=focus) survive
-// right-edge truncation on narrow terminals. The parenthesized status is
-// query feedback like "running..." or "3 row(s) in 12ms" and is allowed to
-// be clipped because the Results panel itself shows the real outcome.
+// The connection name lives on the Explorer frame title instead of the
+// footer. Hints come first so critical keys (Ctrl+Q=quit, Alt+1/2/3=focus)
+// survive right-edge truncation on narrow terminals. The parenthesized
+// status is query feedback like "running..." or "3 row(s) in 12ms" and is
+// allowed to be clipped because the Results panel itself shows the real
+// outcome.
 func (m *mainLayer) statusText(a *app, width int) string {
-	conn := "○ (not connected)"
-	if a.activeConn != nil {
-		conn = "● " + a.activeConn.Name
-		if m.session != nil && m.session.activeCatalog != "" {
-			conn += " [" + m.session.activeCatalog + "]"
-		}
-	}
 	hints := a.topLayer().Hints(a)
-	prefix := fmt.Sprintf(" [%s]  %s  │  ", m.focus, conn)
+	prefix := fmt.Sprintf(" [%s]  │  ", m.focus)
 	suffix := ""
 	if m.status != "" {
 		suffix = "    (" + m.status + ")"
@@ -1516,15 +1540,16 @@ func hintIf(cond bool, h string) string {
 
 func (m *mainLayer) explorerHints(_ *app) string {
 	enterHint := ""
-	sHint := ""
+	eHint := ""
 	switch m.explorer.SelectedKind() {
 	case itemTable:
 		enterHint = "Enter=SELECT"
 	case itemView:
-		enterHint = "Enter=edit"
-		sHint = "s=SELECT"
+		enterHint = "Enter=SELECT"
+		eHint = "e=edit"
 	case itemProcedure, itemFunction, itemTrigger:
 		enterHint = "Enter=edit"
+		eHint = "e=edit"
 	case itemSchema, itemSubgroup:
 		enterHint = "Enter=expand"
 	}
@@ -1532,7 +1557,7 @@ func (m *mainLayer) explorerHints(_ *app) string {
 		"F1=help",
 		"Ctrl+Q=quit",
 		enterHint,
-		sHint,
+		eHint,
 		"Ctrl+K=menu",
 	)
 }

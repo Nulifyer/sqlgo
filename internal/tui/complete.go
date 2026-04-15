@@ -92,12 +92,13 @@ func (e *editor) openCompletion(a *app) {
 	row, col := e.buf.Cursor()
 	line := e.buf.Line(row)
 	word, startCol := wordBeforeCursor(line, col)
-	qualifier := qualifierBeforeCursor(line, startCol)
+	qualifier, catalog := qualifiersBeforeCursor(line, startCol)
 
 	text := e.buf.Text()
 	cursorOffset := runeOffsetOf(e.buf, row, col)
 	ctx := analyzeCursorContext(text, cursorOffset)
 	ctx.qualifier = qualifier
+	ctx.catalog = catalog
 	ctx.prefix = word
 	ctx.startCol = startCol
 
@@ -134,21 +135,67 @@ func runeOffsetOf(b *buffer, row, col int) int {
 	return off
 }
 
-// qualifierBeforeCursor returns the identifier preceding a '.' at
-// startCol-1, or empty when there's no dot.
-func qualifierBeforeCursor(line []rune, startCol int) string {
+// qualifiersBeforeCursor walks back from startCol over optional
+// "[schema].[" or "schema." and "[catalog].[schema]." prefixes,
+// returning (qualifier, catalog). Supports MSSQL/Sybase bracketed
+// identifiers and three-part "cat.schema.name" qualifiers. Empty
+// strings mean "not present".
+func qualifiersBeforeCursor(line []rune, startCol int) (qualifier, catalog string) {
 	if startCol <= 0 || startCol > len(line) {
-		return ""
+		return "", ""
 	}
-	if line[startCol-1] != '.' {
-		return ""
+	// Skip the opening '[' of the word currently being typed.
+	end := startCol
+	if line[end-1] == '[' {
+		end--
 	}
-	end := startCol - 1
-	start := end
-	for start > 0 && isIdentRune(line[start-1]) {
-		start--
+	if end <= 0 || line[end-1] != '.' {
+		return "", ""
 	}
-	return string(line[start:end])
+	// Parse the segment preceding the '.'.
+	seg, before, ok := parseSegmentBack(line, end-1)
+	if !ok {
+		return "", ""
+	}
+	qualifier = seg
+	// Look for a second '.' for a three-part name.
+	if before <= 0 || line[before-1] != '.' {
+		return qualifier, ""
+	}
+	seg2, _, ok := parseSegmentBack(line, before-1)
+	if !ok {
+		return qualifier, ""
+	}
+	catalog = seg2
+	return qualifier, catalog
+}
+
+// parseSegmentBack parses one identifier segment ending at `end`
+// (exclusive). Handles bracketed `[name]` and bare `name` forms.
+// Returns the segment text, the position before it, and whether a
+// segment was found.
+func parseSegmentBack(line []rune, end int) (string, int, bool) {
+	if end <= 0 {
+		return "", end, false
+	}
+	if line[end-1] == ']' {
+		p := end - 2
+		for p >= 0 && line[p] != '[' {
+			p--
+		}
+		if p < 0 {
+			return "", end, false
+		}
+		return string(line[p+1 : end-1]), p, true
+	}
+	p := end
+	for p > 0 && isIdentRune(line[p-1]) {
+		p--
+	}
+	if p == end {
+		return "", end, false
+	}
+	return string(line[p:end]), p, true
 }
 
 // acceptCompletion replaces the prefix with the selected item and

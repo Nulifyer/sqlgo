@@ -80,8 +80,13 @@ func (kr *keyReader) Read() (InputMsg, error) {
 		return Key{Kind: KeyEnter}, nil
 	case b == '\t':
 		return Key{Kind: KeyTab}, nil
-	case b == 0x7f || b == 0x08:
+	case b == 0x7f:
 		return Key{Kind: KeyBackspace}, nil
+	case b == 0x08:
+		// Most terminals (Windows Terminal, xterm) emit 0x08 for
+		// Ctrl+Backspace and 0x7f for plain Backspace. Surface the
+		// Ctrl modifier so the editor can do word-delete.
+		return Key{Kind: KeyBackspace, Ctrl: true}, nil
 	case b == 0x00:
 		// 0x00 is historically both Ctrl+@ and Ctrl+Space. Decode
 		// as Ctrl+Space -- far more useful as an editor shortcut.

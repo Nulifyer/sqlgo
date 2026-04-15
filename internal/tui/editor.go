@@ -78,6 +78,30 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		}
 	}
 
+	// Alt+Up/Down: move line up/down. Shift+Alt+Up/Down: duplicate
+	// line up/down. Checked before the generic Shift-arrow block so
+	// Shift+Alt+Up doesn't extend a selection.
+	if k.Alt && !k.Ctrl {
+		switch k.Kind {
+		case KeyUp:
+			e.collapseCursors()
+			if k.Shift {
+				e.buf.DuplicateLineUp()
+			} else {
+				e.buf.MoveLineUp()
+			}
+			return true
+		case KeyDown:
+			e.collapseCursors()
+			if k.Shift {
+				e.buf.DuplicateLineDown()
+			} else {
+				e.buf.MoveLineDown()
+			}
+			return true
+		}
+	}
+
 	// Esc collapses extras when popup is closed. Popup-open Esc
 	// is handled in the popup block below and takes precedence.
 	if e.complete == nil && k.Kind == KeyEsc && e.hasMultiCursor() {
@@ -239,6 +263,32 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 			e.collapseCursors()
 			e.buf.Redo()
 			return true
+		case 'd':
+			// Ctrl+D: if no selection, select the word under the
+			// cursor. Matches VSCode's first press of "Add Selection
+			// To Next Find Match" (the multi-occurrence extension is
+			// out of scope for v1).
+			e.collapseCursors()
+			if e.buf.HasSelection() {
+				return true
+			}
+			row, col := e.buf.Cursor()
+			line := e.buf.Line(row)
+			start, end := wordBoundsAt(line, col)
+			if start == end {
+				return true
+			}
+			e.buf.SetCursor(row, start)
+			e.buf.SetAnchor(row, start)
+			e.buf.SetCursor(row, end)
+			return true
+		case 'u':
+			// Ctrl+U: clear selection, keeping the caret at its
+			// current position. Approximates VSCode's "shrink /
+			// undo cursor" without a cursor-op history.
+			e.collapseCursors()
+			e.buf.ClearSelection()
+			return true
 		}
 	}
 
@@ -307,7 +357,26 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		e.buf.MoveDown()
 		return true
 	case KeyHome:
-		e.applyToAllCursors(func() { e.buf.MoveHome() })
+		// Smart Home: single-cursor toggles between the first
+		// non-whitespace column and column 0. Multi-cursor falls
+		// back to plain MoveHome (col 0) so the row-uniqueness
+		// invariant isn't tripped by fan-out logic.
+		if e.hasMultiCursor() {
+			e.applyToAllCursors(func() { e.buf.MoveHome() })
+			return true
+		}
+		row, col := e.buf.Cursor()
+		line := e.buf.Line(row)
+		indent := 0
+		for indent < len(line) && (line[indent] == ' ' || line[indent] == '\t') {
+			indent++
+		}
+		target := indent
+		if col == indent {
+			target = 0
+		}
+		e.buf.ClearSelection()
+		e.buf.SetCursor(row, target)
 		return true
 	case KeyEnd:
 		e.applyToAllCursors(func() { e.buf.MoveEnd() })

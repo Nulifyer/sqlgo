@@ -512,6 +512,72 @@ func (b *buffer) DeleteWordRight() {
 	b.deleteSelectionNoSnap()
 }
 
+// MoveLineUp swaps the current line with the one above, preserving the
+// cursor column. No-op on the top line. Takes an undo snapshot.
+func (b *buffer) MoveLineUp() {
+	if b.row <= 0 {
+		return
+	}
+	b.snapshot()
+	b.clearSelection()
+	b.lines[b.row-1], b.lines[b.row] = b.lines[b.row], b.lines[b.row-1]
+	b.row--
+	if b.col > len(b.lines[b.row]) {
+		b.col = len(b.lines[b.row])
+	}
+	b.lastEditKind = editNone
+}
+
+// MoveLineDown swaps the current line with the one below. No-op on the
+// last line. Takes an undo snapshot.
+func (b *buffer) MoveLineDown() {
+	if b.row >= len(b.lines)-1 {
+		return
+	}
+	b.snapshot()
+	b.clearSelection()
+	b.lines[b.row+1], b.lines[b.row] = b.lines[b.row], b.lines[b.row+1]
+	b.row++
+	if b.col > len(b.lines[b.row]) {
+		b.col = len(b.lines[b.row])
+	}
+	b.lastEditKind = editNone
+}
+
+// DuplicateLineDown inserts a copy of the current line directly below
+// it and moves the cursor onto the copy (matching VSCode's
+// Shift+Alt+Down). Takes an undo snapshot.
+func (b *buffer) DuplicateLineDown() {
+	b.snapshot()
+	b.clearSelection()
+	src := append([]rune(nil), b.lines[b.row]...)
+	b.lines = append(b.lines, nil)
+	copy(b.lines[b.row+2:], b.lines[b.row+1:])
+	b.lines[b.row+1] = src
+	b.row++
+	if b.col > len(b.lines[b.row]) {
+		b.col = len(b.lines[b.row])
+	}
+	b.lastEditKind = editNone
+}
+
+// DuplicateLineUp inserts a copy of the current line directly above it.
+// The cursor stays on the same visible line (which is now the lower
+// copy -- row index +1). Takes an undo snapshot.
+func (b *buffer) DuplicateLineUp() {
+	b.snapshot()
+	b.clearSelection()
+	src := append([]rune(nil), b.lines[b.row]...)
+	b.lines = append(b.lines, nil)
+	copy(b.lines[b.row+1:], b.lines[b.row:])
+	b.lines[b.row] = src
+	b.row++
+	if b.col > len(b.lines[b.row]) {
+		b.col = len(b.lines[b.row])
+	}
+	b.lastEditKind = editNone
+}
+
 // isWordChar reports whether r belongs inside an identifier-like word
 // run for the purposes of Ctrl+Left/Right navigation. Letters, digits,
 // and underscore count; everything else is a boundary character.
