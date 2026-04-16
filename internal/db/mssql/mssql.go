@@ -12,6 +12,12 @@ import (
 	"strings"
 
 	mssqldb "github.com/microsoft/go-mssqldb"
+	// Side-effect imports register the "krb5" and "ntlm" integrated-auth
+	// providers with go-mssqldb so a DSN with authenticator=krb5 or
+	// authenticator=ntlm resolves at connect time. winsspi registers via
+	// the Windows-only winsspi_windows.go.
+	_ "github.com/microsoft/go-mssqldb/integratedauth/krb5"
+	_ "github.com/microsoft/go-mssqldb/integratedauth/ntlm"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 	"github.com/Nulifyer/sqlgo/internal/sqltok"
@@ -39,6 +45,29 @@ func isPermissionDenied(err error) bool {
 }
 
 const driverName = "mssql"
+
+// Integrated-auth mode constants for MSSQL. Empty string means plain SQL
+// auth (user/password over TDS). Non-empty values map 1:1 to go-mssqldb's
+// `authenticator=` DSN key and select an integratedauth provider
+// registered via the blank imports above (plus winsspi on Windows).
+const (
+	AuthSQLPassword = ""
+	AuthWinSSPI     = "winsspi"
+	AuthNTLM        = "ntlm"
+	AuthKrb5        = "krb5"
+)
+
+// AuthModes lists the accepted authenticator values in stable display
+// order. Exported so the TUI engine_spec can surface the same list as a
+// cycler without duplicating it. Leading "" is the "SQL auth / driver
+// default" option -- the form strips blank cycler values before save, so
+// it never reaches Options/DSN.
+var AuthModes = []string{
+	AuthSQLPassword,
+	AuthWinSSPI,
+	AuthNTLM,
+	AuthKrb5,
+}
 
 func init() {
 	db.RegisterProfile(Profile)
@@ -89,8 +118,8 @@ var MSSQLTransport = db.Transport{
 // preset is the named "mssql" driver surfaced in the DB list.
 type preset struct{}
 
-func (preset) Name() string                   { return driverName }
-func (preset) Capabilities() db.Capabilities  { return Profile.Capabilities }
+func (preset) Name() string                  { return driverName }
+func (preset) Capabilities() db.Capabilities { return Profile.Capabilities }
 func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	return db.OpenWith(ctx, Profile, MSSQLTransport, cfg)
 }

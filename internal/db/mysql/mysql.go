@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	rdsauth "github.com/aws/aws-sdk-go-v2/feature/rds/auth"
 	gomysql "github.com/go-sql-driver/mysql"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
@@ -75,7 +77,80 @@ type preset struct{}
 func (preset) Name() string                  { return driverName }
 func (preset) Capabilities() db.Capabilities { return Profile.Capabilities }
 func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
+	// AWS RDS IAM auth: swap cfg.Password for a freshly-generated IAM
+	// auth token (15-min TTL) before the DSN is built. RDS IAM requires
+	// the mysql_clear_password client plugin (token exceeds the 79-char
+	// native-auth limit), so we force allowCleartextPasswords=true and
+	// tls=true when the caller hasn't selected a stricter TLS setting.
+	if rdsIAMEnabled(cfg.Options) {
+		mutated, err := applyRDSIAMToken(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("rds iam token: %w", err)
+		}
+		cfg = mutated
+	}
 	return db.OpenWith(ctx, Profile, MySQLTransport, cfg)
+}
+
+// rdsIAMEnabled reports whether the aws_rds_iam option is set to a
+// truthy value. Case-insensitive so form cyclers, env overrides, and
+// hand-edited YAML all behave the same.
+func rdsIAMEnabled(opts map[string]string) bool {
+	v := strings.TrimSpace(opts["aws_rds_iam"])
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// applyRDSIAMToken loads AWS credentials via the SDK default chain,
+// generates a signed auth token for host:port/user, and returns a
+// copy of cfg with Password replaced. aws_rds_iam / aws_region are
+// stripped so they don't reach the DSN. tls and allowCleartextPasswords
+// are forced on (RDS IAM mandates TLS + cleartext plugin); a caller
+// who pre-selected a stricter tls value (skip-verify, preferred,
+// custom-registered name) keeps it.
+func applyRDSIAMToken(ctx context.Context, cfg db.Config) (db.Config, error) {
+	region := strings.TrimSpace(cfg.Options["aws_region"])
+	loadOpts := []func(*awsconfig.LoadOptions) error{}
+	if region != "" {
+		loadOpts = append(loadOpts, awsconfig.WithRegion(region))
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
+	if err != nil {
+		return cfg, fmt.Errorf("load aws config: %w", err)
+	}
+	if awsCfg.Region == "" {
+		return cfg, errors.New("aws region not set (populate aws_region option or AWS_REGION env)")
+	}
+	host := cfg.Host
+	if host == "" {
+		host = "localhost"
+	}
+	port := cfg.Port
+	if port == 0 {
+		port = 3306
+	}
+	endpoint := host + ":" + strconv.Itoa(port)
+	token, err := rdsauth.BuildAuthToken(ctx, endpoint, awsCfg.Region, cfg.User, awsCfg.Credentials)
+	if err != nil {
+		return cfg, fmt.Errorf("build rds auth token: %w", err)
+	}
+	out := cfg
+	out.Password = token
+	out.Options = make(map[string]string, len(cfg.Options)+2)
+	for k, v := range cfg.Options {
+		if k == "aws_rds_iam" || k == "aws_region" {
+			continue
+		}
+		out.Options[k] = v
+	}
+	if _, ok := out.Options["tls"]; !ok {
+		out.Options["tls"] = "true"
+	}
+	out.Options["allowCleartextPasswords"] = "true"
+	return out, nil
 }
 
 // schemaQuery: user + system tables/views. MySQL system DBs
@@ -235,6 +310,8 @@ func buildDSN(cfg db.Config) string {
 			}
 		case "allownativepasswords":
 			mc.AllowNativePasswords = !(strings.EqualFold(v, "false") || v == "0")
+		case "allowcleartextpasswords":
+			mc.AllowCleartextPasswords = !(strings.EqualFold(v, "false") || v == "0")
 		default:
 			if mc.Params == nil {
 				mc.Params = map[string]string{}

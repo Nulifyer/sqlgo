@@ -17,7 +17,10 @@ export MSYS_NO_PATHCONV=1
 
 cd "$(dirname "$0")/.."
 
-ALL_SERVICES=(mssql postgres mysql oracle firebird libsql sybase)
+ALL_SERVICES=(mssql postgres mysql oracle firebird libsql sybase clickhouse trino spanner bigquery)
+# Services intentionally excluded from the default set (heavy images,
+# license gates, etc.). Still seedable by explicit arg: ./seed-testdbs.sh hana
+OPTIONAL_SERVICES=(hana)
 if [ $# -gt 0 ]; then
     SERVICES=("$@")
 else
@@ -276,8 +279,146 @@ SQL" >/dev/null 2>&1 || warn "sybase seed may have partially failed (check sa cr
     log "sybase: done"
 }
 
+# --- clickhouse ------------------------------------------------------------
+# ClickHouse has no cross-database flag surfaced in the explorer (profile
+# models databases as schemas), so just seed sample tables in the default
+# database plus a second database for manual exploration.
+seed_clickhouse() {
+    log "clickhouse: waiting for server"
+    wait_for "clickhouse" podman exec sqlgo-clickhouse \
+        clickhouse-client --host=localhost --query="SELECT 1" || return 0
+
+    log "clickhouse: ensuring sqlgo_a/sqlgo_b databases + sample tables"
+    podman exec sqlgo-clickhouse clickhouse-client --host=localhost --multiquery --query="
+        CREATE DATABASE IF NOT EXISTS sqlgo_a;
+        CREATE DATABASE IF NOT EXISTS sqlgo_b;
+        CREATE TABLE IF NOT EXISTS sqlgo_a.widgets (id Int32, name String) ENGINE = MergeTree() ORDER BY id;
+        INSERT INTO sqlgo_a.widgets SELECT 1, 'alpha-A' WHERE NOT EXISTS (SELECT 1 FROM sqlgo_a.widgets WHERE id=1);
+        INSERT INTO sqlgo_a.widgets SELECT 2, 'beta-A' WHERE NOT EXISTS (SELECT 1 FROM sqlgo_a.widgets WHERE id=2);
+        CREATE TABLE IF NOT EXISTS sqlgo_b.gadgets (id Int32, label String) ENGINE = MergeTree() ORDER BY id;
+        INSERT INTO sqlgo_b.gadgets SELECT 1, 'gizmo-B' WHERE NOT EXISTS (SELECT 1 FROM sqlgo_b.gadgets WHERE id=1);
+        INSERT INTO sqlgo_b.gadgets SELECT 2, 'widget-B' WHERE NOT EXISTS (SELECT 1 FROM sqlgo_b.gadgets WHERE id=2);
+    " >/dev/null || warn "clickhouse seed may have failed"
+    log "clickhouse: done"
+}
+
+# --- trino -----------------------------------------------------------------
+# Trino catalogs are configured on the coordinator; we cannot create more
+# at runtime, so just seed two schemas + sample tables under the built-in
+# memory catalog. The explorer models schemas under one catalog (profile
+# does not advertise SupportsCrossDatabase), so this is the seed shape
+# the cross-schema flow expects.
+seed_trino() {
+    log "trino: waiting for coordinator (may take 15-30s on first boot)"
+    wait_for "trino" podman exec sqlgo-trino \
+        trino --server localhost:8080 --catalog memory \
+              --execute "SELECT 1" || return 0
+
+    log "trino: ensuring memory.sqlgo_a/sqlgo_b + sample tables"
+    podman exec sqlgo-trino trino --server localhost:8080 --catalog memory \
+        --execute "
+        CREATE SCHEMA IF NOT EXISTS memory.sqlgo_a;
+        CREATE SCHEMA IF NOT EXISTS memory.sqlgo_b;
+        DROP TABLE IF EXISTS memory.sqlgo_a.widgets;
+        CREATE TABLE memory.sqlgo_a.widgets AS
+          SELECT * FROM (VALUES (1, 'alpha-A'), (2, 'beta-A')) AS t(id, name);
+        DROP TABLE IF EXISTS memory.sqlgo_b.gadgets;
+        CREATE TABLE memory.sqlgo_b.gadgets AS
+          SELECT * FROM (VALUES (1, 'gizmo-B'), (2, 'widget-B')) AS t(id, label);
+        " >/dev/null || warn "trino seed may have failed"
+    log "trino: done"
+}
+
+# --- vertica ---------------------------------------------------------------
+# Vertica CE ships the pre-created VMart database. Seed two schemas + sample
+# tables within it so the cross-schema flow has something to show. The driver
+# profile pins one database per connection (SupportsCrossDatabase=false),
+# so schemas are the cross-container tier.
+seed_vertica() {
+    log "vertica: waiting for dbadmin (may take 60-90s on first boot)"
+    wait_for "vertica" podman exec sqlgo-vertica \
+        /opt/vertica/bin/vsql -U dbadmin -c "SELECT 1" || return 0
+
+    log "vertica: ensuring sqlgo_a/sqlgo_b schemas + sample tables"
+    podman exec sqlgo-vertica /opt/vertica/bin/vsql -U dbadmin -c "
+        CREATE SCHEMA IF NOT EXISTS sqlgo_a;
+        CREATE SCHEMA IF NOT EXISTS sqlgo_b;
+        CREATE TABLE IF NOT EXISTS sqlgo_a.widgets (id INTEGER, name VARCHAR(50));
+        INSERT INTO sqlgo_a.widgets SELECT 1, 'alpha-A' WHERE NOT EXISTS (SELECT 1 FROM sqlgo_a.widgets WHERE id=1);
+        INSERT INTO sqlgo_a.widgets SELECT 2, 'beta-A'  WHERE NOT EXISTS (SELECT 1 FROM sqlgo_a.widgets WHERE id=2);
+        CREATE TABLE IF NOT EXISTS sqlgo_b.gadgets (id INTEGER, label VARCHAR(50));
+        INSERT INTO sqlgo_b.gadgets SELECT 1, 'gizmo-B'  WHERE NOT EXISTS (SELECT 1 FROM sqlgo_b.gadgets WHERE id=1);
+        INSERT INTO sqlgo_b.gadgets SELECT 2, 'widget-B' WHERE NOT EXISTS (SELECT 1 FROM sqlgo_b.gadgets WHERE id=2);
+        COMMIT;
+    " >/dev/null || warn "vertica seed may have failed"
+    log "vertica: done"
+}
+
+# --- hana ------------------------------------------------------------------
+# HANA Express ships the pre-created HXE tenant DB. Seed the SQLGO schema
+# with sample widgets so the explorer isn't empty on connect. HANA profile
+# pins one tenant per connection (SupportsCrossDatabase=false) so there
+# is no cross-catalog tier -- the schema is the cross-container unit.
+seed_hana() {
+    log "hana: waiting for HXE tenant (may take several minutes on first boot)"
+    wait_for "hana" podman exec sqlgo-hana \
+        bash -c "/usr/sap/HXE/HDB90/exe/hdbsql -n localhost:39017 -d HXE -u SYSTEM -p HXEHana1 'SELECT 1 FROM DUMMY'" \
+        || return 0
+
+    log "hana: ensuring SQLGO schema + sample widgets"
+    podman exec sqlgo-hana bash -c "/usr/sap/HXE/HDB90/exe/hdbsql -n localhost:39017 -d HXE -u SYSTEM -p HXEHana1 <<'SQL'
+CREATE SCHEMA SQLGO;
+SQL" >/dev/null 2>&1 || true
+    podman exec sqlgo-hana bash -c "/usr/sap/HXE/HDB90/exe/hdbsql -n localhost:39017 -d HXE -u SYSTEM -p HXEHana1 <<'SQL'
+CREATE TABLE SQLGO.widgets (id INTEGER PRIMARY KEY, name NVARCHAR(50));
+SQL" >/dev/null 2>&1 || true
+    podman exec sqlgo-hana bash -c "/usr/sap/HXE/HDB90/exe/hdbsql -n localhost:39017 -d HXE -u SYSTEM -p HXEHana1 <<'SQL'
+MERGE INTO SQLGO.widgets w USING (SELECT 1 AS id, 'alpha' AS name FROM DUMMY UNION SELECT 2, 'beta' FROM DUMMY) s
+  ON w.id = s.id WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name);
+SQL" >/dev/null 2>&1 || warn "hana seed may have partially failed"
+    log "hana: done"
+}
+
+# --- spanner ---------------------------------------------------------------
+# Cloud Spanner Emulator creates instances/databases on demand when the driver
+# connects with autoConfigEmulator=true, so there is nothing to seed. We just
+# wait until the REST endpoint is serving and log readiness. The emulator
+# listens on 9010 (gRPC) and 9020 (REST); REST is easier to probe.
+seed_spanner() {
+    # The emulator image is distroless -- no `sh`/`wget` to `podman exec`
+    # against. Probe the host-published REST port (19020) instead; curl
+    # without -f treats any HTTP response (incl. 404) as success, which
+    # is what we want: "server accepts TCP and speaks HTTP" == ready.
+    log "spanner: waiting for emulator REST endpoint"
+    wait_for "spanner" curl -sS -o /dev/null -m 2 http://localhost:19020/ \
+        || return 0
+    log "spanner: ready (instances auto-created on first Open)"
+}
+
+# --- bigquery --------------------------------------------------------------
+# goccy/bigquery-emulator boots with --project=sqlgo-emu --dataset=sqlgo_test
+# baked into the compose command, so there is nothing to seed -- the project
+# and default dataset already exist. The emulator image is minimal (no curl
+# or wget), so probe the host-published REST port instead of podman-exec'ing.
+seed_bigquery() {
+    log "bigquery: waiting for emulator REST endpoint"
+    wait_for "bigquery" curl -sS -o /dev/null -m 2 http://localhost:19050/ \
+        || return 0
+    log "bigquery: ready (project/dataset seeded via compose command)"
+}
+
 log "starting services: ${SERVICES[*]}"
-podman compose up -d "${SERVICES[@]}"
+# Split opt-in heavy services from defaults so `compose up` routes them
+# through their profile gate; otherwise `compose up hana` silently
+# ignores the request.
+compose_args=()
+for svc in "${SERVICES[@]}"; do
+    case "$svc" in
+        hana) compose_args+=(--profile heavy) ;;
+        vertica) compose_args+=(--profile auth) ;;
+    esac
+done
+podman compose "${compose_args[@]}" up -d "${SERVICES[@]}"
 
 for svc in "${SERVICES[@]}"; do
     case "$svc" in
@@ -288,6 +429,12 @@ for svc in "${SERVICES[@]}"; do
         firebird)  seed_firebird ;;
         libsql)    seed_libsql ;;
         sybase)    seed_sybase ;;
+        clickhouse) seed_clickhouse ;;
+        trino)     seed_trino ;;
+        vertica)   seed_vertica ;;
+        hana)      seed_hana ;;
+        spanner)   seed_spanner ;;
+        bigquery)  seed_bigquery ;;
         sshd|mssql-init) : ;;
         *) warn "unknown service: $svc" ;;
     esac
@@ -344,6 +491,43 @@ for svc in "${SERVICES[@]}"; do
             register "Dev Sybase" myPassword \
                 --driver sybase --host localhost --port 15000 \
                 --user sa
+            ;;
+        clickhouse)
+            register "Dev ClickHouse" "" \
+                --driver clickhouse --host localhost --port 19000 \
+                --user default
+            ;;
+        trino)
+            register "Dev Trino" "" \
+                --driver trino --host localhost --port 18081 \
+                --user sqlgo --database memory \
+                --option schema=sqlgo_a
+            ;;
+        vertica)
+            register "Dev Vertica" "" \
+                --driver vertica --host localhost --port 15433 \
+                --user dbadmin --database VMart \
+                --option tlsmode=none
+            ;;
+        hana)
+            register "Dev HANA" HXEHana1 \
+                --driver hana --host localhost --port 13901 \
+                --user SYSTEM --database HXE \
+                --option tls_insecure_skip_verify=true
+            ;;
+        spanner)
+            register "Dev Spanner" "" \
+                --driver spanner --host localhost --port 19010 \
+                --database sqlgo_test \
+                --option project=sqlgo-emu \
+                --option instance=sqlgo \
+                --option autoConfigEmulator=true
+            ;;
+        bigquery)
+            register "Dev BigQuery" "" \
+                --driver bigquery --host localhost --port 19050 \
+                --database sqlgo_test \
+                --option project=sqlgo-emu
             ;;
     esac
 done

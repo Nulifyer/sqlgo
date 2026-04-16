@@ -93,6 +93,56 @@ func TestBuildDSNExtraParams(t *testing.T) {
 	}
 }
 
+func TestRDSIAMEnabled(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"", false},
+		{"false", false},
+		{"no", false},
+		{"0", false},
+		{"off", false},
+		{"true", true},
+		{"TRUE", true},
+		{"1", true},
+		{"yes", true},
+		{"on", true},
+		{" true ", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := rdsIAMEnabled(map[string]string{"aws_rds_iam": tc.in})
+			if got != tc.want {
+				t.Errorf("rdsIAMEnabled(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildDSNAllowCleartextPasswords verifies the lifted
+// allowCleartextPasswords option reaches the gomysql.Config field (not
+// the raw Params map) so the driver's cleartext-plugin gate flips on.
+// RDS IAM depends on this -- the 15-min token exceeds the native-auth
+// 79-byte limit.
+func TestBuildDSNAllowCleartextPasswords(t *testing.T) {
+	t.Parallel()
+	dsn := buildDSN(db.Config{
+		User:     "u",
+		Password: "p",
+		Options:  map[string]string{"allowCleartextPasswords": "true"},
+	})
+	parsed, err := gomysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("ParseDSN(%q): %v", dsn, err)
+	}
+	if !parsed.AllowCleartextPasswords {
+		t.Errorf("AllowCleartextPasswords = false, want true")
+	}
+}
+
 func TestRegistered(t *testing.T) {
 	t.Parallel()
 	d, err := db.Get(driverName)

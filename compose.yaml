@@ -14,6 +14,13 @@
 #   Firebird -> 13050
 #   libSQL   -> 18080 (hrana HTTP)
 #   Sybase   -> 15000
+#   ClickHouse -> 19000 (native TCP), 18123 (HTTP)
+#   Trino    -> 18081 (HTTP coordinator)
+#   Vertica  -> 15433 (auth profile -- opentext/vertica-ce requires `podman login docker.io`)
+#   HANA     -> 13901 (heavy profile -- ~20GB image, 8GB+ RAM)
+#   Spanner  -> 19010 (emulator gRPC), 19020 (emulator REST)
+#   BigQuery -> 19050 (emulator REST), 19060 (emulator gRPC)
+#   Flight SQL -> 19070 (gRPC)
 #   sshd     -> 12222
 #
 # The integration test suite in internal/db/<driver>/ reads these
@@ -34,8 +41,13 @@ services:
   # One-shot init. Waits for the server, then creates two user DBs
   # (SqlgoA, SqlgoB) so the per-tab activeCatalog flow has something
   # to switch between. Idempotent -- re-run is a no-op.
+  # Reuses the mssql server image because it already ships
+  # /opt/mssql-tools18/bin/sqlcmd. The standalone
+  # mcr.microsoft.com/mssql-tools18 image has no :latest tag -- only
+  # versioned pins -- so reusing the server image keeps this compose
+  # file free of a version that drifts.
   mssql-init:
-    image: mcr.microsoft.com/mssql-tools18
+    image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: sqlgo-mssql-init
     depends_on:
       - mssql
@@ -152,6 +164,167 @@ services:
     container_name: sqlgo-sybase
     ports:
       - "15000:5000"
+
+  # ClickHouse server. Official image ships with a passwordless
+  # `default` user bound to 127.0.0.1 only; CLICKHOUSE_DEFAULT_ACCESS_
+  # MANAGEMENT=1 + listening on :: lets the host reach it on 19000
+  # (native TCP, what clickhouse-go/v2 uses) and 18123 (HTTP, handy
+  # for clickhouse-client curl checks). First boot ~10s.
+  #
+  # Native TLS is enabled on 9440 (host 19440) via the mounted
+  # config.d/tls.xml + certs from ./compose/clickhouse/certs. The TLS
+  # listener accepts plain-TLS clients that only verify the server and
+  # mTLS clients that present a client cert signed by our dev CA --
+  # verificationMode=relaxed enforces chain validity without requiring
+  # a cert on every connection. Used by the ClickHouseTLS / MTLS
+  # integration tests in internal/db/clickhouse/.
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    container_name: sqlgo-clickhouse
+    environment:
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    ports:
+      - "19000:9000"
+      - "19440:9440"
+      - "18123:8123"
+    volumes:
+      - ./compose/clickhouse/config/tls.xml:/etc/clickhouse-server/config.d/tls.xml:ro
+      - ./compose/clickhouse/certs:/etc/clickhouse-server/certs:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Trino coordinator (single-node). The official trinodb/trino image
+  # ships with the "memory", "jmx", "tpch", and "tpcds" catalogs enabled
+  # by default -- "memory" is writable with no persistence, which is all
+  # the integration test needs. No auth on HTTP; basic auth requires
+  # HTTPS per the driver, so we stick to plain HTTP for dev. First boot
+  # takes ~15-30s while the coordinator finishes starting workers.
+  trino:
+    image: trinodb/trino:latest
+    container_name: sqlgo-trino
+    ports:
+      - "18081:8080"
+    healthcheck:
+      test: ["CMD", "/usr/lib/trino/bin/health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  # Vertica Community Edition (single-node). The official opentext/vertica-ce
+  # image boots a passwordless `dbadmin` superuser and a pre-created
+  # VMart database. First boot takes ~60s while the bootstrap scripts
+  # finish. No auth is enforced on localhost, so tests supply an empty
+  # password by default. Image size is ~2GB -- pull once and cache.
+  #
+  # OpenText now requires an authenticated Docker Hub pull (anonymous
+  # pulls get "denied"). Gate behind the `auth` profile so the default
+  # `podman compose up -d` stays login-free. To opt in:
+  #   podman login docker.io
+  #   podman compose --profile auth up -d vertica
+  vertica:
+    image: opentext/vertica-ce:latest
+    container_name: sqlgo-vertica
+    profiles: ["auth"]
+    ports:
+      - "15433:5433"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/vertica/bin/vsql -U dbadmin -c 'SELECT 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  # SAP HANA Express (HXE). saplabs/hanaexpress is the official dev
+  # image; ~20GB download and needs 8GB+ of RAM plus license accept,
+  # so it lives under the `heavy` compose profile and is NOT pulled
+  # by the default `podman compose up -d`. Opt in with:
+  #   podman compose --profile heavy up -d hana
+  # First boot takes several minutes while the tenant DB HXE comes
+  # online. Container port 39017 is the HXE tenant SQL port (systemDB
+  # lives on 39013). SYSTEM password is set via the master-password
+  # file baked into /etc/entry-hdb-master-password.txt at start-up.
+  hana:
+    image: saplabs/hanaexpress:latest
+    container_name: sqlgo-hana
+    profiles: ["heavy"]
+    # saplabs/hanaexpress wants the license flag and a master password
+    # for the SYSTEM account; password rules require >=8 chars, one
+    # upper, one lower, one digit. HXEHana1 satisfies that.
+    command:
+      - --agree-to-sap-license
+      - --dont-check-version
+      - --master-password
+      - HXEHana1
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    sysctls:
+      kernel.shmmax: "1073741824"
+      net.ipv4.ip_local_port_range: "40000 60999"
+    ports:
+      - "13901:39017"
+      - "13913:39013"
+
+  # Cloud Spanner Emulator. gcr.io/cloud-spanner-emulator/emulator is
+  # Google's official local emulator -- implements the Spanner API over
+  # plain-text gRPC (no TLS, no auth). The integration test connects
+  # with autoConfigEmulator=true, which tells go-sql-spanner to use
+  # plain-text gRPC AND auto-create the target instance + database on
+  # first Open, so there's no seed step for Spanner. Ports: 9010 gRPC
+  # (what the driver uses), 9020 REST (handy for curl checks).
+  spanner:
+    image: gcr.io/cloud-spanner-emulator/emulator:latest
+    container_name: sqlgo-spanner
+    ports:
+      - "19010:9010"
+      - "19020:9020"
+
+  # BigQuery Emulator. ghcr.io/goccy/bigquery-emulator is the de-facto
+  # local emulator -- implements the BigQuery REST + gRPC surface with
+  # a SQLite-backed engine. No official Google emulator exists. The
+  # --project flag seeds a project so the driver's Open() + Ping()
+  # dry-run succeed without any prior provisioning; --dataset seeds a
+  # default dataset that the integration test uses for fixture tables.
+  # Ports: 9050 REST (what the Go client hits via WithEndpoint), 9060
+  # gRPC (unused by cloud.google.com/go/bigquery, published for tools).
+  # Auth is disabled: the driver auto-implies WithoutAuthentication when
+  # Host+Port resolve to an endpoint without explicit credentials.
+  bigquery:
+    image: ghcr.io/goccy/bigquery-emulator:latest
+    container_name: sqlgo-bigquery
+    command:
+      - --project=sqlgo-emu
+      - --dataset=sqlgo_test
+      - --log-level=warn
+    ports:
+      - "19050:9050"
+      - "19060:9060"
+
+  # Arrow Flight SQL server (voltrondata/sqlflite). Uses the SQLite
+  # backend (DuckDB backend segfaults on DDL via DoPut). TLS is disabled
+  # for local dev; basic auth uses the default username sqlflite_username
+  # (setting SQLFLITE_USERNAME causes a segfault in current builds).
+  # gRPC listens on 31337 in-container, mapped to host 19070. First boot ~5s.
+  flightsql:
+    image: voltrondata/sqlflite:latest
+    container_name: sqlgo-flightsql
+    environment:
+      SQLFLITE_PASSWORD: "sqlgo_dev"
+      TLS_ENABLED: "0"
+      DATABASE_BACKEND: "sqlite"
+      DATABASE_FILENAME: ":memory:"
+    ports:
+      - "19070:31337"
 
   # sshd is the bastion used by the sshtunnel integration test. It
   # forwards to the postgres service on the compose network so the

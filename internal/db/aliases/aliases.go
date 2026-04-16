@@ -2,7 +2,7 @@
 // protocol with an existing adapter. Import for side effects. The
 // aliases appear in db.Registered() and the connect form, but Open
 // delegates to the base driver: MariaDB over mysql, CockroachDB /
-// Supabase / Neon / Yugabyte / Timescale over postgres.
+// Supabase / Neon / Yugabyte / Timescale / Redshift over postgres.
 package aliases
 
 import (
@@ -22,4 +22,8 @@ func init() {
 	db.RegisterAlias("neon", "postgres")
 	db.RegisterAlias("yugabytedb", "postgres")
 	db.RegisterAlias("timescaledb", "postgres")
+	// Amazon Redshift speaks Postgres wire protocol. Default port is
+	// 5439 (not 5432) and SSL is typically required -- the user edits
+	// Port + sslmode in the form; defaults stay postgres-native.
+	db.RegisterAlias("redshift", "postgres")
 }

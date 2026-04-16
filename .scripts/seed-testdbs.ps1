@@ -21,7 +21,12 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Push-Location $repoRoot
 
-$allServices = @("mssql","postgres","mysql","oracle","firebird","libsql","sybase")
+$allServices = @("mssql","postgres","mysql","oracle","firebird","libsql","sybase","clickhouse","trino","spanner","bigquery")
+# Services intentionally excluded from the default set (heavy images,
+# license gates, auth-gated pulls). Still seedable by explicit arg:
+#   .\seed-testdbs.ps1 hana    (20GB image, heavy profile)
+#   .\seed-testdbs.ps1 vertica (needs `podman login docker.io` first)
+$optionalServices = @("hana","vertica")
 if (-not $Services -or $Services.Count -eq 0) {
     $Services = $allServices
 }
@@ -317,9 +322,184 @@ go
     Write-Log "sybase: done"
 }
 
+# --- clickhouse ------------------------------------------------------------
+# Mirror the .sh seed: create sqlgo_a/sqlgo_b databases plus sample tables
+# in the default server using the in-container clickhouse-client.
+function Seed-Clickhouse {
+    Write-Log "clickhouse: waiting for server"
+    $ok = Wait-For "clickhouse" { podman exec sqlgo-clickhouse clickhouse-client --host=localhost --query="SELECT 1" }
+    if (-not $ok) { return }
+
+    Write-Log "clickhouse: ensuring sqlgo_a/sqlgo_b databases + sample tables"
+    $sql = @'
+CREATE DATABASE IF NOT EXISTS sqlgo_a;
+CREATE DATABASE IF NOT EXISTS sqlgo_b;
+CREATE TABLE IF NOT EXISTS sqlgo_a.widgets (id Int32, name String) ENGINE = MergeTree() ORDER BY id;
+INSERT INTO sqlgo_a.widgets SELECT 1, 'alpha-A' WHERE NOT EXISTS (SELECT 1 FROM sqlgo_a.widgets WHERE id=1);
+INSERT INTO sqlgo_a.widgets SELECT 2, 'beta-A' WHERE NOT EXISTS (SELECT 1 FROM sqlgo_a.widgets WHERE id=2);
+CREATE TABLE IF NOT EXISTS sqlgo_b.gadgets (id Int32, label String) ENGINE = MergeTree() ORDER BY id;
+INSERT INTO sqlgo_b.gadgets SELECT 1, 'gizmo-B' WHERE NOT EXISTS (SELECT 1 FROM sqlgo_b.gadgets WHERE id=1);
+INSERT INTO sqlgo_b.gadgets SELECT 2, 'widget-B' WHERE NOT EXISTS (SELECT 1 FROM sqlgo_b.gadgets WHERE id=2);
+'@
+    try {
+        podman exec sqlgo-clickhouse clickhouse-client --host=localhost --multiquery --query=$sql | Out-Null
+    } catch {
+        Write-Warn "clickhouse seed may have failed: $_"
+    }
+    Write-Log "clickhouse: done"
+}
+
+# --- trino -----------------------------------------------------------------
+# Trino catalogs are coordinator-configured; runtime seeding targets the
+# built-in memory catalog. Two schemas stand in for the cross-schema flow
+# (profile does not advertise SupportsCrossDatabase -- a connection is
+# catalog-pinned at DSN time).
+function Seed-Trino {
+    Write-Log "trino: waiting for coordinator (may take 15-30s on first boot)"
+    $ok = Wait-For "trino" {
+        podman exec sqlgo-trino trino --server localhost:8080 --catalog memory --execute "SELECT 1"
+    }
+    if (-not $ok) { return }
+
+    Write-Log "trino: ensuring memory.sqlgo_a/sqlgo_b + sample tables"
+    $sql = @"
+CREATE SCHEMA IF NOT EXISTS memory.sqlgo_a;
+CREATE SCHEMA IF NOT EXISTS memory.sqlgo_b;
+DROP TABLE IF EXISTS memory.sqlgo_a.widgets;
+CREATE TABLE memory.sqlgo_a.widgets AS SELECT * FROM (VALUES (1, 'alpha-A'), (2, 'beta-A')) AS t(id, name);
+DROP TABLE IF EXISTS memory.sqlgo_b.gadgets;
+CREATE TABLE memory.sqlgo_b.gadgets AS SELECT * FROM (VALUES (1, 'gizmo-B'), (2, 'widget-B')) AS t(id, label);
+"@
+    try {
+        podman exec sqlgo-trino trino --server localhost:8080 --catalog memory --execute $sql | Out-Null
+    } catch {
+        Write-Warn "trino seed may have failed: $_"
+    }
+    Write-Log "trino: done"
+}
+
+# --- vertica ---------------------------------------------------------------
+# Vertica CE ships the pre-created VMart database. Seed two schemas + sample
+# tables within it so the cross-schema flow has something to show. The driver
+# profile pins one database per connection (SupportsCrossDatabase=false), so
+# schemas are the cross-container tier.
+function Seed-Vertica {
+    Write-Log "vertica: waiting for dbadmin (may take 60-90s on first boot)"
+    $ok = Wait-For "vertica" {
+        podman exec sqlgo-vertica /opt/vertica/bin/vsql -U dbadmin -c "SELECT 1"
+    }
+    if (-not $ok) { return }
+
+    Write-Log "vertica: ensuring sqlgo_a/sqlgo_b schemas + sample tables"
+    $sql = @"
+CREATE SCHEMA IF NOT EXISTS sqlgo_a;
+CREATE SCHEMA IF NOT EXISTS sqlgo_b;
+CREATE TABLE IF NOT EXISTS sqlgo_a.widgets (id INTEGER, name VARCHAR(50));
+INSERT INTO sqlgo_a.widgets SELECT 1, 'alpha-A' WHERE NOT EXISTS (SELECT 1 FROM sqlgo_a.widgets WHERE id=1);
+INSERT INTO sqlgo_a.widgets SELECT 2, 'beta-A'  WHERE NOT EXISTS (SELECT 1 FROM sqlgo_a.widgets WHERE id=2);
+CREATE TABLE IF NOT EXISTS sqlgo_b.gadgets (id INTEGER, label VARCHAR(50));
+INSERT INTO sqlgo_b.gadgets SELECT 1, 'gizmo-B'  WHERE NOT EXISTS (SELECT 1 FROM sqlgo_b.gadgets WHERE id=1);
+INSERT INTO sqlgo_b.gadgets SELECT 2, 'widget-B' WHERE NOT EXISTS (SELECT 1 FROM sqlgo_b.gadgets WHERE id=2);
+COMMIT;
+"@
+    try {
+        podman exec sqlgo-vertica /opt/vertica/bin/vsql -U dbadmin -c $sql | Out-Null
+    } catch {
+        Write-Warn "vertica seed may have failed: $_"
+    }
+    Write-Log "vertica: done"
+}
+
+# --- hana ------------------------------------------------------------------
+# HANA Express ships the pre-created HXE tenant DB. Seed the SQLGO schema
+# with sample widgets so the explorer isn't empty on connect. HANA profile
+# pins one tenant per connection (SupportsCrossDatabase=false), so there is
+# no cross-catalog tier -- the schema is the cross-container unit.
+function Seed-Hana {
+    Write-Log "hana: waiting for HXE tenant (may take several minutes on first boot)"
+    $ok = Wait-For "hana" {
+        podman exec sqlgo-hana bash -c "/usr/sap/HXE/HDB90/exe/hdbsql -n localhost:39017 -d HXE -u SYSTEM -p HXEHana1 'SELECT 1 FROM DUMMY'"
+    }
+    if (-not $ok) { return }
+
+    Write-Log "hana: ensuring SQLGO schema + sample widgets"
+    # hdbsql aborts on first failing statement, so run each DDL/DML in its
+    # own invocation and swallow already-exists noise (same shape as .sh).
+    $runHana = {
+        param($sql)
+        $sql | podman exec -i sqlgo-hana bash -c "/usr/sap/HXE/HDB90/exe/hdbsql -n localhost:39017 -d HXE -u SYSTEM -p HXEHana1" 2>&1
+    }
+    try { & $runHana "CREATE SCHEMA SQLGO;" | Out-Null } catch { }
+    try { & $runHana "CREATE TABLE SQLGO.widgets (id INTEGER PRIMARY KEY, name NVARCHAR(50));" | Out-Null } catch { }
+    try {
+        & $runHana @'
+MERGE INTO SQLGO.widgets w USING (SELECT 1 AS id, 'alpha' AS name FROM DUMMY UNION SELECT 2, 'beta' FROM DUMMY) s
+  ON w.id = s.id WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name);
+'@ | Out-Null
+    } catch {
+        Write-Warn "hana seed may have partially failed: $_"
+    }
+    Write-Log "hana: done"
+}
+
+# --- spanner ---------------------------------------------------------------
+# Cloud Spanner Emulator auto-creates instances/databases when the driver
+# connects with autoConfigEmulator=true, so there is nothing to seed. Just
+# wait for the REST endpoint to respond before moving on.
+function Seed-Spanner {
+    # The emulator image is distroless -- no `sh`/`wget` to `podman exec`
+    # against. Probe the host-published REST port (19020) instead; any
+    # HTTP response (incl. 404 on /) means the server is up.
+    Write-Log "spanner: waiting for emulator REST endpoint"
+    $ok = Wait-For "spanner" {
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:19020/" -TimeoutSec 2 | Out-Null
+            $true
+        } catch [System.Net.WebException] {
+            # Any HTTP response (even 4xx/5xx) means the server is alive.
+            if ($_.Exception.Response) { $true } else { $false }
+        } catch {
+            $false
+        }
+    }
+    if (-not $ok) { return }
+    Write-Log "spanner: ready (instances auto-created on first Open)"
+}
+
+# --- bigquery --------------------------------------------------------------
+# goccy/bigquery-emulator is seeded with --project/--dataset on the compose
+# command line, so there is nothing to provision here. Probe the host-published
+# REST port (19050) like we do for spanner; any HTTP response means the
+# emulator is up.
+function Seed-BigQuery {
+    Write-Log "bigquery: waiting for emulator REST endpoint"
+    $ok = Wait-For "bigquery" {
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:19050/" -TimeoutSec 2 | Out-Null
+            $true
+        } catch [System.Net.WebException] {
+            if ($_.Exception.Response) { $true } else { $false }
+        } catch {
+            $false
+        }
+    }
+    if (-not $ok) { return }
+    Write-Log "bigquery: ready (project=sqlgo-emu dataset=sqlgo_test)"
+}
+
 try {
     Write-Log "starting services: $($Services -join ', ')"
-    podman compose up -d @Services
+    # Split opt-in heavy services from defaults so `compose up` routes them
+    # through their profile gate; otherwise `compose up hana` silently
+    # ignores the request.
+    $composeArgs = @()
+    foreach ($svc in $Services) {
+        switch ($svc) {
+            "hana"    { $composeArgs += @("--profile", "heavy") }
+            "vertica" { $composeArgs += @("--profile", "auth") }
+        }
+    }
+    podman compose @composeArgs up -d @Services
     if ($LASTEXITCODE -ne 0) { throw "podman compose up failed" }
 
     foreach ($svc in $Services) {
@@ -331,6 +511,12 @@ try {
             "firebird" { Seed-Firebird }
             "libsql"   { Seed-Libsql }
             "sybase"   { Seed-Sybase }
+            "clickhouse" { Seed-Clickhouse }
+            "trino"    { Seed-Trino }
+            "vertica"  { Seed-Vertica }
+            "hana"     { Seed-Hana }
+            "spanner"  { Seed-Spanner }
+            "bigquery" { Seed-BigQuery }
             "sshd"     { }
             "mssql-init" { }
             default { Write-Warn "unknown service: $svc" }
@@ -393,6 +579,49 @@ try {
                 Register-Conn -Name "Dev Sybase" -Password "myPassword" -Rest @(
                     "--driver", "sybase", "--host", "localhost", "--port", "15000",
                     "--user", "sa"
+                )
+            }
+            "clickhouse" {
+                Register-Conn -Name "Dev ClickHouse" -Password "" -Rest @(
+                    "--driver", "clickhouse", "--host", "localhost", "--port", "19000",
+                    "--user", "default"
+                )
+            }
+            "trino" {
+                Register-Conn -Name "Dev Trino" -Password "" -Rest @(
+                    "--driver", "trino", "--host", "localhost", "--port", "18081",
+                    "--user", "sqlgo", "--database", "memory",
+                    "--option", "schema=sqlgo_a"
+                )
+            }
+            "vertica" {
+                Register-Conn -Name "Dev Vertica" -Password "" -Rest @(
+                    "--driver", "vertica", "--host", "localhost", "--port", "15433",
+                    "--user", "dbadmin", "--database", "VMart",
+                    "--option", "tlsmode=none"
+                )
+            }
+            "hana" {
+                Register-Conn -Name "Dev HANA" -Password "HXEHana1" -Rest @(
+                    "--driver", "hana", "--host", "localhost", "--port", "13901",
+                    "--user", "SYSTEM", "--database", "HXE",
+                    "--option", "tls_insecure_skip_verify=true"
+                )
+            }
+            "spanner" {
+                Register-Conn -Name "Dev Spanner" -Password "" -Rest @(
+                    "--driver", "spanner", "--host", "localhost", "--port", "19010",
+                    "--database", "sqlgo_test",
+                    "--option", "project=sqlgo-emu",
+                    "--option", "instance=sqlgo",
+                    "--option", "autoConfigEmulator=true"
+                )
+            }
+            "bigquery" {
+                Register-Conn -Name "Dev BigQuery" -Password "" -Rest @(
+                    "--driver", "bigquery", "--host", "localhost", "--port", "19050",
+                    "--database", "sqlgo_test",
+                    "--option", "project=sqlgo-emu"
                 )
             }
         }

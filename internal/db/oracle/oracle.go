@@ -34,7 +34,7 @@ var Profile = db.Profile{
 		LimitSyntax:          db.LimitSyntaxFetchFirst,
 		IdentifierQuote:      '"',
 		SupportsCancel:       true,
-		SupportsTLS:           true,
+		SupportsTLS:          true,
 		ExplainFormat:        db.ExplainFormatNone,
 		Dialect:              sqltok.DialectOracle,
 		SupportsTransactions: true,
@@ -200,6 +200,9 @@ func fetchDefinition(ctx context.Context, sqlDB *sql.DB, kind, schema, name stri
 
 // buildDSN produces the oracle:// URL via goora.BuildUrl. cfg.Database is
 // the service name; host/port default to localhost:1521.
+//
+// cfg.Options goes through translateOracleOptions so the sqlgo-side
+// snake_case keys become go-ora's space-separated keys on the wire.
 func buildDSN(cfg db.Config) string {
 	host := cfg.Host
 	if host == "" {
@@ -209,5 +212,52 @@ func buildDSN(cfg db.Config) string {
 	if port == 0 {
 		port = 1521
 	}
-	return goora.BuildUrl(host, port, cfg.Database, cfg.User, cfg.Password, cfg.Options)
+	return goora.BuildUrl(host, port, cfg.Database, cfg.User, cfg.Password, translateOracleOptions(cfg.Options))
+}
+
+// translateOracleOptions converts sqlgo's snake_case option keys to the
+// space-separated keys that go-ora's connect_config parser recognizes
+// (WALLET, AUTH TYPE, OS USER, SSL, SSL VERIFY, ...). Unknown keys pass
+// through verbatim so future go-ora knobs work without another patch.
+//
+// Supported advanced auth surfaces:
+//
+//	wallet_path      -> WALLET            (Oracle Wallet directory; holds
+//	                                       cwallet.sso / ewallet.p12 and,
+//	                                       for TCPS mTLS, the client cert
+//	                                       + private key)
+//	wallet_password  -> WALLET PASSWORD   (for ewallet.p12)
+//	auth_type        -> AUTH TYPE         (OS, KERBEROS, TCPS, or blank)
+//	os_user          -> OS USER
+//	os_password      -> OS PASS
+//	ssl              -> SSL               (true/enable -- required for TCPS)
+//	ssl_verify       -> SSL VERIFY        (true/enable; default true)
+//	server_dn        -> SSL SERVER CERT DN (match peer DN)
+func translateOracleOptions(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return in
+	}
+	semantic := map[string]string{
+		"wallet_path":     "WALLET",
+		"wallet_password": "WALLET PASSWORD",
+		"auth_type":       "AUTH TYPE",
+		"os_user":         "OS USER",
+		"os_password":     "OS PASS",
+		"ssl":             "SSL",
+		"ssl_verify":      "SSL VERIFY",
+		"server_dn":       "SSL SERVER CERT DN",
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if dst, ok := semantic[strings.ToLower(k)]; ok {
+			out[dst] = v
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }

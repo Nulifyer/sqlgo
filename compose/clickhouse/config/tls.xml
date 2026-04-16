@@ -1,0 +1,44 @@
+<!--
+     ClickHouse TLS config for sqlgo's compose stack. Dropped into
+     /etc/clickhouse-server/config.d/ which ClickHouse merges on top
+     of the baked-in defaults.
+
+     - tcp_port_secure 9440: native TCP over TLS. Mapped to host 19440
+       by compose.yaml so the Go integration tests can dial it.
+     - openSSL.server.certificateFile / privateKeyFile: server identity.
+     - openSSL.server.caConfig: CA that signs client certs. Required
+       for mTLS handshakes; ClickHouse will not request a client cert
+       without it.
+     - verificationMode: "relaxed" asks for a client cert and verifies
+       it against caConfig if presented, but does NOT reject anonymous
+       clients. This lets the same server handle both:
+         * plain TLS clients (tls_ca_file only)  -> TestIntegrationClickHouseTLS
+         * mTLS clients (ca + client cert/key)   -> TestIntegrationClickHouseMTLS
+       "strict" would force every TLS client to present a cert.
+     - invalidCertificateHandler: reject any client cert that fails
+       chain verification. Still allows "no cert at all" because of
+       verificationMode=relaxed.
+
+     Dev only; do not copy to production. Cert material lives under
+     /etc/clickhouse-server/certs (mounted from ../certs).
+-->
+<clickhouse>
+    <tcp_port_secure>9440</tcp_port_secure>
+
+    <openSSL>
+        <server>
+            <certificateFile>/etc/clickhouse-server/certs/server.crt</certificateFile>
+            <privateKeyFile>/etc/clickhouse-server/certs/server.key</privateKeyFile>
+            <dhParamsFile>/etc/clickhouse-server/certs/dhparam.pem</dhParamsFile>
+            <caConfig>/etc/clickhouse-server/certs/ca.crt</caConfig>
+            <verificationMode>relaxed</verificationMode>
+            <loadDefaultCAFile>false</loadDefaultCAFile>
+            <cacheSessions>true</cacheSessions>
+            <disableProtocols>sslv2,sslv3</disableProtocols>
+            <preferServerCiphers>true</preferServerCiphers>
+            <invalidCertificateHandler>
+                <name>RejectCertificateHandler</name>
+            </invalidCertificateHandler>
+        </server>
+    </openSSL>
+</clickhouse>

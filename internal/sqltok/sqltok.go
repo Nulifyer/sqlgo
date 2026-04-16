@@ -83,13 +83,36 @@ const (
 	DialectSnowflake
 	DialectBigQuery
 	DialectFirebird
+	// DialectTrino covers Presto/Trino/Athena -- they share grammar
+	// (Trino forked from Presto; Athena is managed Presto).
+	DialectTrino
+	// DialectVertica is the C-Store-descended columnar engine. Shares
+	// most grammar with Postgres (its SQL frontend is a Postgres fork)
+	// but adds projection/segmentation DDL and analytics functions.
+	DialectVertica
+	// DialectHANA is SAP HANA. In-memory column store with a SQL surface
+	// close to Oracle/ANSI; adds calculation views, SQLScript procedures,
+	// and the SYS schema / SYS_BIC runtime catalog.
+	DialectHANA
+	// DialectDatabricks covers Databricks SQL / Spark SQL. Backtick
+	// identifiers by default, LIMIT/OFFSET, standard information_schema,
+	// Delta Lake DML (MERGE, OPTIMIZE, VACUUM) and Spark analytic
+	// functions. Reuses most of the ANSI/Trino grammar.
+	DialectDatabricks
+	// DialectSpanner is Google Cloud Spanner's GoogleSQL (formerly
+	// Standard SQL) dialect. Backtick identifiers, LIMIT/OFFSET,
+	// STRUCT/ARRAY types, DML within read/write transactions, and
+	// INFORMATION_SCHEMA. A PostgreSQL-dialect mode exists per-database
+	// but the keyword set stays ANSI-compatible enough to share tokens.
+	DialectSpanner
 
 	// DialectAll tags keywords supported by every engine sqlgo speaks.
 	// Use this for ANSI/universal keywords so KeywordsFor(anyDialect)
 	// always includes them.
 	DialectAll = DialectMSSQL | DialectMySQL | DialectPostgres | DialectSQLite |
 		DialectOracle | DialectClickhouse | DialectSybase | DialectSnowflake |
-		DialectBigQuery | DialectFirebird
+		DialectBigQuery | DialectFirebird | DialectTrino | DialectVertica |
+		DialectHANA | DialectDatabricks | DialectSpanner
 )
 
 // IsKeyword reports whether s (case-insensitive) is one of the

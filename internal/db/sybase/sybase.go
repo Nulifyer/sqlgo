@@ -67,8 +67,8 @@ var TDSTransport = db.Transport{
 // when the user picks "Sybase ASE".
 type preset struct{}
 
-func (preset) Name() string                   { return driverName }
-func (preset) Capabilities() db.Capabilities  { return Profile.Capabilities }
+func (preset) Name() string                  { return driverName }
+func (preset) Capabilities() db.Capabilities { return Profile.Capabilities }
 func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	return db.OpenWith(ctx, Profile, TDSTransport, cfg)
 }

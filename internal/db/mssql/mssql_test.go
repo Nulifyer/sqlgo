@@ -81,6 +81,137 @@ func TestBuildDSN(t *testing.T) {
 			wantScheme: "sqlserver",
 			wantQuery:  map[string]string{},
 		},
+		{
+			// winsspi w/o User -> go-mssqldb uses current Windows identity.
+			// The authenticator query param is what selects the provider;
+			// User/Password may be blank.
+			name: "winsspi current identity",
+			cfg: db.Config{
+				Host: "h",
+				Port: 1,
+				Options: map[string]string{
+					"authenticator": "winsspi",
+				},
+			},
+			wantHost:   "h:1",
+			wantUser:   "",
+			wantPass:   "",
+			wantScheme: "sqlserver",
+			wantQuery: map[string]string{
+				"authenticator": "winsspi",
+			},
+		},
+		{
+			// winsspi with DOMAIN\user + password -- explicit Windows creds.
+			name: "winsspi domain user and password",
+			cfg: db.Config{
+				Host:     "h",
+				Port:     1,
+				User:     `CORP\alice`,
+				Password: "pw",
+				Options: map[string]string{
+					"authenticator": "winsspi",
+				},
+			},
+			wantHost:   "h:1",
+			wantUser:   `CORP\alice`,
+			wantPass:   "pw",
+			wantScheme: "sqlserver",
+			wantQuery: map[string]string{
+				"authenticator": "winsspi",
+			},
+		},
+		{
+			// NTLM is cross-platform. Needs User + Password.
+			name: "ntlm user and password",
+			cfg: db.Config{
+				Host:     "h",
+				Port:     1,
+				User:     "alice",
+				Password: "pw",
+				Options: map[string]string{
+					"authenticator": "ntlm",
+				},
+			},
+			wantHost:   "h:1",
+			wantUser:   "alice",
+			wantPass:   "pw",
+			wantScheme: "sqlserver",
+			wantQuery: map[string]string{
+				"authenticator": "ntlm",
+			},
+		},
+		{
+			// Kerberos password mode: User + Password + realm + configfile.
+			name: "krb5 password mode",
+			cfg: db.Config{
+				Host:     "h",
+				Port:     1,
+				User:     "alice",
+				Password: "pw",
+				Options: map[string]string{
+					"authenticator":   "krb5",
+					"krb5-configfile": "/etc/krb5.conf",
+					"krb5-realm":      "EXAMPLE.COM",
+				},
+			},
+			wantHost:   "h:1",
+			wantUser:   "alice",
+			wantPass:   "pw",
+			wantScheme: "sqlserver",
+			wantQuery: map[string]string{
+				"authenticator":   "krb5",
+				"krb5-configfile": "/etc/krb5.conf",
+				"krb5-realm":      "EXAMPLE.COM",
+			},
+		},
+		{
+			// Kerberos keytab mode: keytab replaces password.
+			name: "krb5 keytab mode",
+			cfg: db.Config{
+				Host: "h",
+				Port: 1,
+				User: "alice",
+				Options: map[string]string{
+					"authenticator":   "krb5",
+					"krb5-configfile": "/etc/krb5.conf",
+					"krb5-keytabfile": "/etc/alice.keytab",
+					"krb5-realm":      "EXAMPLE.COM",
+				},
+			},
+			wantHost:   "h:1",
+			wantUser:   "alice",
+			wantPass:   "",
+			wantScheme: "sqlserver",
+			wantQuery: map[string]string{
+				"authenticator":   "krb5",
+				"krb5-configfile": "/etc/krb5.conf",
+				"krb5-keytabfile": "/etc/alice.keytab",
+				"krb5-realm":      "EXAMPLE.COM",
+			},
+		},
+		{
+			// Kerberos credcache mode: no User/Password; uses existing TGT.
+			name: "krb5 credcache mode",
+			cfg: db.Config{
+				Host: "h",
+				Port: 1,
+				Options: map[string]string{
+					"authenticator":      "krb5",
+					"krb5-configfile":    "/etc/krb5.conf",
+					"krb5-credcachefile": "/tmp/krb5cc_1000",
+				},
+			},
+			wantHost:   "h:1",
+			wantUser:   "",
+			wantPass:   "",
+			wantScheme: "sqlserver",
+			wantQuery: map[string]string{
+				"authenticator":      "krb5",
+				"krb5-configfile":    "/etc/krb5.conf",
+				"krb5-credcachefile": "/tmp/krb5cc_1000",
+			},
+		},
 	}
 
 	for _, tc := range tests {
