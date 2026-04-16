@@ -43,6 +43,23 @@ func TestIntegrationMSSQL(t *testing.T) {
 		`CREATE TABLE sqlgo_it_mssql (id INT, label NVARCHAR(50))`,
 		"sqlgo_it_mssql",
 	)
+
+	// Seeded via .scripts/seed-testdbs.{sh,ps1}; gate so an unseeded
+	// container still runs the base round-trip.
+	t.Run("seeded_catalogs", func(t *testing.T) {
+		dbtest.ExerciseCatalogs(t, conn, map[string]string{
+			"SqlgoA": "widgets",
+			"SqlgoB": "gadgets",
+		})
+	})
+
+	t.Run("view_definition", func(t *testing.T) {
+		dbtest.ExerciseDefinition(t, conn, "view",
+			`CREATE VIEW dbo.sqlgo_it_mssql_view AS SELECT 42 AS sqlgo_marker`,
+			`DROP VIEW dbo.sqlgo_it_mssql_view`,
+			"dbo", "sqlgo_it_mssql_view", "sqlgo_marker",
+		)
+	})
 }
 
 func envOr(key, fallback string) string {

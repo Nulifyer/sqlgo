@@ -23,6 +23,10 @@ type connForm struct {
 	engine       []formField
 	ssh          []formField
 
+	// "Other..." flow: user picks dialect + transport independently.
+	profileName   string
+	transportName string
+
 	active int
 	status string
 }
@@ -54,10 +58,9 @@ const (
 func newConnForm(title string, c *config.Connection) *connForm {
 	names := db.Registered()
 	if len(names) == 0 {
-		// Fallback so the form still renders if no drivers are registered
-		// (tests, mis-wired builds). Matches the pre-C1 default.
 		names = []string{"mssql"}
 	}
+	names = append(names, "other")
 	chosen := c != nil && c.Driver != ""
 	driver := ""
 	if chosen {
@@ -94,6 +97,8 @@ func newConnForm(title string, c *config.Connection) *connForm {
 
 	if c != nil {
 		f.originalName = c.Name
+		f.profileName = c.Profile
+		f.transportName = c.Transport
 		f.fixed[coreName].in.SetString(c.Name)
 		f.fixed[coreDriver].in.SetString(c.Driver)
 		f.fixed[coreHost].in.SetString(c.Host)
@@ -360,13 +365,15 @@ func (f *connForm) toConnection() (config.Connection, error) {
 	}
 
 	out := config.Connection{
-		Name:     name,
-		Driver:   driver,
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		Database: database,
+		Name:      name,
+		Driver:    driver,
+		Host:      host,
+		Port:      port,
+		User:      user,
+		Password:  password,
+		Database:  database,
+		Profile:   f.profileName,
+		Transport: f.transportName,
 	}
 
 	// Engine-specific options collapse into the Options map. Empty
@@ -541,7 +548,11 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 		isDriverRow := field == &f.fixed[coreDriver]
 		if isDriverRow {
 			if f.driverChosen {
-				val = "[ " + engineSpecFor(f.driverNames[f.driverIdx]).label + " ]"
+				label := engineSpecFor(f.driverNames[f.driverIdx]).label
+				if f.profileName != "" && f.transportName != "" {
+					label = f.profileName + " / " + f.transportName
+				}
+				val = "[ " + label + " ]"
 			} else {
 				val = "[ select driver... ]"
 			}
@@ -648,6 +659,19 @@ func (fl *formLayer) HandleKey(a *app, k Key) {
 	// can't be submitted without a driver.
 	if fl.f.onDriverRow() && k.Kind == KeyEnter {
 		a.pushLayer(newDriverPickerLayer(fl.f.driverNames, func(name string) {
+			if name == "other" {
+				openOtherPicker(a, func(profile, transport string) {
+					fl.f.profileName = profile
+					fl.f.transportName = transport
+					fl.f.setDriver("other")
+					if t, ok := db.GetTransport(transport); ok {
+						if fl.f.fixed[corePort].in.String() == "" || fl.f.fixed[corePort].in.String() == "0" {
+							fl.f.fixed[corePort].in.SetString(strconv.Itoa(t.DefaultPort))
+						}
+					}
+				})
+				return
+			}
 			fl.f.setDriver(name)
 		}))
 		return
@@ -709,8 +733,8 @@ func (fl *formLayer) Hints(a *app) string {
 		driver,
 		cycler,
 		hintIf(canSave == nil && fl.f.driverChosen, "Ctrl+S=save"),
-		hintIf(fl.f.driverChosen, "Ctrl+T=test-net"),
-		hintIf(canSave == nil && fl.f.driverChosen, "Ctrl+L=test-auth"),
+		"Ctrl+T=test-net",
+		"Ctrl+L=test-auth",
 		"Esc=cancel",
 	)
 }

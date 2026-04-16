@@ -43,6 +43,14 @@ func TestIntegrationPostgres(t *testing.T) {
 		`CREATE TABLE sqlgo_it_pg (id INTEGER, label TEXT)`,
 		"sqlgo_it_pg",
 	)
+
+	t.Run("view_definition", func(t *testing.T) {
+		dbtest.ExerciseDefinition(t, conn, "view",
+			`CREATE VIEW public.sqlgo_it_pg_view AS SELECT 42 AS sqlgo_marker`,
+			`DROP VIEW public.sqlgo_it_pg_view`,
+			"public", "sqlgo_it_pg_view", "sqlgo_marker",
+		)
+	})
 }
 
 func envOr(key, fallback string) string {

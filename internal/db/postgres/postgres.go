@@ -29,46 +29,45 @@ func isPermissionDenied(err error) bool {
 const driverName = "postgres"
 
 func init() {
-	db.Register(driver{})
+	db.RegisterProfile(Profile)
+	db.RegisterTransport(PgxTransport)
+	db.Register(preset{})
 }
 
-type driver struct{}
-
-func (driver) Name() string { return driverName }
-
-var capabilities = db.Capabilities{
-	SchemaDepth:          db.SchemaDepthSchemas,
-	LimitSyntax:          db.LimitSyntaxLimit,
-	IdentifierQuote:      '"',
-	SupportsCancel:       true,
-	SupportsTLS:          true,
-	ExplainFormat:        db.ExplainFormatPostgresJSON,
-	Dialect:              sqltok.DialectPostgres,
-	SupportsTransactions: true,
+var Profile = db.Profile{
+	Name: driverName,
+	Capabilities: db.Capabilities{
+		SchemaDepth:          db.SchemaDepthSchemas,
+		LimitSyntax:          db.LimitSyntaxLimit,
+		IdentifierQuote:      '"',
+		SupportsCancel:       true,
+		SupportsTLS:          true,
+		ExplainFormat:        db.ExplainFormatPostgresJSON,
+		Dialect:              sqltok.DialectPostgres,
+		SupportsTransactions: true,
+	},
+	SchemaQuery:        schemaQuery,
+	ColumnsQuery:       columnsQuery,
+	RoutinesQuery:      routinesQuery,
+	TriggersQuery:      triggersQuery,
+	IsPermissionDenied: isPermissionDenied,
+	DefinitionFetcher:  fetchDefinition,
 }
 
-func (driver) Capabilities() db.Capabilities { return capabilities }
+var PgxTransport = db.Transport{
+	Name:          "pgx",
+	SQLDriverName: "pgx",
+	DefaultPort:   5432,
+	SupportsTLS:   true,
+	BuildDSN:      buildDSN,
+}
 
-func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
-	dsn := buildDSN(cfg)
-	sqlDB, err := sql.Open("pgx", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("postgres open: %w", err)
-	}
-	conn, err := db.OpenSQL(ctx, sqlDB, db.SQLOptions{
-		DriverName:         driverName,
-		Capabilities:       capabilities,
-		SchemaQuery:        schemaQuery,
-		ColumnsQuery:       columnsQuery,
-		RoutinesQuery:      routinesQuery,
-		TriggersQuery:      triggersQuery,
-		IsPermissionDenied: isPermissionDenied,
-		DefinitionFetcher:  fetchDefinition,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("postgres: %w", err)
-	}
-	return conn, nil
+type preset struct{}
+
+func (preset) Name() string                  { return driverName }
+func (preset) Capabilities() db.Capabilities { return Profile.Capabilities }
+func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
+	return db.OpenWith(ctx, Profile, PgxTransport, cfg)
 }
 
 // schemaQuery: user + system tables/views. pg_catalog and

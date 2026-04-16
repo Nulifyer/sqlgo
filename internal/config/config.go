@@ -31,6 +31,17 @@ type Connection struct {
 	Database string            `json:"database,omitempty"`
 	Options  map[string]string `json:"options,omitempty"`
 
+	// Profile overrides Driver when set, selecting a registered dialect
+	// (e.g. "mssql", "sybase") independent of the wire transport. Used
+	// by the "Other..." connection flow where the user picks dialect +
+	// transport separately. Empty means use the preset named by Driver.
+	Profile string `json:"profile,omitempty"`
+
+	// Transport overrides the default wire driver when set (e.g. "tds",
+	// "pgx", "odbc"). Paired with Profile in the "Other..." flow.
+	// Empty means use the preset named by Driver.
+	Transport string `json:"transport,omitempty"`
+
 	// SSH holds the optional jump-host tunnel settings. Zero value
 	// means no tunneling; when SSH.Host is non-empty the TUI dials
 	// the target database through a local port forwarded over SSH.

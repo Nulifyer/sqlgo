@@ -174,23 +174,23 @@ func TestBuildSelectDriverSpecific(t *testing.T) {
 	}{
 		{
 			name: "mssql-top-brackets",
-			caps: db.Capabilities{LimitSyntax: db.LimitSyntaxSelectTop, IdentifierQuote: '['},
-			want: "SELECT TOP 100 * FROM [dbo].[users];",
+			caps: db.Capabilities{SchemaDepth: db.SchemaDepthSchemas, LimitSyntax: db.LimitSyntaxSelectTop, IdentifierQuote: '['},
+			want: "SELECT TOP 100 * FROM [dbo].[users]",
 		},
 		{
 			name: "mysql-limit-backticks",
-			caps: db.Capabilities{LimitSyntax: db.LimitSyntaxLimit, IdentifierQuote: '`'},
-			want: "SELECT * FROM `dbo`.`users` LIMIT 100;",
+			caps: db.Capabilities{SchemaDepth: db.SchemaDepthSchemas, LimitSyntax: db.LimitSyntaxLimit, IdentifierQuote: '`'},
+			want: "SELECT * FROM `dbo`.`users` LIMIT 100",
 		},
 		{
 			name: "postgres-limit-doublequotes",
-			caps: db.Capabilities{LimitSyntax: db.LimitSyntaxLimit, IdentifierQuote: '"'},
-			want: `SELECT * FROM "dbo"."users" LIMIT 100;`,
+			caps: db.Capabilities{SchemaDepth: db.SchemaDepthSchemas, LimitSyntax: db.LimitSyntaxLimit, IdentifierQuote: '"'},
+			want: `SELECT * FROM "dbo"."users" LIMIT 100`,
 		},
 		{
 			name: "oracle-fetchfirst-doublequotes",
-			caps: db.Capabilities{LimitSyntax: db.LimitSyntaxFetchFirst, IdentifierQuote: '"'},
-			want: `SELECT * FROM "dbo"."users" OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY;`,
+			caps: db.Capabilities{SchemaDepth: db.SchemaDepthSchemas, LimitSyntax: db.LimitSyntaxFetchFirst, IdentifierQuote: '"'},
+			want: `SELECT * FROM "dbo"."users" OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY`,
 		},
 	}
 	for _, c := range cases {
@@ -248,13 +248,27 @@ func TestExplorerFlatSchemaOmitsSchemaHeader(t *testing.T) {
 }
 
 // TestQualifiedNameFlatSchema covers the SchemaDepthFlat case used by
-// SQLite, where tables live at the root with no schema prefix.
+// SQLite and Firebird, where tables live at the root with no schema prefix.
+// Even when a synthesized schema (e.g. "main") is present on the TableRef,
+// SchemaDepthFlat must suppress it.
 func TestQualifiedNameFlatSchema(t *testing.T) {
 	t.Parallel()
 	caps := db.Capabilities{IdentifierQuote: '"', SchemaDepth: db.SchemaDepthFlat}
-	tr := db.TableRef{Name: "users"}
-	got := QualifiedName(caps, tr)
-	if got != `"users"` {
-		t.Errorf("QualifiedName(flat) = %q, want %q", got, `"users"`)
+	cases := []struct {
+		name string
+		tr   db.TableRef
+		want string
+	}{
+		{"empty schema", db.TableRef{Name: "users"}, `"users"`},
+		{"synthesized schema stripped", db.TableRef{Schema: "main", Name: "GADGETS"}, `"GADGETS"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := QualifiedName(caps, c.tr)
+			if got != c.want {
+				t.Errorf("QualifiedName(flat, %+v) = %q, want %q", c.tr, got, c.want)
+			}
+		})
 	}
 }

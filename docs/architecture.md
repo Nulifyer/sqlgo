@@ -124,8 +124,27 @@ Engines live in [internal/db/](../internal/db/). Each package:
 
 1. Imports the engine's `database/sql` driver for side effects.
 2. Implements `db.Driver` and registers via `db.Register` in `init()`.
-3. Delegates `db.Conn` to [db.OpenSQL](../internal/db/sqlconn.go) via
-   `db.SQLOptions`.
+3. Exports a `Profile` (dialect: schema queries, capabilities, explain)
+   and a `Transport` (wire driver: DSN builder or custom opener).
+4. Registers both via `db.RegisterProfile` / `db.RegisterTransport`.
+5. The preset `Driver.Open` delegates to `db.OpenWith(ctx, Profile,
+   Transport, cfg)` which composes them into a live `db.Conn` through
+   the package-internal `openSQL` wrapper.
+
+**Profile** is the dialect brain: schema/columns queries, capabilities,
+definition fetcher, explain runner. Portable across wire transports --
+the same Sybase ASE profile can be driven by a native TDS transport
+today or an ODBC bridge tomorrow.
+
+**Transport** is the wire half: a `database/sql` driver name plus
+either a `BuildDSN` function or a custom `Open` (for drivers needing
+pre-open work like file ingestion). One transport can back many
+profiles (TDS -> mssql + sybase).
+
+The TUI's "Other..." connection flow lets users pick profile and
+transport independently, stored as `config.Connection.Profile` and
+`.Transport`. When both are set, `connectTo` calls `db.OpenWith`
+directly instead of going through the preset `Driver.Open`.
 
 The adapter author almost never writes a `db.Conn`. The shared wrapper
 handles streaming `Rows`, `Schema`, `Columns`, `Ping`, `Exec`,
@@ -179,4 +198,4 @@ keyword is what gets classified, not `WITH`.
   `//go:build integration` tag (see
   [postgres_integration_test.go](../internal/db/postgres/postgres_integration_test.go)).
 - The dev compose stack in [compose.yaml](../compose.yaml) is what
-  those tests target; `sqlgoseed` populates it.
+  those tests target; the seed scripts in `.scripts/` populate it.

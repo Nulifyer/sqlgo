@@ -521,13 +521,6 @@ func (a *app) handleKey(k Key) {
 func (a *app) connectTo(c config.Connection) {
 	pl, _ := a.topLayer().(*pickerLayer)
 
-	d, err := db.Get(c.Driver)
-	if err != nil {
-		if pl != nil {
-			pl.setStatus(err.Error())
-		}
-		return
-	}
 	pass, err := a.resolvePassword(c)
 	if err != nil {
 		if pl != nil {
@@ -542,6 +535,37 @@ func (a *app) connectTo(c config.Connection) {
 		Password: pass,
 		Database: c.Database,
 		Options:  c.Options,
+	}
+
+	useOpenWith := c.Profile != "" && c.Transport != ""
+	var d db.Driver
+	var profile db.Profile
+	var transport db.Transport
+	if useOpenWith {
+		var ok bool
+		profile, ok = db.GetProfile(c.Profile)
+		if !ok {
+			if pl != nil {
+				pl.setStatus("unknown profile: " + c.Profile)
+			}
+			return
+		}
+		transport, ok = db.GetTransport(c.Transport)
+		if !ok {
+			if pl != nil {
+				pl.setStatus("unknown transport: " + c.Transport)
+			}
+			return
+		}
+	} else {
+		var err error
+		d, err = db.Get(c.Driver)
+		if err != nil {
+			if pl != nil {
+				pl.setStatus(err.Error())
+			}
+			return
+		}
 	}
 
 	// Optional SSH jump. Open the tunnel first, then rewrite the dial
@@ -619,7 +643,13 @@ func (a *app) connectTo(c config.Connection) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 		defer cancel()
-		conn, err := d.Open(ctx, cfg)
+		var conn db.Conn
+		var err error
+		if useOpenWith {
+			conn, err = db.OpenWith(ctx, profile, transport, cfg)
+		} else {
+			conn, err = d.Open(ctx, cfg)
+		}
 		close(done)
 		a.asyncCh <- func(a *app) {
 			a.finishConnect(c, cfg, conn, tunnel, err)
@@ -697,6 +727,10 @@ func (a *app) finishConnect(c config.Connection, cfg db.Config, conn db.Conn, tu
 	m.status = "connected"
 	m.editor.buf.Clear()
 	m.resetResults()
+	m.explorer.ResetDatabases()
+	for _, s := range m.sessions {
+		s.activeCatalog = ""
+	}
 	m.focus = FocusExplorer
 	a.loadSchema()
 }
@@ -745,6 +779,7 @@ func (a *app) disconnect() {
 	if m != nil {
 		m.resetResults()
 		m.explorer.SetSchema(nil, db.SchemaDepthSchemas)
+		m.explorer.ResetDatabases()
 		// Clear every tab's pinned catalog -- the old server is gone; a
 		// re-connect to a different server must not reuse stale DB names.
 		for _, s := range m.sessions {
@@ -956,7 +991,7 @@ func (a *app) runQueryUnsafe() {
 		return
 	}
 	if pre := a.catalogPreamble(sess); pre != "" {
-		sql = pre + ";\n" + sql
+		sql = pre + "\n" + sql
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sess.cancel = cancel

@@ -8,21 +8,7 @@ import (
 	"sort"
 )
 
-// SQLOptions holds engine-specific knobs for the shared sqlConn
-// wrapper. Adapters build one and pass it to OpenSQL.
-//
-// SchemaQuery must return (schema, name, is_view int, is_system int).
-// Flat-schema engines synthesize a placeholder schema like "main".
-// is_system flags engine-internal catalogs (pg_catalog, sys, etc.)
-// so the explorer can group them under a Sys header.
-//
-// ColumnsQuery takes (schema, table) positional args and returns
-// (col_name, type_name). Placeholder style varies per driver.
-//
-// ColumnsBuilder is the escape hatch for engines that can't take
-// bind values for the column lookup (sqlite PRAGMA). Takes
-// precedence over ColumnsQuery.
-type SQLOptions struct {
+type sqlOptions struct {
 	DriverName     string
 	Capabilities   Capabilities
 	SchemaQuery    string
@@ -70,6 +56,12 @@ type SQLOptions struct {
 	// MySQL: "USE `name`"). Required together with DatabaseListQuery for
 	// SchemaForDatabase to function.
 	UseDatabaseStmt func(name string) string
+
+	// DefaultDatabase is the database from the connection config. When
+	// set, SchemaForDatabase restores USE <DefaultDatabase> on the
+	// pinned connection before releasing it to the pool, so subsequent
+	// non-pinned Exec/Query calls don't inherit a switched context.
+	DefaultDatabase string
 }
 
 // sqlQuerier is the subset of *sql.DB and *sql.Conn that the schema
@@ -80,8 +72,7 @@ type sqlQuerier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-// OpenSQL wraps a *sql.DB as a db.Conn. Takes ownership of sqlDB.
-func OpenSQL(ctx context.Context, sqlDB *sql.DB, opts SQLOptions) (Conn, error) {
+func openSQL(ctx context.Context, sqlDB *sql.DB, opts sqlOptions) (Conn, error) {
 	if err := sqlDB.PingContext(ctx); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("ping: %w", err)
@@ -91,7 +82,7 @@ func OpenSQL(ctx context.Context, sqlDB *sql.DB, opts SQLOptions) (Conn, error) 
 
 type sqlConn struct {
 	db   *sql.DB
-	opts SQLOptions
+	opts sqlOptions
 }
 
 func (c *sqlConn) Driver() string { return c.opts.DriverName }
@@ -375,7 +366,7 @@ func (c *sqlConn) Definition(ctx context.Context, kind, schema, name string) (st
 // Explain runs the engine's EXPLAIN flow and returns raw plan rows. The
 // TUI dispatches on Capabilities.ExplainFormat to pick a parser. Adapters
 // with ExplainFormatNone return ErrExplainUnsupported; adapters with a
-// custom SQLOptions.ExplainRunner delegate to it (MSSQL pins a connection
+// custom sqlOptions.ExplainRunner delegate to it (MSSQL pins a connection
 // so SHOWPLAN_XML session state survives to the next batch).
 func (c *sqlConn) Explain(ctx context.Context, query string) ([][]any, error) {
 	format := c.opts.Capabilities.ExplainFormat
@@ -499,7 +490,7 @@ func (c *sqlConn) UseDatabaseStmt(name string) string {
 // SchemaForDatabase pins a connection, issues USE <database>, then runs
 // the standard schema/routine/trigger queries on the pinned conn so the
 // switched context survives. Requires both DatabaseListQuery and
-// UseDatabaseStmt in SQLOptions.
+// UseDatabaseStmt in sqlOptions.
 func (c *sqlConn) SchemaForDatabase(ctx context.Context, database string) (*SchemaInfo, error) {
 	if c.opts.UseDatabaseStmt == nil {
 		return nil, fmt.Errorf("schema for database: unsupported by driver %s", c.opts.DriverName)
@@ -508,7 +499,14 @@ func (c *sqlConn) SchemaForDatabase(ctx context.Context, database string) (*Sche
 	if err != nil {
 		return nil, fmt.Errorf("pin conn: %w", err)
 	}
-	defer pinned.Close()
+	defer func() {
+		// Restore default database so the released conn doesn't
+		// leak the switched context to a later pool consumer.
+		if c.opts.DefaultDatabase != "" {
+			_, _ = pinned.ExecContext(context.Background(), c.opts.UseDatabaseStmt(c.opts.DefaultDatabase))
+		}
+		_ = pinned.Close()
+	}()
 	if _, err := pinned.ExecContext(ctx, c.opts.UseDatabaseStmt(database)); err != nil {
 		return nil, fmt.Errorf("use %q: %w", database, err)
 	}

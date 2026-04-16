@@ -91,6 +91,14 @@ var migrations = []string{
 	`ALTER TABLE connections ADD COLUMN ssh_user TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE connections ADD COLUMN ssh_password TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE connections ADD COLUMN ssh_key_path TEXT NOT NULL DEFAULT ''`,
+
+	// v5: Profile/Transport columns on connections.
+	//
+	// "Other..." connections store a dialect profile and wire transport
+	// independently instead of going through a preset driver. Empty
+	// strings mean the connection uses the preset driver path.
+	`ALTER TABLE connections ADD COLUMN profile TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE connections ADD COLUMN transport TEXT NOT NULL DEFAULT ''`,
 }
 
 // migrate brings the schema forward using the package-level migrations

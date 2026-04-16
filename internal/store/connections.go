@@ -18,7 +18,8 @@ var ErrConnectionNotFound = errors.New("connection not found")
 // connections SELECT so Get/List/scanConnection stay in sync as new
 // fields land in the schema.
 const connectionColumns = `name, driver, host, port, username, password, database, options,
-    ssh_host, ssh_port, ssh_user, ssh_password, ssh_key_path`
+    ssh_host, ssh_port, ssh_user, ssh_password, ssh_key_path,
+    profile, transport`
 
 // ListConnections returns every saved connection, sorted by name.
 func (s *Store) ListConnections(ctx context.Context) ([]config.Connection, error) {
@@ -86,8 +87,9 @@ func (s *Store) SaveConnection(ctx context.Context, oldName string, c config.Con
 	if _, err := tx.ExecContext(ctx, `
         INSERT INTO connections(
             name, driver, host, port, username, password, database, options,
-            ssh_host, ssh_port, ssh_user, ssh_password, ssh_key_path
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ssh_host, ssh_port, ssh_user, ssh_password, ssh_key_path,
+            profile, transport
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(name) DO UPDATE SET
             driver       = excluded.driver,
             host         = excluded.host,
@@ -101,9 +103,12 @@ func (s *Store) SaveConnection(ctx context.Context, oldName string, c config.Con
             ssh_user     = excluded.ssh_user,
             ssh_password = excluded.ssh_password,
             ssh_key_path = excluded.ssh_key_path,
+            profile      = excluded.profile,
+            transport    = excluded.transport,
             updated_at   = datetime('now')`,
 		c.Name, c.Driver, c.Host, c.Port, c.User, c.Password, c.Database, optsJSON,
 		c.SSH.Host, c.SSH.Port, c.SSH.User, c.SSH.Password, c.SSH.KeyPath,
+		c.Profile, c.Transport,
 	); err != nil {
 		return fmt.Errorf("save connection: %w", err)
 	}
@@ -147,6 +152,7 @@ func scanConnection(r rowScanner) (config.Connection, error) {
 		&c.Name, &c.Driver, &c.Host, &c.Port,
 		&c.User, &c.Password, &c.Database, &optsStr,
 		&c.SSH.Host, &c.SSH.Port, &c.SSH.User, &c.SSH.Password, &c.SSH.KeyPath,
+		&c.Profile, &c.Transport,
 	); err != nil {
 		return config.Connection{}, err
 	}

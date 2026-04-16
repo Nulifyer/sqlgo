@@ -22,46 +22,45 @@ import (
 const driverName = "oracle"
 
 func init() {
-	db.Register(driver{})
+	db.RegisterProfile(Profile)
+	db.RegisterTransport(GoOraTransport)
+	db.Register(preset{})
 }
 
-type driver struct{}
-
-func (driver) Name() string { return driverName }
-
-var capabilities = db.Capabilities{
-	SchemaDepth:          db.SchemaDepthSchemas,
-	LimitSyntax:          db.LimitSyntaxFetchFirst,
-	IdentifierQuote:      '"',
-	SupportsCancel:       true,
-	SupportsTLS:          true,
-	ExplainFormat:        db.ExplainFormatNone,
-	Dialect:              sqltok.DialectOracle,
-	SupportsTransactions: true,
+var Profile = db.Profile{
+	Name: driverName,
+	Capabilities: db.Capabilities{
+		SchemaDepth:          db.SchemaDepthSchemas,
+		LimitSyntax:          db.LimitSyntaxFetchFirst,
+		IdentifierQuote:      '"',
+		SupportsCancel:       true,
+		SupportsTLS:           true,
+		ExplainFormat:        db.ExplainFormatNone,
+		Dialect:              sqltok.DialectOracle,
+		SupportsTransactions: true,
+	},
+	SchemaQuery:        schemaQuery,
+	ColumnsQuery:       columnsQuery,
+	RoutinesQuery:      routinesQuery,
+	TriggersQuery:      triggersQuery,
+	IsPermissionDenied: isPermissionDenied,
+	DefinitionFetcher:  fetchDefinition,
 }
 
-func (driver) Capabilities() db.Capabilities { return capabilities }
+var GoOraTransport = db.Transport{
+	Name:          "goora",
+	SQLDriverName: "oracle",
+	DefaultPort:   1521,
+	SupportsTLS:   true,
+	BuildDSN:      buildDSN,
+}
 
-func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
-	dsn := buildDSN(cfg)
-	sqlDB, err := sql.Open("oracle", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("oracle open: %w", err)
-	}
-	conn, err := db.OpenSQL(ctx, sqlDB, db.SQLOptions{
-		DriverName:         driverName,
-		Capabilities:       capabilities,
-		SchemaQuery:        schemaQuery,
-		ColumnsQuery:       columnsQuery,
-		RoutinesQuery:      routinesQuery,
-		TriggersQuery:      triggersQuery,
-		IsPermissionDenied: isPermissionDenied,
-		DefinitionFetcher:  fetchDefinition,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("oracle: %w", err)
-	}
-	return conn, nil
+type preset struct{}
+
+func (preset) Name() string                  { return driverName }
+func (preset) Capabilities() db.Capabilities { return Profile.Capabilities }
+func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
+	return db.OpenWith(ctx, Profile, GoOraTransport, cfg)
 }
 
 // isPermissionDenied detects ORA-01031 (insufficient privileges) and a

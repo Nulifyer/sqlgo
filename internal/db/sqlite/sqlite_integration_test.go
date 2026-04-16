@@ -32,4 +32,12 @@ func TestIntegrationSQLite(t *testing.T) {
 		`CREATE TABLE sqlgo_it_sqlite (id INTEGER, label TEXT)`,
 		"sqlgo_it_sqlite",
 	)
+
+	t.Run("view_definition", func(t *testing.T) {
+		dbtest.ExerciseDefinition(t, conn, "view",
+			`CREATE VIEW sqlgo_it_sqlite_view AS SELECT 42 AS sqlgo_marker`,
+			`DROP VIEW sqlgo_it_sqlite_view`,
+			"main", "sqlgo_it_sqlite_view", "sqlgo_marker",
+		)
+	})
 }

@@ -37,38 +37,61 @@ const driverName = "file"
 const tempPrefix = "sqlgo-file"
 
 func init() {
-	db.Register(driver{})
+	db.RegisterProfile(Profile)
+	db.RegisterTransport(FileTransport)
+	db.Register(preset{})
 	go sweepOrphans()
 }
 
-type driver struct{}
-
-func (driver) Name() string { return driverName }
-
-// Capabilities mirror sqlite. File-backed connections can't run
-// EXPLAIN usefully, so the format is SQLiteRows and the TUI handles it.
-var capabilities = db.Capabilities{
-	SchemaDepth:          db.SchemaDepthFlat,
-	LimitSyntax:          db.LimitSyntaxLimit,
-	IdentifierQuote:      '"',
-	SupportsCancel:       true,
-	SupportsTLS:          false,
-	ExplainFormat:        db.ExplainFormatSQLiteRows,
-	Dialect:              sqltok.DialectSQLite,
-	SupportsTransactions: true,
+// Profile mirrors sqlite. File-backed connections can't run EXPLAIN
+// usefully, so the format is SQLiteRows and the TUI handles it.
+var Profile = db.Profile{
+	Name: driverName,
+	Capabilities: db.Capabilities{
+		SchemaDepth:          db.SchemaDepthFlat,
+		LimitSyntax:          db.LimitSyntaxLimit,
+		IdentifierQuote:      '"',
+		SupportsCancel:       true,
+		SupportsTLS:          false,
+		ExplainFormat:        db.ExplainFormatSQLiteRows,
+		Dialect:              sqltok.DialectSQLite,
+		SupportsTransactions: true,
+	},
+	SchemaQuery: schemaQuery,
+	ColumnsBuilder: func(t db.TableRef) (string, []any) {
+		q := "SELECT name, type FROM pragma_table_info('" +
+			strings.ReplaceAll(t.Name, "'", "''") + "');"
+		return q, nil
+	},
 }
 
-func (driver) Capabilities() db.Capabilities { return capabilities }
+var FileTransport = db.Transport{
+	Name:          "file",
+	SQLDriverName: "sqlite3",
+	DefaultPort:   0,
+	SupportsTLS:   false,
+	Open:          openFile,
+}
 
-func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
+type preset struct{}
+
+func (preset) Name() string                  { return driverName }
+func (preset) Capabilities() db.Capabilities { return Profile.Capabilities }
+func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
+	return db.OpenWith(ctx, Profile, FileTransport, cfg)
+}
+
+// openFile preloads each path into a sqlite backing store and returns
+// the opened *sql.DB plus a cleanup that removes any spill file.
+func openFile(ctx context.Context, cfg db.Config) (*sql.DB, func() error, error) {
 	paths := splitPaths(cfg.Database)
 	if len(paths) == 0 {
-		return nil, fmt.Errorf("file: no paths in Database")
+		return nil, nil, fmt.Errorf("file: no paths in Database")
 	}
 
 	dsn, tempPath, err := backingDSN(cfg, paths)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	cleanup := func() error { return nil }
 	if tempPath != "" {
@@ -80,7 +103,7 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 		if tempPath != "" {
 			_ = os.Remove(tempPath)
 		}
-		return nil, fmt.Errorf("file: open sqlite: %w", err)
+		return nil, nil, fmt.Errorf("file: open sqlite: %w", err)
 	}
 	// Pin to a single conn: in-memory needs it to share state, and on
 	// disk it keeps the import path single-writer (no SQLITE_BUSY).
@@ -89,26 +112,16 @@ func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	if err := sqlDB.PingContext(ctx); err != nil {
 		_ = sqlDB.Close()
 		_ = cleanup()
-		return nil, fmt.Errorf("file: ping: %w", err)
+		return nil, nil, fmt.Errorf("file: ping: %w", err)
 	}
 	for _, p := range paths {
 		if _, err := fileimport.Load(ctx, sqlDB, p); err != nil {
 			_ = sqlDB.Close()
 			_ = cleanup()
-			return nil, fmt.Errorf("file: load %q: %w", p, err)
+			return nil, nil, fmt.Errorf("file: load %q: %w", p, err)
 		}
 	}
-	return db.OpenSQL(ctx, sqlDB, db.SQLOptions{
-		DriverName:   driverName,
-		Capabilities: capabilities,
-		SchemaQuery:  schemaQuery,
-		ColumnsBuilder: func(t db.TableRef) (string, []any) {
-			q := "SELECT name, type FROM pragma_table_info('" +
-				strings.ReplaceAll(t.Name, "'", "''") + "');"
-			return q, nil
-		},
-		OnClose: cleanup,
-	})
+	return sqlDB, cleanup, nil
 }
 
 // backingDSN picks between :memory: and an on-disk temp file based on

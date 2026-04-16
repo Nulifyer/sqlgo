@@ -41,74 +41,81 @@ func isPermissionDenied(err error) bool {
 const driverName = "mssql"
 
 func init() {
-	db.Register(driver{})
+	db.RegisterProfile(Profile)
+	db.RegisterTransport(MSSQLTransport)
+	db.Register(preset{})
 }
 
-type driver struct{}
-
-func (driver) Name() string { return driverName }
-
-var capabilities = db.Capabilities{
-	SchemaDepth:           db.SchemaDepthSchemas,
-	LimitSyntax:           db.LimitSyntaxSelectTop,
-	IdentifierQuote:       '[',
-	SupportsCancel:        true,
-	SupportsTLS:           true,
-	ExplainFormat:         db.ExplainFormatMSSQLXML,
-	Dialect:               sqltok.DialectMSSQL,
-	SupportsTransactions:  true,
-	SupportsCrossDatabase: true,
+// Profile is the MSSQL dialect brain — sys.objects/sys.triggers queries,
+// OBJECT_DEFINITION fetcher, SHOWPLAN_XML explain runner, sys.databases
+// listing. Transport-free so it can pair with a non-native transport
+// (ODBC bridge) via the "Other..." picker.
+var Profile = db.Profile{
+	Name: driverName,
+	Capabilities: db.Capabilities{
+		SchemaDepth:           db.SchemaDepthSchemas,
+		LimitSyntax:           db.LimitSyntaxSelectTop,
+		IdentifierQuote:       '[',
+		SupportsCancel:        true,
+		SupportsTLS:           true,
+		ExplainFormat:         db.ExplainFormatMSSQLXML,
+		Dialect:               sqltok.DialectMSSQL,
+		SupportsTransactions:  true,
+		SupportsCrossDatabase: true,
+	},
+	SchemaQuery:        schemaQuery,
+	ColumnsQuery:       columnsQuery,
+	RoutinesQuery:      routinesQuery,
+	TriggersQuery:      triggersQuery,
+	IsPermissionDenied: isPermissionDenied,
+	DefinitionFetcher:  fetchDefinition,
+	ExplainRunner:      runExplain,
+	DatabaseListQuery:  databaseListQuery,
+	UseDatabaseStmt:    useDatabaseStmt,
 }
 
-func (driver) Capabilities() db.Capabilities { return capabilities }
-
-func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
-	dsn := buildDSN(cfg)
-	sqlDB, err := sql.Open("sqlserver", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("mssql open: %w", err)
-	}
-	conn, err := db.OpenSQL(ctx, sqlDB, db.SQLOptions{
-		DriverName:         driverName,
-		Capabilities:       capabilities,
-		SchemaQuery:        schemaQuery,
-		ColumnsQuery:       columnsQuery,
-		RoutinesQuery:      routinesQuery,
-		TriggersQuery:      triggersQuery,
-		IsPermissionDenied: isPermissionDenied,
-		DefinitionFetcher:  fetchDefinition,
-		ExplainRunner:      runExplain,
-		DatabaseListQuery:  databaseListQuery,
-		UseDatabaseStmt:    useDatabaseStmt,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("mssql: %w", err)
-	}
-	return conn, nil
+// MSSQLTransport wraps microsoft/go-mssqldb (registered as "sqlserver").
+// Default port 1433. Name is "mssql" (not "tds") because the DSN format
+// and Go driver differ from Sybase's TDS 5.0 transport even though both
+// speak the TDS family on the wire.
+var MSSQLTransport = db.Transport{
+	Name:          "mssql",
+	SQLDriverName: "sqlserver",
+	DefaultPort:   1433,
+	SupportsTLS:   true,
+	BuildDSN:      buildDSN,
 }
 
-// schemaQuery: user + system tables/views. sys/INFORMATION_SCHEMA
-// are flagged is_system=1 for the explorer Sys group. Union the two
-// because INFORMATION_SCHEMA.TABLES itself does not list objects in
-// the sys schema.
-// Drive off sys.objects so is_ms_shipped routes dbo-schema system
-// tables (spt_*, MSreplication_options) into Sys correctly.
-// INFORMATION_SCHEMA views are accessible via the sys schema too;
-// flagged via o.is_ms_shipped. Filter on o.type for base tables and
-// views only.
+// preset is the named "mssql" driver surfaced in the DB list.
+type preset struct{}
+
+func (preset) Name() string                   { return driverName }
+func (preset) Capabilities() db.Capabilities  { return Profile.Capabilities }
+func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
+	return db.OpenWith(ctx, Profile, MSSQLTransport, cfg)
+}
+
+// schemaQuery: user + system tables/views. Drive off sys.all_objects
+// (not sys.objects) so the per-DB inherited system catalog — sys.tables,
+// sys.columns, INFORMATION_SCHEMA.*, and friends — surfaces in the
+// explorer's Sys bucket, matching SSMS. is_ms_shipped=1 or a sys/
+// INFORMATION_SCHEMA schema routes a row to Sys; everything else is
+// user content. Filter on o.type for base tables and views only.
 const schemaQuery = `
 SELECT
 	s.name AS [schema],
 	o.name AS name,
 	CASE WHEN o.type = 'V' THEN 1 ELSE 0 END AS is_view,
 	CASE WHEN o.is_ms_shipped = 1 OR s.name IN ('sys', 'INFORMATION_SCHEMA') THEN 1 ELSE 0 END AS is_system
-FROM sys.objects o
+FROM sys.all_objects o
 JOIN sys.schemas s ON s.schema_id = o.schema_id
 WHERE o.type IN ('U','V')
 ORDER BY s.name, o.name;
 `
 
-// routinesQuery: procedures, scalar/inline/table-valued functions via sys.objects.
+// routinesQuery: procedures, scalar/inline/table-valued functions via
+// sys.all_objects so per-DB inherited system procs (sp_*, xp_*) show up
+// under the Sys bucket like SSMS does.
 // type codes: P=procedure, FN=scalar fn, IF=inline TVF, TF=multi-stmt TVF, AF=aggregate.
 const routinesQuery = `
 SELECT
@@ -121,7 +128,7 @@ SELECT
     END AS kind,
     CASE WHEN o.type = 'AF' THEN 'CLR' ELSE 'SQL' END AS language,
     CASE WHEN o.is_ms_shipped = 1 OR s.name IN ('sys','INFORMATION_SCHEMA') THEN 1 ELSE 0 END AS is_system
-FROM sys.objects o
+FROM sys.all_objects o
 JOIN sys.schemas s ON s.schema_id = o.schema_id
 WHERE o.type IN ('P','FN','IF','TF','AF')
 ORDER BY s.name, o.name;

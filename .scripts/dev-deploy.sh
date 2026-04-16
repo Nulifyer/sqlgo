@@ -9,7 +9,7 @@ COMMIT_SHORT="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
 VERSION="dev-$COMMIT_SHORT"
 
 INSTALL_DIR="$HOME/.local/bin"
-CMDS=(sqlgo sqlgocheck sqlgoseed sqlgotree)
+CMDS=(sqlgo)
 
 echo "Building sqlgo $VERSION ..."
 

@@ -113,6 +113,15 @@ var engineSpecs = []engineSpec{
 		requiredCore: []int{coreHost, corePort, coreUser, corePassword, coreDatabase},
 	},
 	{
+		driver:      "sybase",
+		label:       "Sybase ASE",
+		defaultPort: 5000,
+		defaultUser: "sa",
+		fields:      []engineOption{},
+		// Database optional: blank enables the cross-DB explorer tier.
+		requiredCore: []int{coreHost, corePort, coreUser, corePassword},
+	},
+	{
 		driver:      "d1",
 		label:       "Cloudflare D1",
 		defaultPort: 0,
@@ -143,6 +152,14 @@ var engineSpecs = []engineSpec{
 			// cfg.Database holds a ';'-separated list of file paths.
 		},
 		requiredCore: []int{coreDatabase},
+	},
+	{
+		driver:       "other",
+		label:        "Other...",
+		defaultPort:  0,
+		defaultUser:  "",
+		fields:       []engineOption{},
+		requiredCore: []int{},
 	},
 }
 

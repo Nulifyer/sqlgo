@@ -42,6 +42,14 @@ func TestIntegrationOracle(t *testing.T) {
 		`CREATE TABLE SQLGO_IT_ORA (id NUMBER(10), label VARCHAR2(50))`,
 		"SQLGO_IT_ORA",
 	)
+
+	t.Run("view_definition", func(t *testing.T) {
+		dbtest.ExerciseDefinition(t, conn, "view",
+			`CREATE OR REPLACE VIEW SQLGO_IT_ORA_VIEW AS SELECT 42 AS sqlgo_marker FROM dual`,
+			`DROP VIEW SQLGO_IT_ORA_VIEW`,
+			"SQLGO", "SQLGO_IT_ORA_VIEW", "sqlgo_marker",
+		)
+	})
 }
 
 func envOr(key, fallback string) string {

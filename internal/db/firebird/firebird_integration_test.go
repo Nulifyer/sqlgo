@@ -42,6 +42,14 @@ func TestIntegrationFirebird(t *testing.T) {
 		`CREATE TABLE SQLGO_IT_FB (id INTEGER, label VARCHAR(50))`,
 		"SQLGO_IT_FB",
 	)
+
+	t.Run("view_definition", func(t *testing.T) {
+		dbtest.ExerciseDefinition(t, conn, "view",
+			`CREATE VIEW SQLGO_IT_FB_VIEW AS SELECT 42 AS sqlgo_marker FROM RDB$DATABASE`,
+			`DROP VIEW SQLGO_IT_FB_VIEW`,
+			"main", "SQLGO_IT_FB_VIEW", "sqlgo_marker",
+		)
+	})
 }
 
 func envOr(key, fallback string) string {

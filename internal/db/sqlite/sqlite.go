@@ -28,47 +28,46 @@ const (
 )
 
 func init() {
-	db.Register(driver{})
+	db.RegisterProfile(Profile)
+	db.RegisterTransport(SQLiteTransport)
+	db.Register(preset{})
 }
 
-type driver struct{}
-
-func (driver) Name() string { return driverName }
-
-var capabilities = db.Capabilities{
-	SchemaDepth:          db.SchemaDepthFlat,
-	LimitSyntax:          db.LimitSyntaxLimit,
-	IdentifierQuote:      '"',
-	SupportsCancel:       true,
-	SupportsTLS:          false,
-	ExplainFormat:        db.ExplainFormatSQLiteRows,
-	Dialect:              sqltok.DialectSQLite,
-	SupportsTransactions: true,
+var Profile = db.Profile{
+	Name: driverName,
+	Capabilities: db.Capabilities{
+		SchemaDepth:          db.SchemaDepthFlat,
+		LimitSyntax:          db.LimitSyntaxLimit,
+		IdentifierQuote:      '"',
+		SupportsCancel:       true,
+		SupportsTLS:          false,
+		ExplainFormat:        db.ExplainFormatSQLiteRows,
+		Dialect:              sqltok.DialectSQLite,
+		SupportsTransactions: true,
+	},
+	SchemaQuery:   schemaQuery,
+	TriggersQuery: triggersQuery,
+	ColumnsBuilder: func(t db.TableRef) (string, []any) {
+		q := "SELECT name, type FROM pragma_table_info(" + quoteSQLiteLiteral(t.Name) + ");"
+		return q, nil
+	},
+	DefinitionFetcher: fetchDefinition,
 }
 
-func (driver) Capabilities() db.Capabilities { return capabilities }
+var SQLiteTransport = db.Transport{
+	Name:          "sqlite3",
+	SQLDriverName: "sqlite3",
+	DefaultPort:   0,
+	SupportsTLS:   false,
+	BuildDSN:      buildDSN,
+}
 
-func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
-	dsn := buildDSN(cfg)
-	sqlDB, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite open: %w", err)
-	}
-	conn, err := db.OpenSQL(ctx, sqlDB, db.SQLOptions{
-		DriverName:    driverName,
-		Capabilities:  capabilities,
-		SchemaQuery:   schemaQuery,
-		TriggersQuery: triggersQuery,
-		ColumnsBuilder: func(t db.TableRef) (string, []any) {
-			q := "SELECT name, type FROM pragma_table_info(" + quoteSQLiteLiteral(t.Name) + ");"
-			return q, nil
-		},
-		DefinitionFetcher: fetchDefinition,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: %w", err)
-	}
-	return conn, nil
+type preset struct{}
+
+func (preset) Name() string                  { return driverName }
+func (preset) Capabilities() db.Capabilities { return Profile.Capabilities }
+func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
+	return db.OpenWith(ctx, Profile, SQLiteTransport, cfg)
 }
 
 // schemaQuery lists user + system tables/views under the synthetic

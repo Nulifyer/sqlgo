@@ -41,6 +41,21 @@ func TestIntegrationMySQL(t *testing.T) {
 		`CREATE TABLE sqlgo_it_mysql (id INT, label VARCHAR(50))`,
 		"sqlgo_it_mysql",
 	)
+
+	t.Run("seeded_catalogs", func(t *testing.T) {
+		dbtest.ExerciseCatalogs(t, conn, map[string]string{
+			"sqlgo_a": "widgets",
+			"sqlgo_b": "gadgets",
+		})
+	})
+
+	t.Run("view_definition", func(t *testing.T) {
+		dbtest.ExerciseDefinition(t, conn, "view",
+			`CREATE VIEW sqlgo_it_mysql_view AS SELECT 42 AS sqlgo_marker`,
+			`DROP VIEW sqlgo_it_mysql_view`,
+			cfg.Database, "sqlgo_it_mysql_view", "sqlgo_marker",
+		)
+	})
 }
 
 func envOr(key, fallback string) string {

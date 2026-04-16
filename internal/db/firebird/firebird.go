@@ -24,46 +24,45 @@ import (
 const driverName = "firebird"
 
 func init() {
-	db.Register(driver{})
+	db.RegisterProfile(Profile)
+	db.RegisterTransport(FirebirdSQLTransport)
+	db.Register(preset{})
 }
 
-type driver struct{}
-
-func (driver) Name() string { return driverName }
-
-var capabilities = db.Capabilities{
-	SchemaDepth:          db.SchemaDepthFlat,
-	LimitSyntax:          db.LimitSyntaxFetchFirst,
-	IdentifierQuote:      '"',
-	SupportsCancel:       true,
-	SupportsTLS:          false,
-	ExplainFormat:        db.ExplainFormatNone,
-	Dialect:              sqltok.DialectFirebird,
-	SupportsTransactions: true,
+var Profile = db.Profile{
+	Name: driverName,
+	Capabilities: db.Capabilities{
+		SchemaDepth:          db.SchemaDepthFlat,
+		LimitSyntax:          db.LimitSyntaxFetchFirst,
+		IdentifierQuote:      '"',
+		SupportsCancel:       true,
+		SupportsTLS:          false,
+		ExplainFormat:        db.ExplainFormatNone,
+		Dialect:              sqltok.DialectFirebird,
+		SupportsTransactions: true,
+	},
+	SchemaQuery:        schemaQuery,
+	ColumnsBuilder:     buildColumnsQuery,
+	RoutinesQuery:      routinesQuery,
+	TriggersQuery:      triggersQuery,
+	IsPermissionDenied: isPermissionDenied,
+	DefinitionFetcher:  fetchDefinition,
 }
 
-func (driver) Capabilities() db.Capabilities { return capabilities }
+var FirebirdSQLTransport = db.Transport{
+	Name:          "firebirdsql",
+	SQLDriverName: "firebirdsql",
+	DefaultPort:   3050,
+	SupportsTLS:   false,
+	BuildDSN:      buildDSN,
+}
 
-func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
-	dsn := buildDSN(cfg)
-	sqlDB, err := sql.Open("firebirdsql", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("firebird open: %w", err)
-	}
-	conn, err := db.OpenSQL(ctx, sqlDB, db.SQLOptions{
-		DriverName:         driverName,
-		Capabilities:       capabilities,
-		SchemaQuery:        schemaQuery,
-		ColumnsBuilder:     buildColumnsQuery,
-		RoutinesQuery:      routinesQuery,
-		TriggersQuery:      triggersQuery,
-		IsPermissionDenied: isPermissionDenied,
-		DefinitionFetcher:  fetchDefinition,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("firebird: %w", err)
-	}
-	return conn, nil
+type preset struct{}
+
+func (preset) Name() string                  { return driverName }
+func (preset) Capabilities() db.Capabilities { return Profile.Capabilities }
+func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
+	return db.OpenWith(ctx, Profile, FirebirdSQLTransport, cfg)
 }
 
 // isPermissionDenied matches Firebird "no permission" SQLCODEs surfaced

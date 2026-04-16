@@ -7,6 +7,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -111,5 +112,86 @@ func ExerciseDriver(t *testing.T, conn db.Conn, tableSchema, createTable, tableN
 	}
 	if len(gotLabels) != 2 || gotLabels[0] != "one" || gotLabels[1] != "two" {
 		t.Errorf("labels = %v, want [one, two]", gotLabels)
+	}
+}
+
+// ExerciseCatalogs verifies the seed script's sqlgo_a/sqlgo_b (or engine
+// equivalent) are visible via the DatabaseLister capability, and that
+// SchemaForDatabase returns the expected user table in each. catalogTable
+// maps catalog name -> expected table name (case-insensitive match).
+// Skips cleanly when the driver doesn't advertise SupportsCrossDatabase
+// or doesn't implement DatabaseLister.
+func ExerciseCatalogs(t *testing.T, conn db.Conn, catalogTable map[string]string) {
+	t.Helper()
+	if !conn.Capabilities().SupportsCrossDatabase {
+		t.Skip("driver does not support cross-database")
+	}
+	lister, ok := conn.(db.DatabaseLister)
+	if !ok {
+		t.Skip("driver does not implement DatabaseLister")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	names, err := lister.ListDatabases(ctx)
+	if err != nil {
+		t.Fatalf("ListDatabases: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, n := range names {
+		seen[strings.ToLower(n)] = true
+	}
+	for cat := range catalogTable {
+		if !seen[strings.ToLower(cat)] {
+			t.Errorf("ListDatabases missing %q; got %v (seed script not run?)", cat, names)
+		}
+	}
+
+	for cat, wantTable := range catalogTable {
+		info, err := lister.SchemaForDatabase(ctx, cat)
+		if err != nil {
+			t.Errorf("SchemaForDatabase(%q): %v", cat, err)
+			continue
+		}
+		found := false
+		for _, tr := range info.Tables {
+			if strings.EqualFold(tr.Name, wantTable) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("SchemaForDatabase(%q): table %q missing (seed script not run?)", cat, wantTable)
+		}
+	}
+}
+
+// ExerciseDefinition creates an object, fetches its DDL via
+// Conn.Definition, asserts the returned text contains wantSubstr, then
+// drops the object. Skips cleanly when the driver returns
+// ErrDefinitionUnsupported for the given kind.
+func ExerciseDefinition(t *testing.T, conn db.Conn, kind, createSQL, dropSQL, schema, name, wantSubstr string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Best-effort pre-clean; may not exist yet.
+	_ = conn.Exec(ctx, dropSQL)
+	if err := conn.Exec(ctx, createSQL); err != nil {
+		t.Fatalf("create %s: %v", kind, err)
+	}
+	defer func() {
+		_ = conn.Exec(context.Background(), dropSQL)
+	}()
+
+	def, err := conn.Definition(ctx, kind, schema, name)
+	if errors.Is(err, db.ErrDefinitionUnsupported) {
+		t.Skipf("definition unsupported for kind %q", kind)
+	}
+	if err != nil {
+		t.Fatalf("Definition(%s, %s, %s): %v", kind, schema, name, err)
+	}
+	if !strings.Contains(strings.ToLower(def), strings.ToLower(wantSubstr)) {
+		t.Errorf("Definition body missing %q; got:\n%s", wantSubstr, def)
 	}
 }

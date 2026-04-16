@@ -19,48 +19,58 @@ import (
 const driverName = "sybase"
 
 func init() {
-	db.Register(driver{})
+	db.RegisterProfile(Profile)
+	db.RegisterTransport(TDSTransport)
+	db.Register(preset{})
 }
 
-type driver struct{}
-
-func (driver) Name() string { return driverName }
-
-var capabilities = db.Capabilities{
-	SchemaDepth:           db.SchemaDepthSchemas,
-	LimitSyntax:           db.LimitSyntaxSelectTop,
-	IdentifierQuote:       '"',
-	SupportsCancel:        true,
-	SupportsTLS:           true,
-	ExplainFormat:         db.ExplainFormatNone,
-	Dialect:               sqltok.DialectSybase,
-	SupportsTransactions:  true,
-	SupportsCrossDatabase: true,
+// Profile is the ASE dialect brain — capabilities, sysobjects/syscomments
+// queries, master..sysdatabases listing. Transport-free so an "Other..."
+// connection can pair it with a non-TDS wire (JDBC bridge, ODBC, ...).
+var Profile = db.Profile{
+	Name: driverName,
+	Capabilities: db.Capabilities{
+		SchemaDepth:           db.SchemaDepthSchemas,
+		LimitSyntax:           db.LimitSyntaxSelectTop,
+		IdentifierQuote:       '[',
+		SupportsCancel:        true,
+		SupportsTLS:           true,
+		ExplainFormat:         db.ExplainFormatNone,
+		Dialect:               sqltok.DialectSybase,
+		SupportsTransactions:  true,
+		SupportsCrossDatabase: true,
+	},
+	SchemaQuery:       schemaQuery,
+	ColumnsQuery:      columnsQuery,
+	RoutinesQuery:     routinesQuery,
+	TriggersQuery:     triggersQuery,
+	DefinitionFetcher: fetchDefinition,
+	DatabaseListQuery: databaseListQuery,
+	UseDatabaseStmt:   useDatabaseStmt,
 }
 
-func (driver) Capabilities() db.Capabilities { return capabilities }
+// TDSTransport wraps the Nulifyer/go-tds wire driver (TDS 5.0). ASE's
+// default port is 5000. Registered globally so the "Other..." picker
+// can pair it with any dialect; the mssql engine uses its own
+// sqlserver-protocol transport even though that's also "TDS" on the
+// wire (different Go driver, different DSN format).
+var TDSTransport = db.Transport{
+	Name:          "tds",
+	SQLDriverName: "tds",
+	DefaultPort:   5000,
+	SupportsTLS:   true,
+	BuildDSN:      buildDSN,
+}
 
-func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
-	dsn := buildDSN(cfg)
-	sqlDB, err := sql.Open("tds", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("sybase open: %w", err)
-	}
-	conn, err := db.OpenSQL(ctx, sqlDB, db.SQLOptions{
-		DriverName:        driverName,
-		Capabilities:      capabilities,
-		SchemaQuery:       schemaQuery,
-		ColumnsQuery:      columnsQuery,
-		RoutinesQuery:     routinesQuery,
-		TriggersQuery:     triggersQuery,
-		DefinitionFetcher: fetchDefinition,
-		DatabaseListQuery: databaseListQuery,
-		UseDatabaseStmt:   useDatabaseStmt,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("sybase: %w", err)
-	}
-	return conn, nil
+// preset is the named "sybase" driver surfaced in the DB list. Composes
+// the ASE profile with the TDS transport — the pairing the UI suggests
+// when the user picks "Sybase ASE".
+type preset struct{}
+
+func (preset) Name() string                   { return driverName }
+func (preset) Capabilities() db.Capabilities  { return Profile.Capabilities }
+func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
+	return db.OpenWith(ctx, Profile, TDSTransport, cfg)
 }
 
 // Sybase ASE sysobjects type codes:
@@ -194,8 +204,12 @@ func useDatabaseStmt(name string) string {
 	return "use [" + strings.ReplaceAll(name, "]", "]]") + "]"
 }
 
+// quoteIdent uses brackets because ASE's default session has
+// quoted_identifier=off, which turns "..." into a string literal and
+// breaks dotted qualifiers. ASE 15+ accepts bracketed identifiers
+// unconditionally. `]` inside a name is doubled defensively.
 func quoteIdent(s string) string {
-	return "\"" + strings.ReplaceAll(s, "\"", "\"\"") + "\""
+	return "[" + strings.ReplaceAll(s, "]", "]]") + "]"
 }
 
 // buildDSN produces a tds:// URL accepted by github.com/Nulifyer/go-tds.

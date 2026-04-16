@@ -115,6 +115,18 @@ func newExplorer() *explorer {
 	}
 }
 
+// ResetDatabases clears all cross-database state so a connection switch
+// does not leak stale catalogs, schemas, or expansion state from the
+// previous server.
+func (e *explorer) ResetDatabases() {
+	e.dbMode = false
+	e.databases = nil
+	e.dbSchemas = map[string]*db.SchemaInfo{}
+	e.dbLoading = map[string]string{}
+	e.dbErr = map[string]string{}
+	e.expanded = map[string]bool{}
+}
+
 // SetSchema replaces the displayed schema and resets cursor/scroll.
 // depth controls whether a schema header is emitted above the
 // Tables/Views subgroups: Schemas for Postgres/MSSQL/MySQL, Flat for
@@ -910,7 +922,7 @@ func QualifiedName(caps db.Capabilities, t db.TableRef) string {
 	if t.Catalog != "" {
 		parts = q(t.Catalog) + "."
 	}
-	if t.Schema == "" {
+	if t.Schema == "" || caps.SchemaDepth == db.SchemaDepthFlat {
 		return parts + q(t.Name)
 	}
 	return parts + q(t.Schema) + "." + q(t.Name)
@@ -941,13 +953,16 @@ func BuildSelect(caps db.Capabilities, t db.TableRef, limit int) string {
 	// would pin the query to the source DB.
 	t.Catalog = ""
 	name := QualifiedName(caps, t)
+	// No trailing ';' — Sybase ASE rejects a bare ';' terminator in some
+	// contexts (Msg 102), and nothing here depends on it. The user adds
+	// one if chaining statements.
 	switch caps.LimitSyntax {
 	case db.LimitSyntaxSelectTop:
-		return "SELECT TOP " + itoa(limit) + " * FROM " + name + ";"
+		return "SELECT TOP " + itoa(limit) + " * FROM " + name
 	case db.LimitSyntaxFetchFirst:
-		return "SELECT * FROM " + name + " OFFSET 0 ROWS FETCH NEXT " + itoa(limit) + " ROWS ONLY;"
+		return "SELECT * FROM " + name + " OFFSET 0 ROWS FETCH NEXT " + itoa(limit) + " ROWS ONLY"
 	default:
-		return "SELECT * FROM " + name + " LIMIT " + itoa(limit) + ";"
+		return "SELECT * FROM " + name + " LIMIT " + itoa(limit)
 	}
 }
 

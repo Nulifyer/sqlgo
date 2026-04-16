@@ -12,12 +12,24 @@ with a PRAGMA escape hatch), [mysql](../internal/db/mysql/mysql.go),
 Every adapter is a package under [internal/db/](../internal/db/) that:
 
 1. Imports the engine's `database/sql` driver for side effects.
-2. Implements [db.Driver](../internal/db/db.go) (`Name`,
-   `Capabilities`, `Open`).
-3. Registers itself in `init()` via `db.Register`.
-4. Delegates the `db.Conn` implementation to the shared
-   [db.OpenSQL](../internal/db/sqlconn.go) wrapper via
-   `db.SQLOptions`.
+2. Exports a `db.Profile` (dialect: capabilities, schema queries,
+   definition fetcher, explain runner).
+3. Exports a `db.Transport` (wire driver: `database/sql` driver name
+   + `BuildDSN` or custom `Open`).
+4. Implements [db.Driver](../internal/db/db.go) (`Name`,
+   `Capabilities`, `Open`) as a thin preset that calls
+   `db.OpenWith(ctx, Profile, Transport, cfg)`.
+5. Registers all three in `init()` via `db.RegisterProfile`,
+   `db.RegisterTransport`, and `db.Register`.
+
+**Profile** is the dialect brain -- portable across wire transports.
+The same ASE profile works over TDS today and could work over ODBC
+tomorrow. **Transport** is the wire half -- one transport can back
+many profiles (TDS -> mssql + sybase).
+
+The preset `Driver` is the backward-compatible entry point that pairs
+a default profile with a default transport. The "Other..." connection
+flow in the TUI lets users pick profile and transport independently.
 
 If the engine speaks `database/sql`, you almost never need to
 implement `db.Conn` yourself. The shared wrapper handles streaming
@@ -32,8 +44,6 @@ package foo
 
 import (
     "context"
-    "database/sql"
-    "fmt"
 
     _ "github.com/example/foo-driver"
 
@@ -43,53 +53,58 @@ import (
 
 const driverName = "foo"
 
-func init() { db.Register(driver{}) }
-
-type driver struct{}
-
-func (driver) Name() string { return driverName }
-
-var capabilities = db.Capabilities{
-    SchemaDepth:     db.SchemaDepthSchemas,
-    LimitSyntax:     db.LimitSyntaxLimit,
-    IdentifierQuote: '"',
-    SupportsCancel:  true,
-    SupportsTLS:     true,
-    ExplainFormat:        db.ExplainFormatNone,
-    Dialect:              sqltok.DialectPostgres,
-    SupportsTransactions: true,
+var Profile = db.Profile{
+    Name: driverName,
+    Capabilities: db.Capabilities{
+        SchemaDepth:          db.SchemaDepthSchemas,
+        LimitSyntax:          db.LimitSyntaxLimit,
+        IdentifierQuote:      '"',
+        SupportsCancel:       true,
+        SupportsTLS:          true,
+        ExplainFormat:        db.ExplainFormatNone,
+        Dialect:              sqltok.DialectPostgres,
+        SupportsTransactions: true,
+    },
+    SchemaQuery:  schemaQuery,
+    ColumnsQuery: columnsQuery,
 }
 
-func (driver) Capabilities() db.Capabilities { return capabilities }
+var FooTransport = db.Transport{
+    Name:          "foo",
+    SQLDriverName: "foo",
+    DefaultPort:   5432,
+    SupportsTLS:   true,
+    BuildDSN:      buildDSN,
+}
 
-func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
-    sqlDB, err := sql.Open("foo", buildDSN(cfg))
-    if err != nil {
-        return nil, fmt.Errorf("foo open: %w", err)
-    }
-    return db.OpenSQL(ctx, sqlDB, db.SQLOptions{
-        DriverName:   driverName,
-        Capabilities: capabilities,
-        SchemaQuery:  schemaQuery,
-        ColumnsQuery: columnsQuery,
-    })
+type preset struct{}
+
+func (preset) Name() string                  { return driverName }
+func (preset) Capabilities() db.Capabilities { return Profile.Capabilities }
+func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
+    return db.OpenWith(ctx, Profile, FooTransport, cfg)
+}
+
+func init() {
+    db.RegisterProfile(Profile)
+    db.RegisterTransport(FooTransport)
+    db.Register(preset{})
 }
 ```
 
 ## Registering the adapter
 
-Blank-import the package from every entry point that needs it. At
-minimum:
+Blank-import the package from every entry point that needs it:
 
 - [internal/tui/tui.go](../internal/tui/tui.go)
-- [cmd/sqlgocheck/main.go](../cmd/sqlgocheck/main.go)
-- [cmd/sqlgoseed/main.go](../cmd/sqlgoseed/main.go)
 
 ```go
 _ "github.com/Nulifyer/sqlgo/internal/db/foo"
 ```
 
-`db.Register` panics on duplicate names, so `Name()` must be unique.
+`db.Register`, `db.RegisterProfile`, and `db.RegisterTransport` all
+panic on duplicate names, so each name must be unique within its
+registry.
 
 ## SchemaQuery contract
 
@@ -217,8 +232,11 @@ Hermetic tests (no network) go next to the adapter:
 ## Checklist
 
 - [ ] Package under `internal/db/<name>/`.
-- [ ] `init()` calls `db.Register(driver{})`.
-- [ ] `Capabilities` set for all fields.
+- [ ] Exported `Profile` with all capabilities fields set.
+- [ ] Exported `Transport` with `BuildDSN` (or `Open` for custom).
+- [ ] Preset `Driver` delegates to `db.OpenWith`.
+- [ ] `init()` calls `db.RegisterProfile`, `db.RegisterTransport`,
+      `db.Register`.
 - [ ] `Capabilities.Dialect` set so autocomplete uses the right
       keyword overlay.
 - [ ] `SchemaQuery` returns the 4-column contract.
@@ -227,7 +245,6 @@ Hermetic tests (no network) go next to the adapter:
 - [ ] `ColumnsQuery` (or `ColumnsBuilder`) returns
       `(name, type_name)` ordered by position.
 - [ ] `buildDSN` merges `cfg.Options`, defaults host/port.
-- [ ] Blank import added to `internal/tui/tui.go`,
-      `cmd/sqlgocheck/main.go`, `cmd/sqlgoseed/main.go`.
+- [ ] Blank import added to `internal/tui/tui.go`.
 - [ ] `buildDSN` + in-memory round-trip tests pass under
       `go test ./internal/db/<name>/...`.

@@ -34,49 +34,48 @@ func isPermissionDenied(err error) bool {
 const driverName = "mysql"
 
 func init() {
-	db.Register(driver{})
+	db.RegisterProfile(Profile)
+	db.RegisterTransport(MySQLTransport)
+	db.Register(preset{})
 }
 
-type driver struct{}
-
-func (driver) Name() string { return driverName }
-
-var capabilities = db.Capabilities{
-	SchemaDepth:           db.SchemaDepthSchemas,
-	LimitSyntax:           db.LimitSyntaxLimit,
-	IdentifierQuote:       '`',
-	SupportsCancel:        true,
-	SupportsTLS:           true,
-	ExplainFormat:         db.ExplainFormatMySQLJSON,
-	Dialect:               sqltok.DialectMySQL,
-	SupportsTransactions:  true,
-	SupportsCrossDatabase: true,
+var Profile = db.Profile{
+	Name: driverName,
+	Capabilities: db.Capabilities{
+		SchemaDepth:           db.SchemaDepthSchemas,
+		LimitSyntax:           db.LimitSyntaxLimit,
+		IdentifierQuote:       '`',
+		SupportsCancel:        true,
+		SupportsTLS:           true,
+		ExplainFormat:         db.ExplainFormatMySQLJSON,
+		Dialect:               sqltok.DialectMySQL,
+		SupportsTransactions:  true,
+		SupportsCrossDatabase: true,
+	},
+	SchemaQuery:        schemaQuery,
+	ColumnsQuery:       columnsQuery,
+	RoutinesQuery:      routinesQuery,
+	TriggersQuery:      triggersQuery,
+	IsPermissionDenied: isPermissionDenied,
+	DefinitionFetcher:  fetchDefinition,
+	DatabaseListQuery:  databaseListQuery,
+	UseDatabaseStmt:    useDatabaseStmt,
 }
 
-func (driver) Capabilities() db.Capabilities { return capabilities }
+var MySQLTransport = db.Transport{
+	Name:          "mysql",
+	SQLDriverName: "mysql",
+	DefaultPort:   3306,
+	SupportsTLS:   true,
+	BuildDSN:      buildDSN,
+}
 
-func (driver) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
-	dsn := buildDSN(cfg)
-	sqlDB, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("mysql open: %w", err)
-	}
-	conn, err := db.OpenSQL(ctx, sqlDB, db.SQLOptions{
-		DriverName:         driverName,
-		Capabilities:       capabilities,
-		SchemaQuery:        schemaQuery,
-		ColumnsQuery:       columnsQuery,
-		RoutinesQuery:      routinesQuery,
-		TriggersQuery:      triggersQuery,
-		IsPermissionDenied: isPermissionDenied,
-		DefinitionFetcher:  fetchDefinition,
-		DatabaseListQuery:  databaseListQuery,
-		UseDatabaseStmt:    useDatabaseStmt,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("mysql: %w", err)
-	}
-	return conn, nil
+type preset struct{}
+
+func (preset) Name() string                  { return driverName }
+func (preset) Capabilities() db.Capabilities { return Profile.Capabilities }
+func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
+	return db.OpenWith(ctx, Profile, MySQLTransport, cfg)
 }
 
 // schemaQuery: user + system tables/views. MySQL system DBs

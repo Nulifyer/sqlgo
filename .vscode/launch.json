@@ -16,54 +16,6 @@
                 "CGO_CXXFLAGS": "-fno-sanitize=undefined"
             },
             "console": "integratedTerminal"
-        },
-        {
-            "name": "sqlgocheck",
-            "type": "go",
-            "request": "launch",
-            "mode": "auto",
-            "program": "${workspaceFolder}/cmd/sqlgocheck",
-            "buildFlags": "-tags=sqlite_fts5",
-            "env": {
-                "CGO_ENABLED": "1",
-                "CC": "zig cc",
-                "CXX": "zig c++",
-                "CGO_CFLAGS": "-fno-sanitize=undefined",
-                "CGO_CXXFLAGS": "-fno-sanitize=undefined"
-            },
-            "console": "integratedTerminal"
-        },
-        {
-            "name": "sqlgoseed",
-            "type": "go",
-            "request": "launch",
-            "mode": "auto",
-            "program": "${workspaceFolder}/cmd/sqlgoseed",
-            "buildFlags": "-tags=sqlite_fts5",
-            "env": {
-                "CGO_ENABLED": "1",
-                "CC": "zig cc",
-                "CXX": "zig c++",
-                "CGO_CFLAGS": "-fno-sanitize=undefined",
-                "CGO_CXXFLAGS": "-fno-sanitize=undefined"
-            },
-            "console": "integratedTerminal"
-        },
-        {
-            "name": "sqlgotree",
-            "type": "go",
-            "request": "launch",
-            "mode": "auto",
-            "program": "${workspaceFolder}/cmd/sqlgotree",
-            "buildFlags": "-tags=sqlite_fts5",
-            "env": {
-                "CGO_ENABLED": "1",
-                "CC": "zig cc",
-                "CXX": "zig c++",
-                "CGO_CFLAGS": "-fno-sanitize=undefined",
-                "CGO_CXXFLAGS": "-fno-sanitize=undefined"
-            },
-            "console": "integratedTerminal"
         }
     ]
 }
