@@ -4,8 +4,10 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
+	"github.com/Nulifyer/sqlgo/internal/sqltok"
 	// Register the sqlite driver so tests can open a real in-memory
 	// connection. Using a live driver keeps the column-cache path
 	// exercised end-to-end instead of stubbed out.
@@ -171,17 +173,21 @@ func TestAnalyzeCursorContextJoinOn(t *testing.T) {
 
 func TestAnalyzeCursorContextGroupByOrderByHaving(t *testing.T) {
 	t.Parallel()
-	cases := map[string]string{
-		"group by": "SELECT count(*) FROM users GROUP BY ",
-		"order by": "SELECT id FROM users ORDER BY ",
-		"having":   "SELECT id FROM users GROUP BY id HAVING ",
+	cases := []struct {
+		name string
+		text string
+		want clauseKind
+	}{
+		{name: "group by", text: "SELECT count(*) FROM users GROUP BY ", want: clauseGroupBy},
+		{name: "order by", text: "SELECT id FROM users ORDER BY ", want: clauseOrderBy},
+		{name: "having", text: "SELECT id FROM users GROUP BY id HAVING ", want: clauseWhereish},
 	}
-	for name, text := range cases {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ctx := analyzeCursorContext(text, len([]rune(text)))
-			if ctx.clause != clauseWhereish {
-				t.Errorf("clause = %s, want where", ctx.clause)
+			ctx := analyzeCursorContext(tc.text, len([]rune(tc.text)))
+			if ctx.clause != tc.want {
+				t.Errorf("clause = %s, want %s", ctx.clause, tc.want)
 			}
 			if len(ctx.inScope) == 0 || ctx.inScope[0].name != "users" {
 				t.Errorf("inScope = %+v, want users", ctx.inScope)
@@ -218,6 +224,86 @@ func TestAnalyzeCursorContextSchemaQualifiedTable(t *testing.T) {
 	got := ctx.inScope[0]
 	if got.schema != "dbo" || got.name != "users" || got.alias != "u" {
 		t.Errorf("inScope[0] = %+v, want {dbo, users, u}", got)
+	}
+}
+
+func TestAnalyzeCursorContextBracketedQualifiedTable(t *testing.T) {
+	t.Parallel()
+	text := "SELECT * FROM [dbo].[users] u WHERE "
+	ctx := analyzeCursorContext(text, len([]rune(text)))
+	if len(ctx.inScope) != 1 {
+		t.Fatalf("inScope = %+v, want 1 entry", ctx.inScope)
+	}
+	got := ctx.inScope[0]
+	if got.schema != "dbo" || got.name != "users" || got.alias != "u" {
+		t.Errorf("inScope[0] = %+v, want {dbo, users, u}", got)
+	}
+}
+
+func TestAnalyzeCursorContextDoubleQuotedQualifiedTable(t *testing.T) {
+	t.Parallel()
+	text := `SELECT * FROM "main"."users" u WHERE `
+	ctx := analyzeCursorContext(text, len([]rune(text)))
+	if len(ctx.inScope) != 1 {
+		t.Fatalf("inScope = %+v, want 1 entry", ctx.inScope)
+	}
+	got := ctx.inScope[0]
+	if got.schema != "main" || got.name != "users" || got.alias != "u" {
+		t.Errorf("inScope[0] = %+v, want {main, users, u}", got)
+	}
+}
+
+func TestParseTableRefThreePartName(t *testing.T) {
+	t.Parallel()
+	toks := sqltok.TokenizeText("analytics.dbo.users u")
+	ref, consumed := parseTableRef(toks, len([]rune("analytics.dbo.users u"))+1)
+	if consumed == 0 {
+		t.Fatal("parseTableRef did not consume the three-part name")
+	}
+	if ref.catalog != "analytics" || ref.schema != "dbo" || ref.name != "users" || ref.alias != "u" {
+		t.Errorf("ref = %+v, want {analytics dbo users u}", ref)
+	}
+}
+
+func TestQualifiersBeforeCursorThreePartName(t *testing.T) {
+	t.Parallel()
+	line := []rune("analytics.dbo.us")
+	word, start := wordBeforeCursor(line, len(line))
+	if word != "us" {
+		t.Fatalf("word = %q, want us", word)
+	}
+	qualifier, catalog := qualifiersBeforeCursor(line, start)
+	if qualifier != "dbo" || catalog != "analytics" {
+		t.Errorf("qualifier/catalog = %q/%q, want dbo/analytics", qualifier, catalog)
+	}
+}
+
+func TestAnalyzeCursorContextInsertUpdateDeleteClauses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		text string
+		want clauseKind
+	}{
+		{name: "insert target", text: "INSERT INTO ", want: clauseInsertTarget},
+		{name: "insert columns", text: "INSERT INTO users (|)", want: clauseInsertColumns},
+		{name: "values", text: "INSERT INTO users (id) VALUES (|)", want: clauseValuesList},
+		{name: "update target", text: "UPDATE ", want: clauseUpdateTarget},
+		{name: "update set", text: "UPDATE users SET ", want: clauseUpdateSet},
+		{name: "delete target", text: "DELETE FROM ", want: clauseDeleteTarget},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			text := strings.ReplaceAll(tc.text, "|", "")
+			cursor := strings.Index(tc.text, "|")
+			if cursor < 0 {
+				cursor = len([]rune(text))
+			}
+			ctx := analyzeCursorContext(text, cursor)
+			if ctx.clause != tc.want {
+				t.Errorf("clause = %s, want %s", ctx.clause, tc.want)
+			}
+		})
 	}
 }
 
@@ -420,6 +506,24 @@ func TestScenarioQualifiedAliasInWhereClause(t *testing.T) {
 	}
 }
 
+func TestScenarioQuotedQualifiedAliasShowsColumns(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, `SELECT u.| FROM "main"."users" u`)
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open after quoted table ref alias")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["id"] || !got["email"] {
+		t.Errorf("quoted table alias columns missing: %+v", e.complete.items)
+	}
+}
+
 // TestScenarioFromTargetShowsTablesNotColumns covers the reverse:
 // in FROM position, columns must NOT appear. Historically every
 // candidate came back regardless of context; this test pins the
@@ -453,6 +557,30 @@ func TestScenarioFromTargetShowsTablesNotColumns(t *testing.T) {
 	}
 }
 
+func TestScenarioSchemaQualifiedFromShowsTables(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+		`CREATE TABLE widgets (id INTEGER)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT * FROM main.|")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open after schema qualifier in FROM")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["users"] || !got["widgets"] {
+		t.Errorf("schema-qualified FROM popup missing tables: %+v", e.complete.items)
+	}
+	for _, it := range e.complete.items {
+		if it.kind == completeColumn {
+			t.Errorf("unexpected column in schema-qualified FROM popup: %+v", it)
+		}
+	}
+}
+
 // TestScenarioWhereClauseShowsColumnsAndKeywords covers the
 // WHERE-ish bucket: columns, aliases, and keywords should all be
 // available (the user might want AND/OR or a column name).
@@ -474,6 +602,42 @@ func TestScenarioWhereClauseShowsColumnsAndKeywords(t *testing.T) {
 	}
 	if !got["AND"] {
 		t.Errorf("AND keyword missing from WHERE popup: %+v", e.complete.items)
+	}
+}
+
+func TestScenarioGroupByShowsColumns(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT id FROM users GROUP BY |")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open in GROUP BY")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["id"] || !got["email"] {
+		t.Errorf("GROUP BY should show in-scope columns: %+v", e.complete.items)
+	}
+}
+
+func TestScenarioOrderByShowsColumns(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT id FROM users ORDER BY |")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open in ORDER BY")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["id"] || !got["email"] {
+		t.Errorf("ORDER BY should show in-scope columns: %+v", e.complete.items)
 	}
 }
 
@@ -558,6 +722,84 @@ func TestScenarioColumnCacheAvoidsRepeatedDriverCalls(t *testing.T) {
 		if _, ok := a.columnCache.get(tableScope{name: "users"}); !ok {
 			t.Errorf("column cache miss for users after first popup")
 		}
+	}
+}
+
+func TestScenarioQualifiedAliasAsyncStaysScoped(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+	)
+	defer done()
+	a.asyncCh = make(chan func(*app), 4)
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT u.| FROM users u")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open with a loading state")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["(loading columns)"] {
+		t.Fatalf("expected loading state instead of fallback suggestions: %+v", e.complete.items)
+	}
+	if got["FROM"] || got["users"] {
+		t.Fatalf("qualified async popup should not fall back to generic suggestions: %+v", e.complete.items)
+	}
+
+	select {
+	case fn := <-a.asyncCh:
+		fn(a)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected async column fetch callback")
+	}
+
+	if e.complete == nil {
+		t.Fatal("popup should still be open after async refresh")
+	}
+	got = completionTextSet(e.complete.items)
+	if !got["id"] || !got["email"] {
+		t.Errorf("async qualified refresh missing scoped columns: %+v", e.complete.items)
+	}
+}
+
+func TestScenarioAsyncRefreshDoesNotHijackDifferentPopup(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+		`CREATE TABLE orders (id INTEGER, total REAL)`,
+	)
+	defer done()
+	a.asyncCh = make(chan func(*app), 8)
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT u.| FROM users u")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("first popup should open")
+	}
+
+	typeInto(e, "SELECT | FROM orders")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("second popup should open")
+	}
+	before := e.complete.ctxSig
+
+	select {
+	case fn := <-a.asyncCh:
+		fn(a)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected async callback from the first popup")
+	}
+
+	if e.complete == nil {
+		t.Fatal("second popup should still be present")
+	}
+	if e.complete.ctxSig != before {
+		t.Fatalf("async refresh should not replace the newer popup context: got %q want %q", e.complete.ctxSig, before)
+	}
+	got := completionTextSet(e.complete.items)
+	if got["email"] && !got["total"] {
+		t.Errorf("first popup columns hijacked the newer popup: %+v", e.complete.items)
 	}
 }
 
@@ -892,6 +1134,119 @@ func TestScenarioFunctionsAppearInSelect(t *testing.T) {
 		if !got[want] {
 			t.Errorf("function %q missing: %+v", want, e.complete.items)
 		}
+	}
+}
+
+func TestScenarioSelectListRespectsDialectKeywords(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT | FROM users")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	got := completionTextSet(e.complete.items)
+	if got["TOP"] {
+		t.Errorf("TOP should not appear in sqlite select-list suggestions: %+v", e.complete.items)
+	}
+	if !got["FROM"] {
+		t.Errorf("FROM should still appear in select-list suggestions: %+v", e.complete.items)
+	}
+}
+
+func TestScenarioInsertIntoShowsTables(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+		`CREATE TABLE orders (id INTEGER)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "INSERT INTO |")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open in INSERT target position")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["users"] || !got["orders"] {
+		t.Errorf("insert target should show tables: %+v", e.complete.items)
+	}
+}
+
+func TestScenarioInsertColumnListShowsTargetColumns(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT, active INTEGER)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "INSERT INTO users (|)")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open in INSERT column list")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["id"] || !got["email"] || !got["active"] {
+		t.Errorf("insert column list missing target columns: %+v", e.complete.items)
+	}
+}
+
+func TestScenarioValuesListShowsFunctionsAndKeywords(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "INSERT INTO users (id, email) VALUES (|)")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open in VALUES")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["NULL"] || !got["LOWER"] {
+		t.Errorf("values list should surface expression candidates: %+v", e.complete.items)
+	}
+}
+
+func TestScenarioUpdateSetShowsTargetColumns(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER, email TEXT, active INTEGER)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "UPDATE users SET |")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open in UPDATE SET")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["id"] || !got["email"] || !got["active"] {
+		t.Errorf("UPDATE SET should show target columns: %+v", e.complete.items)
+	}
+}
+
+func TestScenarioDeleteFromShowsTables(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE users (id INTEGER)`,
+		`CREATE TABLE orders (id INTEGER)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "DELETE FROM |")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open in DELETE target position")
+	}
+	got := completionTextSet(e.complete.items)
+	if !got["users"] || !got["orders"] {
+		t.Errorf("DELETE FROM should show tables: %+v", e.complete.items)
 	}
 }
 

@@ -471,6 +471,9 @@ func (m *mainLayer) findTabByPath(abs string) int {
 func (m *mainLayer) newTab() {
 	sess := newSession()
 	sess.title = m.nextTabTitle()
+	if m.session != nil && m.session.activeCatalog != "" {
+		sess.activeCatalog = m.session.activeCatalog
+	}
 	m.sessions = append(m.sessions, sess)
 	m.activeTab = len(m.sessions) - 1
 	m.session = sess
@@ -1659,7 +1662,7 @@ func (m *mainLayer) Hints(a *app) string {
 
 // joinHints and hintIf forward to widget. Kept as local aliases so
 // Hints() builders in this package don't each import widget.
-func joinHints(parts ...string) string { return widget.JoinHints(parts...) }
+func joinHints(parts ...string) string  { return widget.JoinHints(parts...) }
 func hintIf(cond bool, h string) string { return widget.HintIf(cond, h) }
 
 func (m *mainLayer) explorerHints(_ *app) string {

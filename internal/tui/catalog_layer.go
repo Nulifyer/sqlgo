@@ -140,6 +140,13 @@ func (cl *catalogLayer) apply(a *app) {
 		m.status = "tab uses login default database"
 	} else {
 		m.session.activeCatalog = pick
+		if m.explorer != nil && m.explorer.dbMode {
+			if _, loading := m.explorer.dbLoading[pick]; !loading {
+				if _, loaded := m.explorer.dbSchemas[pick]; !loaded {
+					a.loadDatabaseSchema(pick)
+				}
+			}
+		}
 		m.status = "tab now uses " + pick
 	}
 	a.popLayer()

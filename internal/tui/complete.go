@@ -49,6 +49,7 @@ type completionItem struct {
 	text     string
 	kind     completionKind
 	typeHint string // column type, shown dim after text
+	loading  bool
 	// matches holds rune indices into text that matched the current
 	// fuzzy prefix. Populated by filterCompletions; used by
 	// drawComplete to highlight the matching runes. nil means "no
@@ -61,6 +62,7 @@ type completionState struct {
 	startCol int              // where the prefix begins in the buffer line
 	prefix   string           // prefix used to open
 	items    []completionItem // filtered matches
+	ctxSig   string
 	selected int
 }
 
@@ -113,10 +115,22 @@ func (e *editor) openCompletion(a *app) {
 	}
 
 	var items []completionItem
+	var sig string
 	if a != nil {
-		items = a.gatherCompletionsCtx(ctx)
+		result := a.gatherCompletionsCtx(ctx)
+		items = result.items
+		sig = result.signature
+		if result.awaitingColumns && len(items) == 0 {
+			items = []completionItem{{
+				text:    "(loading columns)",
+				kind:    completeKeyword,
+				loading: true,
+			}}
+		}
 	}
-	items = filterCompletions(items, word)
+	if len(items) > 0 && !allCompletionItemsLoading(items) {
+		items = filterCompletions(items, word)
+	}
 	if len(items) == 0 {
 		return
 	}
@@ -124,6 +138,7 @@ func (e *editor) openCompletion(a *app) {
 		startCol: startCol,
 		prefix:   word,
 		items:    items,
+		ctxSig:   sig,
 	}
 }
 
@@ -190,6 +205,17 @@ func parseSegmentBack(line []rune, end int) (string, int, bool) {
 		}
 		return string(line[p+1 : end-1]), p, true
 	}
+	if line[end-1] == '"' || line[end-1] == '`' {
+		quote := line[end-1]
+		p := end - 2
+		for p >= 0 && line[p] != quote {
+			p--
+		}
+		if p < 0 {
+			return "", end, false
+		}
+		return string(line[p+1 : end-1]), p, true
+	}
 	p := end
 	for p > 0 && isIdentRune(line[p-1]) {
 		p--
@@ -210,6 +236,9 @@ func (e *editor) acceptCompletion() {
 	item, ok := e.complete.current()
 	if !ok {
 		e.complete = nil
+		return
+	}
+	if item.loading {
 		return
 	}
 	_, col := e.buf.Cursor()
@@ -237,6 +266,10 @@ func filterCompletions(items []completionItem, prefix string) []completionItem {
 	}
 	var out []scored
 	for _, it := range items {
+		if it.loading {
+			out = append(out, scored{it: it, score: -1})
+			continue
+		}
 		s, matches, ok := fuzzyScore(prefix, it.text)
 		if !ok {
 			continue
@@ -310,7 +343,25 @@ func wordBeforeCursor(line []rune, col int) (prefix string, startCol int) {
 		}
 		start--
 	}
+	if start > 0 {
+		switch line[start-1] {
+		case '[', '"', '`':
+			return string(line[start:col]), start
+		}
+	}
 	return string(line[start:col]), start
+}
+
+func allCompletionItemsLoading(items []completionItem) bool {
+	if len(items) == 0 {
+		return false
+	}
+	for _, it := range items {
+		if !it.loading {
+			return false
+		}
+	}
+	return true
 }
 
 // drawComplete paints the popup anchored at the prefix start.
