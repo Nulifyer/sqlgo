@@ -22,6 +22,7 @@ import (
 	_ "github.com/Nulifyer/sqlgo/internal/db/clickhouse"
 	_ "github.com/Nulifyer/sqlgo/internal/db/d1"
 	_ "github.com/Nulifyer/sqlgo/internal/db/databricks"
+	"github.com/Nulifyer/sqlgo/internal/db/errinfo"
 	_ "github.com/Nulifyer/sqlgo/internal/db/file"
 	_ "github.com/Nulifyer/sqlgo/internal/db/firebird"
 	_ "github.com/Nulifyer/sqlgo/internal/db/flightsql"
@@ -77,6 +78,7 @@ type queryEvent struct {
 	capped    bool
 	capReason string
 	err       error
+	errInfo   errinfo.Info
 	elapsed   time.Duration
 	// tab is the *resultTab this event applies to. Set on
 	// evtResultSetStart / evtResultSetDone; nil otherwise.
@@ -899,7 +901,8 @@ func (a *app) runQueryUnsafe() {
 		sess.status = "no connection: press Ctrl+K then c to connect"
 		return
 	}
-	sql := strings.TrimSpace(sess.editor.buf.Text())
+	bufferText := sess.editor.buf.Text()
+	sql := strings.TrimSpace(bufferText)
 	if sql == "" {
 		sess.status = "nothing to run"
 		return
@@ -915,6 +918,8 @@ func (a *app) runQueryUnsafe() {
 	sess.running = true
 	sess.runnerFrame = spinnerFrames[0]
 	sess.runnerDone = make(chan struct{})
+	sess.lastQueryDriver = a.conn.Driver()
+	sess.lastQueryBufferText = bufferText
 	sess.lastQuerySQL = sql
 	sess.lastQuerySentSQL = sentSQL
 	sess.lastQueryPreambleLines = preambleLines
@@ -942,7 +947,14 @@ func (a *app) runQueryUnsafe() {
 			// in the results pane (same path as mid-stream errors) rather
 			// than only flashing on the status line.
 			firstTab.table.Done(err)
-			resultCh <- queryEvent{kind: evtResultSetDone, sess: sess, tab: firstTab, err: err, elapsed: time.Since(start)}
+			resultCh <- queryEvent{
+				kind:    evtResultSetDone,
+				sess:    sess,
+				tab:     firstTab,
+				err:     err,
+				errInfo: db.ParseErrorInfo(conn.Driver(), err, sentSQL),
+				elapsed: time.Since(start),
+			}
 			resultCh <- queryEvent{kind: evtDone, sess: sess, err: err, elapsed: time.Since(start)}
 			return
 		}
@@ -972,7 +984,15 @@ func (a *app) runQueryUnsafe() {
 				row, scanErr := rows.Scan()
 				if scanErr != nil {
 					tab.table.Done(scanErr)
-					resultCh <- queryEvent{kind: evtResultSetDone, sess: sess, tab: tab, err: scanErr, loaded: loaded, elapsed: time.Since(start)}
+					resultCh <- queryEvent{
+						kind:    evtResultSetDone,
+						sess:    sess,
+						tab:     tab,
+						err:     scanErr,
+						errInfo: db.ParseErrorInfo(conn.Driver(), scanErr, sentSQL),
+						loaded:  loaded,
+						elapsed: time.Since(start),
+					}
 					resultCh <- queryEvent{kind: evtDone, sess: sess, err: scanErr, loaded: totalLoaded + loaded, elapsed: time.Since(start)}
 					return
 				}
@@ -992,7 +1012,15 @@ func (a *app) runQueryUnsafe() {
 			}
 			if rerr := rows.Err(); rerr != nil {
 				tab.table.Done(rerr)
-				resultCh <- queryEvent{kind: evtResultSetDone, sess: sess, tab: tab, err: rerr, loaded: loaded, elapsed: time.Since(start)}
+				resultCh <- queryEvent{
+					kind:    evtResultSetDone,
+					sess:    sess,
+					tab:     tab,
+					err:     rerr,
+					errInfo: db.ParseErrorInfo(conn.Driver(), rerr, sentSQL),
+					loaded:  loaded,
+					elapsed: time.Since(start),
+				}
 				resultCh <- queryEvent{kind: evtDone, sess: sess, err: rerr, loaded: totalLoaded + loaded, elapsed: time.Since(start)}
 				return
 			}
@@ -1072,12 +1100,15 @@ func (a *app) handleQueryEvent(e queryEvent) {
 				e.tab.lastErrCol = 0
 				sess.editor.ClearErrorLocation()
 			} else {
-				info := db.ParseErrorInfo(a.errorDriverName(), e.err, sess.lastQuerySentSQL)
+				info := e.errInfo
+				if info.Message == "" {
+					info = db.ParseErrorInfo(sess.lastQueryDriver, e.err, sess.lastQuerySentSQL)
+				}
 				e.tab.lastErr = info.Format()
 				loc := info.Location.ShiftLines(-sess.lastQueryPreambleLines)
 				e.tab.lastErrLine = loc.Line
 				e.tab.lastErrCol = loc.Column
-				if loc.Line > 0 {
+				if loc.Line > 0 && sess.editor.buf.Text() == sess.lastQueryBufferText {
 					sess.editor.SetErrorLocation(loc.Line, loc.Column)
 				} else {
 					sess.editor.ClearErrorLocation()
@@ -1114,16 +1145,6 @@ func (a *app) handleQueryEvent(e queryEvent) {
 		}
 		a.recordHistory(sess, e)
 	}
-}
-
-func (a *app) errorDriverName() string {
-	if a.activeConn != nil && a.activeConn.Driver != "" {
-		return a.activeConn.Driver
-	}
-	if a.conn != nil {
-		return a.conn.Driver()
-	}
-	return ""
 }
 
 // recordHistory persists the just-finished query to the store's history

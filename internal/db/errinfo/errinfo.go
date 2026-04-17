@@ -11,7 +11,9 @@ import (
 )
 
 // Location is a 1-based line / column pair into the user's SQL text.
-// Zero values mean the driver didn't supply that part of the location.
+// Values are relative to the user's original SQL before any caller-side
+// preamble shifting. Zero values mean the driver didn't supply that part
+// of the location.
 type Location struct {
 	Line   int
 	Column int
@@ -162,16 +164,15 @@ func (info Info) Format() string {
 		switch len(info.Codes) {
 		case 1:
 			lines = append(lines, fmt.Sprintf("gds code: %d", info.Codes[0]))
-		case 2, 3, 4, 5, 6, 7, 8:
+		default:
+			if len(info.Codes) == 0 {
+				break
+			}
 			var parts []string
 			for _, code := range info.Codes {
 				parts = append(parts, strconv.Itoa(code))
 			}
 			lines = append(lines, "gds codes: "+strings.Join(parts, ", "))
-		default:
-			if len(info.Codes) > 0 {
-				lines = append(lines, fmt.Sprintf("gds code: %d", info.Codes[0]))
-			}
 		}
 	case "spanner", "bigquery":
 		appendKV(&lines, "reason", info.Reason)

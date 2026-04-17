@@ -56,13 +56,13 @@ func (driver) ParseError(err error, sql string) errinfo.Info {
 
 func findBigQueryLocation(v any) errinfo.Location {
 	switch x := v.(type) {
-	case []interface{}:
+	case []any:
 		for _, item := range x {
 			if loc := findBigQueryLocation(item); loc.Line > 0 {
 				return loc
 			}
 		}
-	case map[string]interface{}:
+	case map[string]any:
 		line := anyInt(x["line"])
 		col := anyInt(x["column"])
 		if line == 0 {

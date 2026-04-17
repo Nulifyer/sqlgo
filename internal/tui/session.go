@@ -75,6 +75,8 @@ type session struct {
 	runnerFrame            string
 	runnerDone             chan struct{}
 	cancel                 context.CancelFunc
+	lastQueryDriver        string
+	lastQueryBufferText    string
 	lastQuerySQL           string
 	lastQuerySentSQL       string
 	lastQueryPreambleLines int

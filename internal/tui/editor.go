@@ -96,13 +96,14 @@ func (e *editor) hasErrorLocation() bool {
 // handleInsert applies one keypress. Returns true if consumed.
 // nil app is fine (tests); clipboard calls become no-ops.
 func (e *editor) handleInsert(a *app, k Key) bool {
-	// Only pay for buffer snapshots while an error marker exists and
-	// could become stale on the next edit.
-	before := ""
+	// Track buffer mutation cheaply while an error marker exists so the
+	// first edit can invalidate the marker without rebuilding the whole
+	// buffer string on every keypress.
+	var beforeRev uint64
 	if e.hasErrorLocation() {
-		before = e.buf.Text()
+		beforeRev = e.buf.Revision()
 		defer func() {
-			if e.hasErrorLocation() && e.buf.Text() != before {
+			if e.buf.Revision() != beforeRev {
 				e.ClearErrorLocation()
 			}
 		}()

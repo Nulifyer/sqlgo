@@ -41,6 +41,10 @@ type buffer struct {
 	lastEditKind editKind
 	lastEditRow  int
 	lastEditCol  int
+
+	// rev increments on every text mutation. Lets editor code detect
+	// buffer changes without rebuilding the entire buffer string.
+	rev uint64
 }
 
 type editKind int
@@ -83,6 +87,10 @@ func (b *buffer) Text() string {
 	}
 	return string(out)
 }
+
+// Revision returns a monotonically increasing counter that changes on
+// every text mutation.
+func (b *buffer) Revision() uint64 { return b.rev }
 
 // LineCount returns the number of lines in the buffer (always >= 1).
 func (b *buffer) LineCount() int { return len(b.lines) }
@@ -143,6 +151,7 @@ func (b *buffer) Clear() {
 	b.lines = [][]rune{{}}
 	b.row, b.col = 0, 0
 	b.anchorSet = false
+	b.rev++
 }
 
 // SetText replaces the entire buffer with s, splitting on '\n'. The
@@ -168,6 +177,7 @@ func (b *buffer) setTextRaw(s string) {
 	b.lines = append(b.lines, []rune(s[start:]))
 	b.row = len(b.lines) - 1
 	b.col = len(b.lines[b.row])
+	b.rev++
 }
 
 // Insert writes r at the cursor and advances one column. If a
@@ -235,6 +245,7 @@ func (b *buffer) insertNewlineNoSnap() {
 	b.lines[b.row+1] = tail
 	b.row++
 	b.col = 0
+	b.rev++
 }
 
 func (b *buffer) insertRuneNoSnap(r rune) {
@@ -244,6 +255,7 @@ func (b *buffer) insertRuneNoSnap(r rune) {
 	line[b.col] = r
 	b.lines[b.row] = line
 	b.col++
+	b.rev++
 }
 
 // Backspace deletes the character before the cursor, the active
@@ -270,6 +282,7 @@ func (b *buffer) Backspace() {
 		b.lines = append(b.lines[:b.row], b.lines[b.row+1:]...)
 		b.row--
 		b.col = newCol
+		b.rev++
 		return
 	}
 	b.snapshotKind(editBackspace)
@@ -300,6 +313,7 @@ func (b *buffer) Delete() {
 		next := b.lines[b.row+1]
 		b.lines[b.row] = append(line, next...)
 		b.lines = append(b.lines[:b.row+1], b.lines[b.row+2:]...)
+		b.rev++
 		return
 	}
 	b.snapshotKind(editDelete)
@@ -534,6 +548,7 @@ func (b *buffer) MoveLineUp() {
 		b.col = len(b.lines[b.row])
 	}
 	b.lastEditKind = editNone
+	b.rev++
 }
 
 // MoveLineDown swaps the current line with the one below. No-op on the
@@ -550,6 +565,7 @@ func (b *buffer) MoveLineDown() {
 		b.col = len(b.lines[b.row])
 	}
 	b.lastEditKind = editNone
+	b.rev++
 }
 
 // DuplicateLineDown inserts a copy of the current line directly below
@@ -567,6 +583,7 @@ func (b *buffer) DuplicateLineDown() {
 		b.col = len(b.lines[b.row])
 	}
 	b.lastEditKind = editNone
+	b.rev++
 }
 
 // DuplicateLineUp inserts a copy of the current line directly above it.
@@ -584,6 +601,7 @@ func (b *buffer) DuplicateLineUp() {
 		b.col = len(b.lines[b.row])
 	}
 	b.lastEditKind = editNone
+	b.rev++
 }
 
 // isWordChar reports whether r belongs inside an identifier-like word
@@ -731,6 +749,7 @@ func (b *buffer) IndentRange(row1, row2, n int) {
 		b.anchorCol += n
 	}
 	b.lastEditKind = editNone
+	b.rev++
 }
 
 // DedentRange removes up to n leading spaces from each line in
@@ -750,6 +769,7 @@ func (b *buffer) DedentRange(row1, row2, n int) {
 		return
 	}
 	b.snapshot()
+	changed := false
 	for r := row1; r <= row2; r++ {
 		line := b.lines[r]
 		k := 0
@@ -759,6 +779,7 @@ func (b *buffer) DedentRange(row1, row2, n int) {
 		if k == 0 {
 			continue
 		}
+		changed = true
 		b.lines[r] = line[k:]
 		if b.row == r {
 			if b.col >= k {
@@ -776,6 +797,9 @@ func (b *buffer) DedentRange(row1, row2, n int) {
 		}
 	}
 	b.lastEditKind = editNone
+	if changed {
+		b.rev++
+	}
 }
 
 // DeleteSelection removes the active selection, taking an undo snapshot
@@ -807,6 +831,7 @@ func (b *buffer) deleteSelectionNoSnap() {
 	b.row = r1
 	b.col = c1
 	b.anchorSet = false
+	b.rev++
 }
 
 // normalizedSelection returns (startRow, startCol, endRow, endCol)

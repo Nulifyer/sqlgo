@@ -105,12 +105,13 @@ func (m *mainLayer) HandleInput(a *app, msg InputMsg) bool {
 	switch v := msg.(type) {
 	case PasteMsg:
 		if m.focus == FocusQuery && v.Text != "" {
-			before := m.editor.buf.Text()
+			hadDetachedFrame := len(m.sessions) == 0
+			beforeRev := m.editor.buf.Revision()
 			m.editor.buf.InsertText(v.Text)
-			if m.editor.buf.Text() != before {
+			if m.editor.buf.Revision() != beforeRev {
 				m.editor.ClearErrorLocation()
 			}
-			if len(m.sessions) == 0 && m.editor.buf.Text() != before {
+			if hadDetachedFrame && m.editor.buf.Revision() != beforeRev {
 				m.ensureActiveTab()
 			}
 			m.promoteActiveIfPreview()
@@ -411,16 +412,14 @@ func (m *mainLayer) saveAsActive(a *app) {
 	if m.activeTab < 0 || m.activeTab >= len(m.sessions) {
 		return
 	}
+	sess := m.sessions[m.activeTab]
 	seed := ""
-	if m.activeTab >= 0 && m.activeTab < len(m.sessions) {
-		sess := m.sessions[m.activeTab]
-		if sess.sourcePath != "" {
-			seed = sess.sourcePath
-		} else {
-			seed = sess.title
-			if !strings.HasSuffix(strings.ToLower(seed), ".sql") {
-				seed += ".sql"
-			}
+	if sess.sourcePath != "" {
+		seed = sess.sourcePath
+	} else {
+		seed = sess.title
+		if !strings.HasSuffix(strings.ToLower(seed), ".sql") {
+			seed += ".sql"
 		}
 	}
 	a.pushLayer(newSaveLayer(a, m.activeTab, seed, []string{".sql"}))
@@ -1875,6 +1874,9 @@ func (m *mainLayer) drawQueryEmpty(c *cellbuf, r rect) {
 		startRow = innerRow
 	}
 	for i, line := range lines {
+		if startRow+i >= innerRow+innerH {
+			break
+		}
 		col := innerCol + (innerW-len([]rune(line)))/2
 		if col < innerCol {
 			col = innerCol
