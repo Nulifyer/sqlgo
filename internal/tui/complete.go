@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Nulifyer/sqlgo/internal/tui/widget"
+	"github.com/Nulifyer/sqlgo/internal/search/fzfmatch"
 )
 
 // completionKind tags a candidate for display marker + ranking.
@@ -265,10 +265,11 @@ func filterCompletions(items []completionItem, prefix string) []completionItem {
 	return result
 }
 
-// fuzzyScore forwards to widget.FuzzyScore. Kept as a local alias so
-// completion-code call sites don't have to import widget.
+// fuzzyScore forwards to the shared fuzzy matcher so completion keeps the
+// same ranking behavior as the rest of the app's fuzzy search surfaces.
 func fuzzyScore(needle, haystack string) (int, []int, bool) {
-	return widget.FuzzyScore(needle, haystack)
+	result, ok := fzfmatch.Match(needle, haystack)
+	return result.Score, result.Positions, ok
 }
 
 // kindBonus layers context on top of the fuzzy score so columns

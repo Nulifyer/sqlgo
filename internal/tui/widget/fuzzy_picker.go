@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Nulifyer/sqlgo/internal/search/fzfmatch"
 	"github.com/Nulifyer/sqlgo/internal/tui/term"
 )
 
@@ -82,19 +83,15 @@ func (fp *FuzzyPicker) Refilter() {
 		}
 	} else {
 		for _, it := range fp.Items {
-			sL, _, okL := FuzzyScore(q, it.Label)
-			sK, _, okK := 0, []int(nil), false
+			candidates := []string{it.Label}
 			if fp.SecondaryKey {
-				sK, _, okK = FuzzyScore(q, it.Key)
+				candidates = append(candidates, it.Key)
 			}
-			if !okL && !okK {
+			result, _, ok := fzfmatch.BestMatch(q, candidates...)
+			if !ok {
 				continue
 			}
-			s := sL
-			if !okL || (okK && sK > sL) {
-				s = sK
-			}
-			it.Score = s
+			it.Score = result.Score
 			out = append(out, it)
 		}
 		if fp.SortAlpha {
