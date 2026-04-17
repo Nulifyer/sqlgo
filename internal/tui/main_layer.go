@@ -45,16 +45,19 @@ func (f FocusTarget) String() string {
 // editor. Panel focus switches are bound to Alt+1/2/3 so every printable
 // key stays available to the editor.
 type mainLayer struct {
-	// session is the active tab's state (editor, table, last-query
-	// summary). Embedded so promoted fields keep m.editor / m.table /
-	// m.lastErr working without touching the existing call sites.
-	// Switching query tabs just swaps this pointer.
+	// session is the active query frame state. When there are visible
+	// query tabs it points at the active tab's state; when there are no
+	// tabs it points at a detached frame state so promoted fields keep
+	// m.editor / m.table / m.lastErr working without forcing every call
+	// site to nil-check. Creating the first tab promotes that detached
+	// state into sessions[0].
 	*session
 
-	// sessions is the ordered list of query tabs; activeTab indexes into
-	// it. Each session owns its own editor + result tabs + runner state
-	// so a long query in one tab doesn't stall another. There is always
-	// at least one session -- closing the last tab opens a blank one.
+	// sessions is the ordered list of visible query tabs; activeTab
+	// indexes into it. Each session owns its own editor + result tabs +
+	// runner state so a long query in one tab doesn't stall another.
+	// When the list is empty the Query pane still exists, but it's just
+	// the detached frame state above rather than a visible tab.
 	sessions  []*session
 	activeTab int
 
@@ -102,7 +105,11 @@ func (m *mainLayer) HandleInput(a *app, msg InputMsg) bool {
 	switch v := msg.(type) {
 	case PasteMsg:
 		if m.focus == FocusQuery && v.Text != "" {
+			before := m.editor.buf.Text()
 			m.editor.buf.InsertText(v.Text)
+			if len(m.sessions) == 0 && m.editor.buf.Text() != before {
+				m.ensureActiveTab()
+			}
 			m.promoteActiveIfPreview()
 			return true
 		}
@@ -320,24 +327,51 @@ func (m *mainLayer) wheelQuery(a *app, delta int) {
 	if n < 0 {
 		n = -n
 	}
+	if len(m.sessions) == 0 {
+		return
+	}
 	for i := 0; i < n; i++ {
 		m.editor.handleInsert(a, Key{Kind: kind})
 	}
 }
 
 func newMainLayer() *mainLayer {
-	sess := newSession()
-	m := &mainLayer{
-		session:   sess,
-		sessions:  []*session{sess},
-		activeTab: 0,
+	return &mainLayer{
+		session:   newDetachedSession(),
+		activeTab: -1,
 		explorer:  newExplorer(),
 		focus:     FocusQuery,
 	}
-	for _, r := range "SELECT @@VERSION AS version;" {
-		m.editor.buf.Insert(r)
+}
+
+func newDetachedSession() *session {
+	s := newSession()
+	s.title = ""
+	return s
+}
+
+func (m *mainLayer) ensureActiveTab() *session {
+	if m.activeTab >= 0 && m.activeTab < len(m.sessions) {
+		m.session = m.sessions[m.activeTab]
+		return m.session
 	}
-	return m
+	if m.session == nil {
+		m.session = newDetachedSession()
+	}
+	if m.session.title == "" {
+		m.session.title = m.nextTabTitle()
+	}
+	m.sessions = append(m.sessions, m.session)
+	m.activeTab = len(m.sessions) - 1
+	return m.session
+}
+
+func (m *mainLayer) detachQueryFrame(activeCatalog string) {
+	sess := newDetachedSession()
+	sess.activeCatalog = activeCatalog
+	m.session = sess
+	m.sessions = nil
+	m.activeTab = -1
 }
 
 // saveActive writes the active tab's buffer to its sourcePath. If the
@@ -371,6 +405,9 @@ func (m *mainLayer) saveActive(a *app) {
 // focus Alt+S bind and any future menu path share the exact same seed
 // logic.
 func (m *mainLayer) saveAsActive(a *app) {
+	if m.activeTab < 0 || m.activeTab >= len(m.sessions) {
+		return
+	}
 	seed := ""
 	if m.activeTab >= 0 && m.activeTab < len(m.sessions) {
 		sess := m.sessions[m.activeTab]
@@ -469,6 +506,10 @@ func (m *mainLayer) findTabByPath(abs string) int {
 // tab so the existing call sites continue to resolve against the active
 // session.
 func (m *mainLayer) newTab() {
+	if len(m.sessions) == 0 {
+		m.ensureActiveTab()
+		return
+	}
 	sess := newSession()
 	sess.title = m.nextTabTitle()
 	if m.session != nil && m.session.activeCatalog != "" {
@@ -507,8 +548,7 @@ func (m *mainLayer) switchTab(idx int) {
 
 // closeTab removes the tab at idx. A running query on that tab is
 // cancelled first so the goroutine unwinds cleanly. Closing the last
-// tab opens a fresh blank one so the invariant len(sessions) >= 1
-// holds everywhere else.
+// visible tab leaves the query pane in its detached empty-frame state.
 func (m *mainLayer) closeTab(idx int) {
 	if idx < 0 || idx >= len(m.sessions) {
 		return
@@ -519,10 +559,7 @@ func (m *mainLayer) closeTab(idx int) {
 	}
 	m.sessions = append(m.sessions[:idx], m.sessions[idx+1:]...)
 	if len(m.sessions) == 0 {
-		fresh := newSession()
-		m.sessions = []*session{fresh}
-		m.activeTab = 0
-		m.session = fresh
+		m.detachQueryFrame(s.activeCatalog)
 		return
 	}
 	if m.activeTab >= len(m.sessions) {
@@ -557,22 +594,27 @@ func (m *mainLayer) Draw(a *app, c *cellbuf) {
 	// Query frame, replacing the static "Query" title. Saves a content
 	// row; the editor keeps the full inner panel.
 	m.drawQueryTabs(c, queryTabStripRect(p.query))
-	m.editor.draw(c, p.query, m.focus == FocusQuery)
-
-	// Paint result tab labels onto the top border of the Results frame,
-	// mirroring the query tab treatment. Keeps the full inner panel for
-	// the table / error view.
-	if len(m.results) > 0 {
-		m.drawResultTabs(c, resultTabStripRect(p.results))
-	}
-	if !m.running && m.lastErr != "" && m.lastErr != "cancelled" {
-		m.drawResultsError(c, p.results)
-	} else if m.running && m.table.ColCount() == 0 {
-		m.drawResultsRunning(c, p.results)
-	} else if m.inSuccessView() {
-		m.drawResultsSuccess(c, p.results)
+	if len(m.sessions) == 0 {
+		m.drawQueryEmpty(c, p.query)
+		m.drawResultsEmpty(c, p.results)
 	} else {
-		m.table.draw(c, p.results)
+		m.editor.draw(c, p.query, m.focus == FocusQuery)
+
+		// Paint result tab labels onto the top border of the Results frame,
+		// mirroring the query tab treatment. Keeps the full inner panel for
+		// the table / error view.
+		if len(m.results) > 0 {
+			m.drawResultTabs(c, resultTabStripRect(p.results))
+		}
+		if !m.running && m.lastErr != "" && m.lastErr != "cancelled" {
+			m.drawResultsError(c, p.results)
+		} else if m.running && m.table.ColCount() == 0 {
+			m.drawResultsRunning(c, p.results)
+		} else if m.inSuccessView() {
+			m.drawResultsSuccess(c, p.results)
+		} else {
+			m.table.draw(c, p.results)
+		}
 	}
 
 	// Bottom status bar reflects the topmost layer's hints, so modal
@@ -772,7 +814,11 @@ func (m *mainLayer) drawFullscreen(a *app, c *cellbuf) {
 	}
 	queryRect := rect{Row: 1, Col: 1, W: termW, H: bodyH}
 	drawFrameInfo(c, queryRect, "Query [fullscreen]", m.queryRightInfo(), true)
-	m.editor.draw(c, queryRect, true)
+	if len(m.sessions) == 0 {
+		m.drawQueryEmpty(c, queryRect)
+	} else {
+		m.editor.draw(c, queryRect, true)
+	}
 
 	statusRow := bodyH + 1
 	c.SetFg(colorStatusBar)
@@ -841,11 +887,17 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 	// Ctrl+R renames the active tab. Editor-focus only so it doesn't
 	// clash with the Explorer "R = refresh schema" muscle memory.
 	if k.Ctrl && k.Rune == 'r' && m.focus == FocusQuery {
+		if m.activeTab < 0 || m.activeTab >= len(m.sessions) {
+			return
+		}
 		sess := m.sessions[m.activeTab]
 		a.pushLayer(newRenameLayer(m.activeTab, sess.title))
 		return
 	}
 	if k.Ctrl && k.Kind == KeyRune && k.Rune == 'g' && m.focus == FocusQuery {
+		if len(m.sessions) == 0 {
+			return
+		}
 		row, _ := m.editor.buf.Cursor()
 		a.pushLayer(newGotoLayer(row))
 		return
@@ -986,12 +1038,18 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 	// like Ctrl+L (clear) can still be handled below if needed.
 	if m.focus == FocusQuery {
 		if k.Ctrl && k.Rune == 'l' {
+			if len(m.sessions) == 0 {
+				return
+			}
 			m.editor.buf.Clear()
 			m.promoteActiveIfPreview()
 			return
 		}
 		before := m.editor.buf.Text()
 		m.editor.handleInsert(a, k)
+		if len(m.sessions) == 0 && m.editor.buf.Text() != before {
+			m.ensureActiveTab()
+		}
 		if m.editor.buf.Text() != before {
 			m.promoteActiveIfPreview()
 		}
@@ -1072,9 +1130,17 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 			if m.session != nil {
 				m.session.activeCatalog = m.explorer.CursorCatalog()
 				if m.session.activeCatalog == "" {
-					m.status = "tab uses login default database"
+					if len(m.sessions) == 0 {
+						m.status = "new tabs use login default database"
+					} else {
+						m.status = "tab uses login default database"
+					}
 				} else {
-					m.status = "tab now uses " + m.session.activeCatalog
+					if len(m.sessions) == 0 {
+						m.status = "new tabs will use " + m.session.activeCatalog
+					} else {
+						m.status = "tab now uses " + m.session.activeCatalog
+					}
 				}
 			}
 			return
@@ -1164,7 +1230,14 @@ func (m *mainLayer) editObjectFromExplorer(a *app) {
 				mm.status = "edit: " + err.Error()
 				return
 			}
-			sess := newSession()
+			var sess *session
+			if len(mm.sessions) == 0 {
+				sess = mm.ensureActiveTab()
+			} else {
+				sess = newSession()
+				mm.sessions = append(mm.sessions, sess)
+				mm.activeTab = len(mm.sessions) - 1
+			}
 			sess.title = label
 			sess.editor.buf.SetText(body)
 			sess.editKind = kind
@@ -1174,8 +1247,6 @@ func (m *mainLayer) editObjectFromExplorer(a *app) {
 			if catalog != "" {
 				sess.activeCatalog = catalog
 			}
-			mm.sessions = append(mm.sessions, sess)
-			mm.activeTab = len(mm.sessions) - 1
 			mm.session = sess
 			mm.focus = FocusQuery
 			mm.status = ""
@@ -1431,7 +1502,9 @@ func (m *mainLayer) drawResultsError(c *cellbuf, r rect) {
 		return
 	}
 	header := "Query error:"
-	if m.lastErrLine > 0 {
+	if m.lastErrLine > 0 && m.lastErrCol > 0 {
+		header = fmt.Sprintf("Query error (line %d, col %d):", m.lastErrLine, m.lastErrCol)
+	} else if m.lastErrLine > 0 {
 		header = fmt.Sprintf("Query error (line %d):", m.lastErrLine)
 	}
 	c.SetFg(colorError)
@@ -1464,6 +1537,9 @@ func (m *mainLayer) drawResultsError(c *cellbuf, r rect) {
 // formatted output isn't what the user wanted. Empty buffers short
 // out here and in the Alt+F binding above.
 func (m *mainLayer) formatQuery() {
+	if len(m.sessions) == 0 {
+		return
+	}
 	src := m.editor.buf.Text()
 	formatted := sqltok.Format(src)
 	if formatted == src {
@@ -1501,10 +1577,16 @@ func (m *mainLayer) prefillSelectFromExplorer(a *app) {
 		}
 	}
 	if prev < 0 {
-		sess := newSession()
-		sess.preview = true
-		m.sessions = append(m.sessions, sess)
-		prev = len(m.sessions) - 1
+		if len(m.sessions) == 0 {
+			sess := m.ensureActiveTab()
+			sess.preview = true
+			prev = m.activeTab
+		} else {
+			sess := newSession()
+			sess.preview = true
+			m.sessions = append(m.sessions, sess)
+			prev = len(m.sessions) - 1
+		}
 	}
 	sess := m.sessions[prev]
 	sess.title = t.Name
@@ -1553,6 +1635,9 @@ func (m *mainLayer) handleMenuPrefix(a *app, k Key) {
 }
 
 func (m *mainLayer) resultsTitle() string {
+	if len(m.sessions) == 0 {
+		return "Results"
+	}
 	tags := ""
 	if m.table.Filter() != "" {
 		tags += " ⚲"
@@ -1571,11 +1656,17 @@ func (m *mainLayer) resultsTitle() string {
 // corner of the Query frame. Values are 1-based to match common editor
 // conventions (VS Code, vim status line).
 func (m *mainLayer) queryRightInfo() string {
+	if len(m.sessions) == 0 {
+		return ""
+	}
 	row, col := m.editor.buf.Cursor()
 	return fmt.Sprintf("Ln %d, Col %d", row+1, col+1)
 }
 
 func (m *mainLayer) resultsRightInfo(_ *app) string {
+	if len(m.sessions) == 0 {
+		return ""
+	}
 	if m.running {
 		return fmt.Sprintf("streaming %d rows / %d cols", m.table.RowCount(), m.table.ColCount())
 	}
@@ -1697,6 +1788,14 @@ func (m *mainLayer) explorerHints(_ *app) string {
 }
 
 func (m *mainLayer) queryHints(a *app) string {
+	if len(m.sessions) == 0 {
+		return joinHints(
+			"F1=help",
+			"Ctrl+Q=quit",
+			"Ctrl+T=new tab",
+			"Ctrl+O=open file",
+		)
+	}
 	connected := a.conn != nil
 	running := m.running
 	hasText := m.editor.buf.LineCount() > 1 || len(m.editor.buf.Line(0)) > 0
@@ -1717,6 +1816,9 @@ func (m *mainLayer) queryHints(a *app) string {
 }
 
 func (m *mainLayer) resultsHints(a *app) string {
+	if len(m.sessions) == 0 {
+		return joinHints("F1=help", "Ctrl+Q=quit", "Ctrl+K=menu")
+	}
 	if m.inErrorView(a) {
 		return joinHints(
 			"F1=help",
@@ -1745,4 +1847,50 @@ func (m *mainLayer) commandMenuHints(a *app) string {
 		"q=quit",
 		"Esc=cancel",
 	)
+}
+
+func (m *mainLayer) drawQueryEmpty(c *cellbuf, r rect) {
+	innerRow := r.Row + 1
+	innerCol := r.Col + 1
+	innerW := r.W - 2
+	innerH := r.H - 2
+	if innerW <= 0 || innerH <= 0 {
+		return
+	}
+	lines := []string{
+		"No query tabs open.",
+		"Press Ctrl+T to open a tab, or select a table in Explorer.",
+	}
+	startRow := innerRow + innerH/2 - len(lines)/2
+	if startRow < innerRow {
+		startRow = innerRow
+	}
+	for i, line := range lines {
+		col := innerCol + (innerW-len([]rune(line)))/2
+		if col < innerCol {
+			col = innerCol
+		}
+		c.SetFg(colorStatusBar)
+		c.WriteAt(startRow+i, col, truncate(line, innerW))
+		c.ResetStyle()
+	}
+}
+
+func (m *mainLayer) drawResultsEmpty(c *cellbuf, r rect) {
+	innerRow := r.Row + 1
+	innerCol := r.Col + 1
+	innerW := r.W - 2
+	innerH := r.H - 2
+	if innerW <= 0 || innerH <= 0 {
+		return
+	}
+	msg := "Results appear here after you run a query."
+	row := innerRow + innerH/2
+	col := innerCol + (innerW-len([]rune(msg)))/2
+	if col < innerCol {
+		col = innerCol
+	}
+	c.SetFg(colorStatusBar)
+	c.WriteAt(row, col, truncate(msg, innerW))
+	c.ResetStyle()
 }

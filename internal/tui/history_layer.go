@@ -322,7 +322,8 @@ func (h *historyLayer) useSelected(a *app) {
 	}
 	sql := h.entries[h.list.Selected].SQL
 	m := a.mainLayerPtr()
-	m.editor.buf.SetText(sql)
+	sess := m.ensureActiveTab()
+	sess.editor.buf.SetText(sql)
 	m.focus = FocusQuery
 	a.popLayer()
 }

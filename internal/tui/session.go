@@ -25,6 +25,7 @@ type resultTab struct {
 	lastCapReason string
 	lastErr       string
 	lastErrLine   int
+	lastErrCol    int
 
 	// resultsErrScroll is the top-line offset into the wrapped error text
 	// when lastErr is rendered in place of the table. Reset when a new
@@ -70,12 +71,14 @@ type session struct {
 	// query in one tab does not block the Run action in another. The
 	// *sql.DB pool underlying every adapter is already goroutine-safe,
 	// so parallel queries just need independent cancel handles.
-	running        bool
-	runnerFrame    string
-	runnerDone     chan struct{}
-	cancel         context.CancelFunc
-	lastQuerySQL   string
-	lastQueryStart time.Time
+	running                bool
+	runnerFrame            string
+	runnerDone             chan struct{}
+	cancel                 context.CancelFunc
+	lastQuerySQL           string
+	lastQuerySentSQL       string
+	lastQueryPreambleLines int
+	lastQueryStart         time.Time
 
 	// explainBusy is set while an EXPLAIN fetch + parse is in flight.
 	// Gates the 'p' key so a second press can't stack a duplicate

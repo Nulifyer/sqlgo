@@ -128,7 +128,7 @@ type app struct {
 	tunnel *sshtunnel.Tunnel
 
 	// Async query. The resultCh is a single pump shared across sessions;
-	// per-session runner state (running/cancel/lastQuerySQL/lastQueryStart)
+	// per-session runner state (running/cancel/lastQuery*/lastQueryStart)
 	// lives on *session so parallel tabs don't fight over one cancel handle.
 	resultCh chan queryEvent
 
@@ -342,7 +342,7 @@ func Run(opts Options) error {
 	}
 	ml := newMainLayer()
 	if opts.InitialQuery != "" {
-		ml.editor.buf.SetText(opts.InitialQuery)
+		ml.ensureActiveTab().editor.buf.SetText(opts.InitialQuery)
 	}
 	a.layers = []Layer{ml}
 
@@ -903,8 +903,11 @@ func (a *app) runQueryUnsafe() {
 		sess.status = "nothing to run"
 		return
 	}
+	sentSQL := sql
+	preambleLines := 0
 	if pre := a.catalogPreamble(sess); pre != "" {
-		sql = pre + "\n" + sql
+		sentSQL = pre + "\n" + sql
+		preambleLines = strings.Count(pre, "\n") + 1
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sess.cancel = cancel
@@ -912,6 +915,8 @@ func (a *app) runQueryUnsafe() {
 	sess.runnerFrame = spinnerFrames[0]
 	sess.runnerDone = make(chan struct{})
 	sess.lastQuerySQL = sql
+	sess.lastQuerySentSQL = sentSQL
+	sess.lastQueryPreambleLines = preambleLines
 	sess.lastQueryStart = time.Now()
 	sess.resetResults()
 	sess.status = "running query…"
@@ -929,7 +934,7 @@ func (a *app) runQueryUnsafe() {
 	resultCh := a.resultCh
 	go func() {
 		defer cancel()
-		rows, err := conn.Query(ctx, sql)
+		rows, err := conn.Query(ctx, sentSQL)
 		if err != nil {
 			// Attach the error to the seeded placeholder tab so it renders
 			// in the results pane (same path as mid-stream errors) rather
@@ -1061,13 +1066,19 @@ func (a *app) handleQueryEvent(e queryEvent) {
 		if e.err != nil {
 			if errors.Is(e.err, context.Canceled) {
 				e.tab.lastErr = "cancelled"
+				e.tab.lastErrLine = 0
+				e.tab.lastErrCol = 0
 			} else {
 				e.tab.lastErr = e.err.Error()
-				e.tab.lastErrLine = errinfo.Line(e.err, sess.lastQuerySQL)
+				loc := errinfo.Locate(e.err, sess.lastQuerySentSQL).
+					ShiftLines(-sess.lastQueryPreambleLines)
+				e.tab.lastErrLine = loc.Line
+				e.tab.lastErrCol = loc.Column
 			}
 		} else {
 			e.tab.lastErr = ""
 			e.tab.lastErrLine = 0
+			e.tab.lastErrCol = 0
 		}
 	case evtDone:
 		sess.running = false

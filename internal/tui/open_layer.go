@@ -229,10 +229,11 @@ func (ol *openLayer) load(a *app) {
 		return
 	}
 	text := string(data)
-	m.editor.buf.SetText(text)
-	m.session.sourcePath = path
-	m.session.savedText = text
-	m.session.title = filepath.Base(path)
+	sess := m.ensureActiveTab()
+	sess.editor.buf.SetText(text)
+	sess.sourcePath = path
+	sess.savedText = text
+	sess.title = filepath.Base(path)
 	recordDir(a, store.LastDirOpen, filepath.Dir(path))
 	a.popLayer()
 	m.status = fmt.Sprintf("loaded %d bytes from %s", len(data), path)
