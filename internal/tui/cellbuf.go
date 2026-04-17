@@ -16,8 +16,8 @@ const (
 	attrReverse   = term.AttrReverse
 )
 
-func newCellbuf(w, h int) *cellbuf         { return term.NewCellbuf(w, h) }
-func defaultStyle() Style                  { return term.DefaultStyle() }
-func runeDisplayWidth(r rune) int          { return term.RuneDisplayWidth(r) }
-func stringDisplayWidth(s string) int      { return term.StringDisplayWidth(s) }
-func isWideRune(r rune) bool               { return term.IsWideRune(r) }
+func newCellbuf(w, h int) *cellbuf    { return term.NewCellbuf(w, h) }
+func defaultStyle() Style             { return term.DefaultStyle() }
+func runeDisplayWidth(r rune) int     { return term.RuneDisplayWidth(r) }
+func stringDisplayWidth(s string) int { return term.StringDisplayWidth(s) }
+func isWideRune(r rune) bool          { return term.IsWideRune(r) }

@@ -49,7 +49,7 @@ func DefaultStyle() Style {
 type CellAttrs uint8
 
 const (
-	AttrBold      CellAttrs = 1 << iota
+	AttrBold CellAttrs = 1 << iota
 	AttrUnderline
 	AttrReverse
 )

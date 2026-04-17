@@ -277,7 +277,7 @@ type keyEventRecord struct {
 }
 
 var (
-	modKernel32            = windows.NewLazySystemDLL("kernel32.dll")
-	procPeekConsoleInputW  = modKernel32.NewProc("PeekConsoleInputW")
-	procReadConsoleInputW  = modKernel32.NewProc("ReadConsoleInputW")
+	modKernel32           = windows.NewLazySystemDLL("kernel32.dll")
+	procPeekConsoleInputW = modKernel32.NewProc("PeekConsoleInputW")
+	procReadConsoleInputW = modKernel32.NewProc("ReadConsoleInputW")
 )
