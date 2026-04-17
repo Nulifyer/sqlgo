@@ -839,10 +839,10 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		m.handleMenuPrefix(a, k)
 		return
 	}
-	// Ctrl+C cancels a running query. When no query is running, it
-	// falls through so the editor can use Ctrl+C as "copy selection"
-	// without stealing it back from the cancel binding.
-	if k.Ctrl && k.Rune == 'c' && m.running {
+	// Ctrl+C cancels a running query only from the Results pane. Query
+	// focus keeps Ctrl+C available for editor copy even while a run is
+	// in flight.
+	if k.Ctrl && k.Rune == 'c' && m.running && m.focus == FocusResults {
 		a.cancelQuery()
 		return
 	}
@@ -1815,7 +1815,6 @@ func (m *mainLayer) queryHints(a *app) string {
 		"F1=help",
 		"Ctrl+Q=quit",
 		hintIf(connected && !running, "F5=run"),
-		hintIf(running, "Ctrl+C=cancel"),
 		hintIf(hasText, "Alt+F=format"),
 		hintIf(hasText || hasSource, "Ctrl+S=save"),
 		hintIf(hasSource, "Ctrl+K S=save as"),
@@ -1839,6 +1838,7 @@ func (m *mainLayer) resultsHints(a *app) string {
 	return joinHints(
 		"F1=help",
 		"Ctrl+Q=quit",
+		hintIf(m.running, "Ctrl+C=cancel"),
 		hintIf(hasRows, "Enter=inspect"),
 		hintIf(hasRows, "y=copy"),
 		hintIf(m.table.HasColumns(), "Ctrl+E=export"),

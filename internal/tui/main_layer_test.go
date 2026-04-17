@@ -87,3 +87,47 @@ func TestEnsureActiveTabPromotesDetachedFrame(t *testing.T) {
 		t.Fatalf("buffer = %q, want %q", got, "select 1")
 	}
 }
+
+func TestCtrlCCancelsOnlyFromResultsFocus(t *testing.T) {
+	t.Parallel()
+	m := newMainLayer()
+	a := &app{layers: []Layer{m}}
+	sess := m.ensureActiveTab()
+	sess.running = true
+	cancelled := false
+	sess.cancel = func() { cancelled = true }
+	m.focus = FocusResults
+
+	m.HandleKey(a, Key{Kind: KeyRune, Rune: 'c', Ctrl: true})
+
+	if !cancelled {
+		t.Fatal("Ctrl+C should cancel when Results is focused")
+	}
+	if got := sess.status; got != "cancelling…" {
+		t.Fatalf("status = %q, want %q", got, "cancelling…")
+	}
+}
+
+func TestCtrlCDoesNotCancelFromQueryFocus(t *testing.T) {
+	t.Parallel()
+	m := newMainLayer()
+	a := &app{layers: []Layer{m}}
+	sess := m.ensureActiveTab()
+	sess.running = true
+	cancelled := false
+	sess.cancel = func() { cancelled = true }
+	m.focus = FocusQuery
+	m.editor.buf.SetText("select 1")
+	m.editor.buf.SetCursor(0, 0)
+	m.editor.buf.SetAnchor(0, 0)
+	m.editor.buf.SetCursor(0, len(m.editor.buf.Line(0)))
+
+	m.HandleKey(a, Key{Kind: KeyRune, Rune: 'c', Ctrl: true})
+
+	if cancelled {
+		t.Fatal("Ctrl+C should not cancel when Query is focused")
+	}
+	if got := sess.status; got != "" {
+		t.Fatalf("status = %q, want empty", got)
+	}
+}

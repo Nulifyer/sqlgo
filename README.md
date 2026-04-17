@@ -37,7 +37,7 @@ No mouse required. No Electron. One binary.
 
 - **Three-panel layout** -- Explorer (schema tree), Query (editor), Results (table). Toggle focus with `Alt+1/2/3`.
 - **Fullscreen editor** -- `F11` maximizes the query pane.
-- **Streaming results** -- rows land live with a running count; cancel mid-query with `Ctrl+C`.
+- **Streaming results** -- rows land live with a running count; cancel mid-query from Results with `Ctrl+C`.
 - **Multi-connection** -- saved connections switch at runtime from the command menu.
 
 ### ⌨️ Editor
@@ -137,7 +137,6 @@ Open the command menu with `Ctrl+K` for global actions (connect, disconnect, his
 | | `F8` | Key-debug overlay |
 | **Query editor** | `F5` | Run query |
 | | `F9` | EXPLAIN current query |
-| | `Ctrl+C` | Cancel running query (copies selection when idle) |
 | | `Ctrl+O` | Open SQL file |
 | | `Ctrl+S` / `Alt+S` | Save tab / save as |
 | | `Ctrl+R` | Rename tab |
@@ -150,7 +149,7 @@ Open the command menu with `Ctrl+K` for global actions (connect, disconnect, his
 | | `Ctrl+Space` | Autocomplete |
 | | `Ctrl+F` | Find / replace |
 | | `Ctrl+G` | Go to line |
-| | `Ctrl+A` / `Ctrl+X` / `Ctrl+V` | Select all / cut / paste |
+| | `Ctrl+A` / `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Select all / copy / cut / paste |
 | | `Ctrl+Alt+Up/Dn` | Add multi-cursor line |
 | | `Alt+Up/Dn` | Move line up / down |
 | | `Shift+Alt+Up/Dn` | Duplicate line up / down |
@@ -169,7 +168,8 @@ Open the command menu with `Ctrl+K` for global actions (connect, disconnect, his
 | | `e` | Open DDL for view / routine / trigger |
 | | `u` | Pin active database to cursor |
 | | `R` | Refresh schema |
-| **Results** | `Ctrl+E` | Export results |
+| **Results** | `Ctrl+C` | Cancel running query |
+| | `Ctrl+E` | Export results |
 | | `Arrows` / `PgUp/PgDn` / `Home/End` | Navigate cells |
 | | `Enter` | Inspect cell |
 | | `y` / `Y` / `Alt+A` | Copy cell / row / all (TSV) |
