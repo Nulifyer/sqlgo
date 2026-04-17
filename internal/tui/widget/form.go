@@ -214,9 +214,17 @@ func (f *Form) Draw(c *term.Cellbuf, r term.Rect, opts FormDrawOpts) {
 			}
 			writeTailSlice(c, lineRow, vCol, "< "+display+" >", maxVal)
 		case ff.Mask:
-			DrawInputMasked(c, ff.Input, lineRow, vCol, maxVal)
+			if i == f.Active {
+				DrawInputMasked(c, ff.Input, lineRow, vCol, maxVal)
+			} else {
+				DrawInputMaskedNoCursor(c, ff.Input, lineRow, vCol, maxVal)
+			}
 		default:
-			DrawInput(c, ff.Input, lineRow, vCol, maxVal)
+			if i == f.Active {
+				DrawInput(c, ff.Input, lineRow, vCol, maxVal)
+			} else {
+				DrawInputNoCursor(c, ff.Input, lineRow, vCol, maxVal)
+			}
 		}
 		y++
 	}

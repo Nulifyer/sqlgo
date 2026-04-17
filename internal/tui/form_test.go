@@ -112,6 +112,29 @@ func TestMSSQLEncryptFieldIsCycler(t *testing.T) {
 	}
 }
 
+// TestSQLServerAliasReusesMSSQLFormSpec ensures the label-only alias
+// gets the same add-connection flow as mssql instead of falling back to
+// the generic no-options form.
+func TestSQLServerAliasReusesMSSQLFormSpec(t *testing.T) {
+	t.Parallel()
+	f := newConnForm("test", nil)
+	f.setDriver("sqlserver")
+	if got := engineSpecFor("sqlserver").label; got != "MS SQL Server" {
+		t.Fatalf("sqlserver label = %q, want %q", got, "MS SQL Server")
+	}
+	f.active = coreCount
+	ff := f.activeField()
+	if ff == nil || !ff.IsCycler() {
+		t.Fatalf("sqlserver encrypt should reuse mssql cycler field, got %+v", ff)
+	}
+	if got := f.fixed[corePort].Input.String(); got != "1433" {
+		t.Fatalf("sqlserver default port = %q, want %q", got, "1433")
+	}
+	if got := f.fixed[coreUser].Input.String(); got != "sa" {
+		t.Fatalf("sqlserver default user = %q, want %q", got, "sa")
+	}
+}
+
 // TestMySQLTLSFieldIsCycler confirms the tls field on the MySQL
 // spec is constrained.
 func TestMySQLTLSFieldIsCycler(t *testing.T) {

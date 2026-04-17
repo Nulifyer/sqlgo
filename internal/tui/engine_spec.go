@@ -54,7 +54,7 @@ var (
 var engineSpecs = []engineSpec{
 	{
 		driver:      "mssql",
-		label:       "MSSQL",
+		label:       "MS SQL Server",
 		defaultPort: 1433,
 		defaultUser: "sa",
 		fields: []engineOption{
@@ -590,6 +590,7 @@ var engineSpecs = []engineSpec{
 // engineSpec (fields, defaults) it reuses. Kept in sync with
 // internal/db/aliases.
 var engineAliases = map[string]string{
+	"sqlserver":   "mssql",
 	"mariadb":     "mysql",
 	"cockroachdb": "postgres",
 	"supabase":    "postgres",
@@ -601,6 +602,7 @@ var engineAliases = map[string]string{
 
 // aliasLabels gives each alias its display name in the connect form.
 var aliasLabels = map[string]string{
+	"sqlserver":   "MS SQL Server",
 	"mariadb":     "MariaDB",
 	"cockroachdb": "CockroachDB",
 	"supabase":    "Supabase",

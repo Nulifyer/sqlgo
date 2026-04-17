@@ -26,9 +26,9 @@ func (i *Input) SetString(s string) {
 	i.cur = len(i.runes)
 }
 
-func (i *Input) Cursor() int    { return i.cur }
-func (i *Input) Len() int       { return len(i.runes) }
-func (i *Input) Runes() []rune  { return i.runes }
+func (i *Input) Cursor() int   { return i.cur }
+func (i *Input) Len() int      { return len(i.runes) }
+func (i *Input) Runes() []rune { return i.runes }
 
 func (i *Input) Insert(r rune) {
 	i.runes = append(i.runes, 0)
@@ -104,7 +104,14 @@ func (i *Input) Handle(k term.Key) bool {
 // scrolling so the cursor stays visible, and places the terminal
 // cursor at the correct position.
 func DrawInput(c *term.Cellbuf, in *Input, row, col, maxW int) {
-	drawInputRunes(c, in.runes, in.cur, row, col, maxW)
+	drawInputRunes(c, in.runes, in.cur, row, col, maxW, true)
+}
+
+// DrawInputNoCursor is DrawInput without placing the terminal cursor.
+// Used by multi-field widgets that want only the active field to own
+// cursor placement.
+func DrawInputNoCursor(c *term.Cellbuf, in *Input, row, col, maxW int) {
+	drawInputRunes(c, in.runes, in.cur, row, col, maxW, false)
 }
 
 // DrawInputMasked is DrawInput with every rune displayed as '*'.
@@ -115,10 +122,20 @@ func DrawInputMasked(c *term.Cellbuf, in *Input, row, col, maxW int) {
 	for i := range masked {
 		masked[i] = '*'
 	}
-	drawInputRunes(c, masked, in.cur, row, col, maxW)
+	drawInputRunes(c, masked, in.cur, row, col, maxW, true)
 }
 
-func drawInputRunes(c *term.Cellbuf, rs []rune, cur, row, col, maxW int) {
+// DrawInputMaskedNoCursor is DrawInputMasked without placing the
+// terminal cursor.
+func DrawInputMaskedNoCursor(c *term.Cellbuf, in *Input, row, col, maxW int) {
+	masked := make([]rune, len(in.runes))
+	for i := range masked {
+		masked[i] = '*'
+	}
+	drawInputRunes(c, masked, in.cur, row, col, maxW, false)
+}
+
+func drawInputRunes(c *term.Cellbuf, rs []rune, cur, row, col, maxW int, placeCursor bool) {
 	offset := 0
 	if len(rs) > maxW {
 		offset = len(rs) - maxW
@@ -134,5 +151,7 @@ func drawInputRunes(c *term.Cellbuf, rs []rune, cur, row, col, maxW int) {
 		visible = visible[:maxW]
 	}
 	c.WriteAt(row, col, string(visible))
-	c.PlaceCursor(row, col+cur-offset)
+	if placeCursor {
+		c.PlaceCursor(row, col+cur-offset)
+	}
 }
