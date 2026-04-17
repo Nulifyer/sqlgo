@@ -2,258 +2,143 @@ package tui
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
+
+	"github.com/Nulifyer/sqlgo/internal/store"
+	"github.com/Nulifyer/sqlgo/internal/tui/widget"
 )
 
 // openLayer is the modal overlay that loads a .sql file into the editor.
-// It scans the current working directory for *.sql files on open and
-// shows them as a searchable list; the search box filters by substring
-// match on the relative path. Enter loads the highlighted file.
+// It's a thin wrapper around widget.FilePicker in ModeOpenMulti: the
+// picker owns the Dir field, browse list, Find input, marks, and mouse
+// hit-test. This layer dispatches the single-level ListDir scan, drives
+// the scan spinner, and resolves Enter into either a single-tab load or
+// a marked batch load.
 type openLayer struct {
-	search   *input
-	all      []openEntry // discovered files, sorted most-recent first
-	results  []openEntry // current filter output
-	selected int
-	scroll   int
-	status   string
-	scanErr  string
+	picker *widget.FilePicker
+	clicks clickTracker
 
-	// marked is the set of abs paths toggled with Tab. When non-empty,
-	// Enter opens each marked file in its own editor tab instead of
-	// loading the highlighted entry into the current tab. Keyed by
-	// absolute path so marks survive filter changes.
-	marked map[string]bool
-
-	// scanning drives the spinner in the status line while the
-	// background walk is in flight. scanFrame holds the current
-	// braille frame; scanGen fences out stale goroutine results if
-	// the layer is somehow reused.
+	status    string
 	scanning  bool
 	scanFrame string
 
-	lastListTop int
-	lastListH   int
-	clicks      clickTracker
+	// initDone is flipped on first Draw so the picker's OnDirChange
+	// binds to *app exactly once and the initial scan fires.
+	initDone bool
 }
-
-// openEntry is a discovered SQL file. rel is the display path (relative
-// to the scan root when possible, else the absolute path). abs is what
-// os.ReadFile gets.
-type openEntry struct {
-	rel     string
-	abs     string
-	modUnix int64
-}
-
-// openScanMaxDepth caps the recursive walk so a stray open inside a huge
-// tree (home dir, Go module cache, etc.) doesn't stall the UI.
-const openScanMaxDepth = 6
-
-// openScanMaxFiles bounds total results for the same reason. 2000 is
-// well beyond any realistic per-repo SQL file count and still renders
-// instantly.
-const openScanMaxFiles = 2000
 
 func newOpenLayer(a *app, seed string) *openLayer {
+	dir := seedDir(a, store.LastDirOpen)
+	fp := widget.NewFilePicker(widget.FilePickerOpts{
+		Mode: widget.ModeOpenMulti,
+		Dir:  dir,
+		Exts: []string{".sql"},
+	})
+	if seed != "" {
+		fp.SetSearch(seed)
+	}
 	ol := &openLayer{
-		search:    newInput(seed),
-		marked:    map[string]bool{},
+		picker:    fp,
 		scanning:  true,
 		scanFrame: spinnerFrames[0],
 	}
-	ol.filter()
-	ol.startScan(a)
+	ol.status = ol.scanFrame + " scanning for .sql files…"
 	return ol
 }
 
-// startScan walks the cwd for *.sql on a goroutine, posting the
-// discovered entries back via asyncCh. A spinner runs in parallel so
-// the status line stays live on big trees. Layer identity is checked
-// on each async callback so if the user Esc's the picker mid-walk the
-// stale result just gets dropped.
-func (ol *openLayer) startScan(a *app) {
+// triggerScan is the OnDirChange callback wired on first Draw. Lists
+// one directory level on a goroutine, posts back via asyncCh with a
+// staleness fence so results from a superseded base are dropped. A
+// spinner runs alongside so the status line stays live.
+func (ol *openLayer) triggerScan(a *app) {
+	base := ol.picker.ScanBase()
+
+	ol.scanning = true
+	ol.scanFrame = spinnerFrames[0]
+	ol.status = ol.scanFrame + " scanning for .sql files…"
 	done := make(chan struct{})
 	go runSpinner(a, done, func(a *app, frame string) {
 		if top, ok := a.topLayer().(*openLayer); ok && top == ol && ol.scanning {
 			ol.scanFrame = frame
-			ol.refreshStatus()
+			ol.status = frame + " scanning for .sql files…"
 		}
 	})
 	go func() {
-		entries, scanErr := scanSQLFiles()
+		rows, err := widget.ListDir(base)
 		close(done)
-		a.asyncCh <- func(a *app) {
-			if top, ok := a.topLayer().(*openLayer); !ok || top != ol {
+		errStr := ""
+		if err != nil {
+			errStr = err.Error()
+		}
+		a.asyncCh <- func(app *app) {
+			if top, ok := app.topLayer().(*openLayer); !ok || top != ol {
 				return
 			}
-			ol.all = entries
-			if scanErr != "" {
-				ol.scanErr = scanErr
+			if ol.picker.ScanBase() != base {
+				return
 			}
 			ol.scanning = false
-			ol.filter()
+			ol.picker.ApplyRows(base, rows, errStr)
+			ol.refreshStatus()
 		}
 	}()
 }
 
-// refreshStatus recomputes just the status line without retouching
-// the filter. Used during scan so each spinner tick lands a new frame
-// but doesn't rerun the substring match on a stable ol.all.
+// fileCounts reports total files in the current directory and how many
+// are visible after the Open-mode filter/search. Dir + parent rows are
+// excluded from both counts so the status line matches user intent
+// ("N of M files").
+func (ol *openLayer) fileCounts() (total, visible int) {
+	p := ol.picker
+	for _, r := range p.Rows {
+		if r.Kind == widget.RowFile {
+			total++
+		}
+	}
+	for _, i := range p.Filtered {
+		if p.Rows[i].Kind == widget.RowFile {
+			visible++
+		}
+	}
+	return
+}
+
+// refreshStatus recomputes the status line from picker state. Called
+// after any input / scan event that changes counts or marks.
 func (ol *openLayer) refreshStatus() {
-	if ol.scanning {
-		ol.status = ol.scanFrame + " scanning for .sql files…"
-	}
-}
-
-// scan walks the current working directory looking for *.sql files. It
-// skips common vendor / build / VCS trees so the list stays
-// signal-heavy. A .sqlgoignore file in the scan root can add or remove
-// directory names from that skip set: each non-blank, non-# line is a
-// basename to skip, or a `!name` to re-include one of the defaults
-// (e.g. `!vendor` when a project keeps schema SQL under vendor/).
-// scanSQLFiles does the filesystem walk off the main goroutine.
-// Returns the discovered entries (sorted most-recent first) and, on
-// failure, a printable error string that gets surfaced on the picker.
-func scanSQLFiles() ([]openEntry, string) {
-	root, err := os.Getwd()
-	if err != nil {
-		return nil, "cwd: " + err.Error()
-	}
-	skip := loadSkipSet(root)
-	rootDepth := strings.Count(filepath.Clean(root), string(filepath.Separator))
-	var out []openEntry
-	var scanErr string
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, werr error) error {
-		if werr != nil {
-			if d != nil && d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			base := d.Name()
-			if path != root && skip[base] {
-				return fs.SkipDir
-			}
-			depth := strings.Count(filepath.Clean(path), string(filepath.Separator)) - rootDepth
-			if depth > openScanMaxDepth {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if !strings.EqualFold(filepath.Ext(d.Name()), ".sql") {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			rel = path
-		}
-		rel = filepath.ToSlash(rel)
-		info, err := d.Info()
-		var mod int64
-		if err == nil {
-			mod = info.ModTime().Unix()
-		}
-		out = append(out, openEntry{rel: rel, abs: path, modUnix: mod})
-		if len(out) >= openScanMaxFiles {
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	if walkErr != nil {
-		scanErr = "scan: " + walkErr.Error()
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].modUnix != out[j].modUnix {
-			return out[i].modUnix > out[j].modUnix
-		}
-		return out[i].rel < out[j].rel
-	})
-	return out, scanErr
-}
-
-// defaultSkipDirs are the directory basenames we skip by default when
-// scanning for SQL files. Kept narrow on purpose: these are trees that
-// almost never contain query files a user is editing. A .sqlgoignore in
-// the scan root can add to or remove from this set.
-var defaultSkipDirs = []string{
-	"node_modules", "vendor", "dist", "build", "out", "target",
-	"bin", "obj", ".git", ".hg", ".svn", ".idea", ".vscode",
-}
-
-// loadSkipSet returns the effective directory-skip set for a scan
-// rooted at root. The defaults seed the set; a .sqlgoignore file at the
-// root may layer overrides on top: bare `name` adds, `!name` removes.
-// Blank lines and `#` comments are ignored.
-func loadSkipSet(root string) map[string]bool {
-	skip := make(map[string]bool, len(defaultSkipDirs))
-	for _, n := range defaultSkipDirs {
-		skip[n] = true
-	}
-	data, err := os.ReadFile(filepath.Join(root, ".sqlgoignore"))
-	if err != nil {
-		return skip
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "!") {
-			delete(skip, strings.TrimPrefix(line, "!"))
-			continue
-		}
-		skip[line] = true
-	}
-	return skip
-}
-
-// filter recomputes results from the current search string. Matching is
-// case-insensitive substring on the relative path; an empty query shows
-// everything.
-func (ol *openLayer) filter() {
-	q := strings.ToLower(strings.TrimSpace(ol.search.String()))
-	if q == "" {
-		ol.results = ol.all
-	} else {
-		out := make([]openEntry, 0, len(ol.all))
-		for _, e := range ol.all {
-			if strings.Contains(strings.ToLower(e.rel), q) {
-				out = append(out, e)
-			}
-		}
-		ol.results = out
-	}
-	if ol.selected >= len(ol.results) {
-		ol.selected = len(ol.results) - 1
-	}
-	if ol.selected < 0 {
-		ol.selected = 0
-	}
-	ol.scroll = 0
+	p := ol.picker
 	switch {
 	case ol.scanning:
 		ol.status = ol.scanFrame + " scanning for .sql files…"
-	case ol.scanErr != "":
-		ol.status = ol.scanErr
-	case len(ol.all) == 0:
-		ol.status = "no .sql files found under cwd"
-	case len(ol.results) == 0:
-		ol.status = "no matches"
+	case p.ScanErr() != "":
+		ol.status = p.ScanErr()
 	default:
-		if n := len(ol.marked); n > 0 {
-			ol.status = fmt.Sprintf("%d / %d files -- %d marked (Enter opens each in a new tab)", len(ol.results), len(ol.all), n)
-		} else {
-			ol.status = fmt.Sprintf("%d / %d files", len(ol.results), len(ol.all))
+		total, visible := ol.fileCounts()
+		switch {
+		case total == 0:
+			ol.status = "no .sql files in " + p.DirBase()
+		case visible == 0:
+			ol.status = "no matches"
+		default:
+			n := len(p.MarkedPaths())
+			if n > 0 {
+				ol.status = fmt.Sprintf("%d / %d files -- %d marked (Enter opens each in a new tab)", visible, total, n)
+			} else {
+				ol.status = fmt.Sprintf("%d / %d files", visible, total)
+			}
 		}
 	}
 }
 
 func (ol *openLayer) Draw(a *app, c *cellbuf) {
+	if !ol.initDone {
+		ol.initDone = true
+		ol.picker.SetOnDirChange(func() { ol.triggerScan(a) })
+		ol.picker.NotifyDirChange()
+	}
+
 	boxW := 100
 	if boxW > a.term.width-dialogMargin {
 		boxW = a.term.width - dialogMargin
@@ -277,161 +162,50 @@ func (ol *openLayer) Draw(a *app, c *cellbuf) {
 		col = 1
 	}
 	r := rect{Row: row, Col: col, W: boxW, H: boxH}
-	c.FillRect(r)
-	drawFrame(c, r, "Open SQL file", true)
+	widget.DrawDialog(c, r, "Open SQL file", true)
 
-	innerCol := col + 2
-
-	c.WriteAt(row+1, innerCol, "Search:")
-	searchCol := innerCol + 8
-	searchW := boxW - 8 - 4
-	if searchW < 1 {
-		searchW = 1
-	}
-	val := ol.search.String()
-	rs := []rune(val)
-	if len(rs) > searchW {
-		rs = rs[len(rs)-searchW:]
-	}
-	c.WriteAt(row+1, searchCol, string(rs))
-
-	c.HLine(row+2, col+1, col+r.W-2, '─')
-
-	listTop := row + 3
-	listBot := row + r.H - 3
-	listH := listBot - listTop + 1
-	if listH < 1 {
-		listH = 1
-	}
-	ol.lastListTop = listTop
-	ol.lastListH = listH
-
-	if len(ol.results) == 0 {
-		msg := "(no .sql files)"
-		if strings.TrimSpace(ol.search.String()) != "" {
-			msg = "(no matches -- Enter loads the typed path directly)"
-		}
-		c.WriteAt(listTop, innerCol, truncate(msg, boxW-4))
-	} else {
-		if ol.selected < ol.scroll {
-			ol.scroll = ol.selected
-		}
-		if ol.selected >= ol.scroll+listH {
-			ol.scroll = ol.selected - listH + 1
-		}
-		if ol.scroll < 0 {
-			ol.scroll = 0
-		}
-		for i := 0; i < listH; i++ {
-			idx := ol.scroll + i
-			if idx >= len(ol.results) {
-				break
-			}
-			e := ol.results[idx]
-			selMark := "  "
-			if idx == ol.selected {
-				selMark = "▶ "
-			}
-			pickMark := "  "
-			if ol.marked[e.abs] {
-				pickMark = "● "
-			}
-			line := truncate(selMark+pickMark+e.rel, boxW-4)
-			if idx == ol.selected {
-				c.SetFg(colorBorderFocused)
-				c.WriteAt(listTop+i, innerCol, line)
-				c.ResetStyle()
-			} else {
-				c.WriteAt(listTop+i, innerCol, line)
-			}
-		}
-	}
+	ol.picker.Draw(c, r, widget.DrawOpts{
+		FocusedFG: colorBorderFocused,
+		DimStyle:  Style{FG: ansiBrightBlack, BG: ansiDefaultBG},
+		Truncate:  truncate,
+	})
 
 	if ol.status != "" {
+		innerCol := r.Col + 2
+		innerW := r.W - 4
 		c.SetFg(colorStatusBar)
-		c.WriteAt(r.Row+r.H-2, innerCol, truncate(ol.status, boxW-4))
+		c.WriteAt(r.Row+r.H-2, innerCol, truncate(ol.status, innerW))
 		c.ResetStyle()
 	}
-
-	// Place cursor last so any intermediate style changes from the list
-	// render don't leave the terminal cursor in the wrong column.
-	c.PlaceCursor(row+1, searchCol+len(rs))
 }
 
 func (ol *openLayer) HandleKey(a *app, k Key) {
-	switch k.Kind {
-	case KeyEsc:
+	if k.Kind == KeyEsc {
 		a.popLayer()
 		return
-	case KeyUp:
-		if ol.selected > 0 {
-			ol.selected--
-		}
-		return
-	case KeyDown:
-		if ol.selected < len(ol.results)-1 {
-			ol.selected++
-		}
-		return
-	case KeyPgUp:
-		ol.selected -= 10
-		if ol.selected < 0 {
-			ol.selected = 0
-		}
-		return
-	case KeyPgDn:
-		ol.selected += 10
-		if ol.selected > len(ol.results)-1 {
-			ol.selected = len(ol.results) - 1
-		}
-		return
-	case KeyTab:
-		ol.toggleMark()
-		return
-	case KeyEnter:
+	}
+	res := ol.picker.HandleKey(k)
+	if res.OpenRequested {
 		ol.load(a)
 		return
 	}
-	ol.search.handle(k)
-	ol.filter()
+	ol.refreshStatus()
 }
 
-// toggleMark flips the marked state for the highlighted entry and
-// refreshes the status line.
-func (ol *openLayer) toggleMark() {
-	if ol.selected < 0 || ol.selected >= len(ol.results) {
-		return
-	}
-	abs := ol.results[ol.selected].abs
-	if ol.marked[abs] {
-		delete(ol.marked, abs)
-	} else {
-		ol.marked[abs] = true
-	}
-	// Refresh the status line so the marked count stays current
-	// without re-running the filter.
-	if n := len(ol.marked); n > 0 {
-		ol.status = fmt.Sprintf("%d / %d files -- %d marked (Enter opens each in a new tab)", len(ol.results), len(ol.all), n)
-	} else {
-		ol.status = fmt.Sprintf("%d / %d files", len(ol.results), len(ol.all))
-	}
-}
-
-// load resolves the target path(s): if any entries are marked, each is
-// loaded into its own new editor tab; otherwise the highlighted entry
-// is loaded into the current tab, falling back to treating the search
-// box contents as a direct path if the results list is empty.
+// load resolves Enter into a load. Marked entries open each in a new
+// tab; otherwise the highlighted entry loads into the current tab,
+// falling back to treating the Find field's text as a direct path when
+// no entries match.
 func (ol *openLayer) load(a *app) {
-	if len(ol.marked) > 0 {
-		ol.loadMarked(a)
+	if marked := ol.picker.MarkedPaths(); len(marked) > 0 {
+		ol.loadMarked(a, marked)
 		return
 	}
 	var path string
-	switch {
-	case len(ol.results) > 0 && ol.selected >= 0 && ol.selected < len(ol.results):
-		path = ol.results[ol.selected].abs
-	default:
-		path = strings.TrimSpace(ol.search.String())
+	if e, ok := ol.picker.SelectedEntry(); ok {
+		path = e.Abs
+	} else {
+		path = strings.TrimSpace(ol.picker.SearchText())
 	}
 	if path == "" {
 		ol.status = "path is required"
@@ -444,6 +218,7 @@ func (ol *openLayer) load(a *app) {
 	m := a.mainLayerPtr()
 	if idx := m.findTabByPath(path); idx >= 0 {
 		m.switchTab(idx)
+		recordDir(a, store.LastDirOpen, filepath.Dir(path))
 		a.popLayer()
 		m.status = fmt.Sprintf("switched to open tab for %s", filepath.Base(path))
 		return
@@ -458,29 +233,26 @@ func (ol *openLayer) load(a *app) {
 	m.session.sourcePath = path
 	m.session.savedText = text
 	m.session.title = filepath.Base(path)
+	recordDir(a, store.LastDirOpen, filepath.Dir(path))
 	a.popLayer()
 	m.status = fmt.Sprintf("loaded %d bytes from %s", len(data), path)
 }
 
-// loadMarked opens each marked entry in its own new editor tab.
-// Iterates ol.all for deterministic order (scan order, most-recent
-// first) rather than map iteration. Silently skips files that fail to
-// read and reports the count of loaded/skipped in the status line.
-func (ol *openLayer) loadMarked(a *app) {
+// loadMarked opens each marked path in its own new editor tab. Files
+// already open in another tab are switched to rather than re-opened;
+// read failures are counted and surfaced on the main view.
+func (ol *openLayer) loadMarked(a *app, marked []string) {
 	m := a.mainLayerPtr()
 	var loaded, skipped, reused int
-	var lastErr string
+	var lastErr, lastLoadedPath string
 	lastIdx := -1
-	for _, e := range ol.all {
-		if !ol.marked[e.abs] {
-			continue
-		}
-		if idx := m.findTabByPath(e.abs); idx >= 0 {
+	for _, abs := range marked {
+		if idx := m.findTabByPath(abs); idx >= 0 {
 			reused++
 			lastIdx = idx
 			continue
 		}
-		data, err := os.ReadFile(e.abs)
+		data, err := os.ReadFile(abs)
 		if err != nil {
 			skipped++
 			lastErr = err.Error()
@@ -489,11 +261,12 @@ func (ol *openLayer) loadMarked(a *app) {
 		m.newTab()
 		text := string(data)
 		m.editor.buf.SetText(text)
-		m.session.sourcePath = e.abs
+		m.session.sourcePath = abs
 		m.session.savedText = text
-		m.session.title = filepath.Base(e.abs)
+		m.session.title = filepath.Base(abs)
 		loaded++
 		lastIdx = m.activeTab
+		lastLoadedPath = abs
 	}
 	if loaded == 0 && reused == 0 {
 		if lastErr != "" {
@@ -506,6 +279,9 @@ func (ol *openLayer) loadMarked(a *app) {
 	if lastIdx >= 0 {
 		m.switchTab(lastIdx)
 	}
+	if lastLoadedPath != "" {
+		recordDir(a, store.LastDirOpen, filepath.Dir(lastLoadedPath))
+	}
 	a.popLayer()
 	switch {
 	case skipped > 0:
@@ -517,47 +293,26 @@ func (ol *openLayer) loadMarked(a *app) {
 	}
 }
 
-// HandleInput routes mouse events: wheel scrolls the selection; left
-// click selects the row under the pointer; double-click loads it.
+// HandleInput delegates mouse events to the picker, then applies the
+// click-tracker so a double-click triggers a load.
 func (ol *openLayer) HandleInput(a *app, msg InputMsg) bool {
 	mm, ok := msg.(MouseMsg)
 	if !ok {
 		return false
 	}
-	switch mm.Button {
-	case MouseButtonWheelUp:
-		if ol.selected > 0 {
-			ol.selected--
-		}
-		return true
-	case MouseButtonWheelDown:
-		if ol.selected < len(ol.results)-1 {
-			ol.selected++
-		}
-		return true
-	case MouseButtonLeft:
-		if mm.Action != MouseActionPress {
-			return false
-		}
-		if ol.lastListH <= 0 {
-			return false
-		}
-		rowIdx := mm.Y - ol.lastListTop
-		if rowIdx < 0 || rowIdx >= ol.lastListH {
-			return false
-		}
-		entryIdx := ol.scroll + rowIdx
-		if entryIdx < 0 || entryIdx >= len(ol.results) {
-			return false
-		}
-		ol.selected = entryIdx
+	idx, consumed := ol.picker.HandleMouse(mm)
+	if !consumed {
+		return false
+	}
+	if idx >= 0 && mm.Button == MouseButtonLeft && mm.Action == MouseActionPress {
 		count := ol.clicks.bump(mm)
 		if count >= 2 {
 			ol.load(a)
+			return true
 		}
-		return true
 	}
-	return false
+	ol.refreshStatus()
+	return true
 }
 
 func (ol *openLayer) View(a *app) View {
@@ -566,12 +321,20 @@ func (ol *openLayer) View(a *app) View {
 
 func (ol *openLayer) Hints(a *app) string {
 	_ = a
-	hasResults := len(ol.results) > 0
-	return joinHints(
-		"type=search",
-		hintIf(hasResults, "Up/Dn/PgUp/PgDn=move"),
-		hintIf(hasResults, "Tab=mark"),
-		"Enter=load",
-		"Esc=cancel",
-	)
+	switch ol.picker.Focus {
+	case widget.FocusDir:
+		return joinHints("type=dir", "Tab=next", "Enter=descend", "Esc=cancel")
+	case widget.FocusList:
+		has := ol.picker.HasEntries()
+		return joinHints(
+			hintIf(has, "Up/Dn/PgUp/PgDn=move"),
+			hintIf(has, "Space=mark"),
+			"Tab=next",
+			"Enter=open",
+			"Esc=cancel",
+		)
+	case widget.FocusInput:
+		return joinHints("type=filter", "Tab=next", "Enter=open", "Esc=cancel")
+	}
+	return joinHints("Tab=next", "Enter=open", "Esc=cancel")
 }

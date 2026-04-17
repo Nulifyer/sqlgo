@@ -1,6 +1,10 @@
 package tui
 
-import "time"
+import (
+	"time"
+
+	"github.com/Nulifyer/sqlgo/internal/tui/widget"
+)
 
 // filterDebounce is the quiet window after the last keystroke before the
 // table-wide filter recompute fires. Tuned for "feels live" but still
@@ -33,44 +37,25 @@ func newFilterLayer(seed string) *filterLayer {
 }
 
 func (fl *filterLayer) Draw(a *app, c *cellbuf) {
-	boxW := 64
-	if boxW > a.term.width-4 {
-		boxW = a.term.width - dialogMargin
-	}
-	if boxW < 40 {
-		boxW = 40
-	}
-	boxH := 9
-	row := (a.term.height - boxH) / 2
-	col := (a.term.width - boxW) / 2
-	if row < 1 {
-		row = 1
-	}
-	if col < 1 {
-		col = 1
-	}
-	r := rect{Row: row, Col: col, W: boxW, H: boxH}
-	c.FillRect(r)
-	drawFrame(c, r, "Filter results", true)
+	r := widget.CenterDialog(a.term.width, a.term.height, widget.DialogOpts{
+		PrefW: 64, PrefH: 9, MinW: 40, MinH: 9, Margin: dialogMargin,
+	})
+	row, col := r.Row, r.Col
+	widget.DrawDialog(c, r, "Filter results", true)
 
 	innerCol := col + 2
 	c.WriteAt(row+1, innerCol, "Filter:")
 	valCol := innerCol + 8
-	maxVal := boxW - 8 - 4
+	maxVal := r.W - 8 - 4
 	if maxVal < 1 {
 		maxVal = 1
 	}
 	val := fl.input.String()
-	rs := []rune(val)
-	if len(rs) > maxVal {
-		rs = rs[len(rs)-maxVal:]
-	}
-	c.WriteAt(row+1, valCol, string(rs))
-	c.PlaceCursor(row+1, valCol+len(rs))
+	drawInput(c, fl.input, row+1, valCol, maxVal)
 
 	// Syntax hint line so the user can discover column / regex mode
 	// without having to read the docs.
-	c.WriteAt(row+3, innerCol, truncate("syntax: text  |  col:text  |  /regex/", boxW-4))
+	c.WriteAt(row+3, innerCol, truncate("syntax: text  |  col:text  |  /regex/", r.W-4))
 
 	m := a.mainLayerPtr()
 	msg := ""
@@ -79,13 +64,13 @@ func (fl *filterLayer) Draw(a *app, c *cellbuf) {
 	} else {
 		msg = formatFilterStatus(m.table.RowCount(), m.table.Filter())
 	}
-	c.WriteAt(row+4, innerCol, truncate(msg, boxW-4))
+	c.WriteAt(row+4, innerCol, truncate(msg, r.W-4))
 
 	// Any parse warning from SetFilter lives one line below the
 	// status. Dimmed so it doesn't compete with the match count.
 	if note := m.table.FilterNote(); note != "" {
 		c.SetFg(colorBorderFocused)
-		c.WriteAt(r.Row+r.H-2, innerCol, truncate("⚠ "+note, boxW-4))
+		c.WriteAt(r.Row+r.H-2, innerCol, truncate("⚠ "+note, r.W-4))
 		c.ResetStyle()
 	}
 }
@@ -106,7 +91,7 @@ func (fl *filterLayer) HandleKey(a *app, k Key) {
 		a.popLayer()
 		return
 	}
-	fl.input.handle(k)
+	fl.input.Handle(k)
 	fl.gen++
 	gen := fl.gen
 	want := fl.input.String()

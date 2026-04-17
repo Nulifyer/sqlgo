@@ -13,6 +13,7 @@ import (
 	"github.com/Nulifyer/sqlgo/internal/db"
 	"github.com/Nulifyer/sqlgo/internal/output"
 	"github.com/Nulifyer/sqlgo/internal/sqltok"
+	"github.com/Nulifyer/sqlgo/internal/tui/widget"
 )
 
 // FocusTarget identifies which panel owns keyboard input in the main view.
@@ -353,7 +354,7 @@ func (m *mainLayer) saveActive(a *app) {
 		if !strings.HasSuffix(strings.ToLower(seed), ".sql") {
 			seed += ".sql"
 		}
-		a.pushLayer(newSaveLayer(m.activeTab, seed))
+		a.pushLayer(newSaveLayer(a, m.activeTab, seed, []string{".sql"}))
 		return
 	}
 	text := sess.editor.buf.Text()
@@ -382,7 +383,7 @@ func (m *mainLayer) saveAsActive(a *app) {
 			}
 		}
 	}
-	a.pushLayer(newSaveLayer(m.activeTab, seed))
+	a.pushLayer(newSaveLayer(a, m.activeTab, seed, []string{".sql"}))
 }
 
 // runExplainPlan kicks off an EXPLAIN for the active editor buffer.
@@ -563,6 +564,8 @@ func (m *mainLayer) Draw(a *app, c *cellbuf) {
 	}
 	if !m.running && m.lastErr != "" && m.lastErr != "cancelled" {
 		m.drawResultsError(c, p.results)
+	} else if m.running && m.table.ColCount() == 0 {
+		m.drawResultsRunning(c, p.results)
 	} else if m.inSuccessView() {
 		m.drawResultsSuccess(c, p.results)
 	} else {
@@ -699,7 +702,12 @@ func resultTabLabelWith(t *resultTab, active bool, suffix string) string {
 // resultTabSuffix returns the annotation glyph for tab idx. Filter
 // state lives on the active m.table only, so inactive tabs never
 // carry a filter marker -- switching to them resets the table filter.
+// While the session is running, tab 0 shows the braille spinner frame
+// so the user has an unambiguous indicator that results are pending.
 func (m *mainLayer) resultTabSuffix(idx int) string {
+	if idx == 0 && m.session != nil && m.session.running && m.session.runnerFrame != "" {
+		return m.session.runnerFrame
+	}
 	if idx == m.activeResult && m.table.Filter() != "" {
 		return "⚲"
 	}
@@ -947,6 +955,29 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		}
 	}
 
+	// Ctrl+F is routed by the focused panel so the user gets the
+	// find/search affordance that fits whatever they're looking at:
+	// editor -> find/replace overlay, explorer -> inline name search,
+	// results grid -> filter overlay.
+	if k.Ctrl && k.Rune == 'f' {
+		switch m.focus {
+		case FocusQuery:
+			seed := m.editor.buf.Selection()
+			fl := newFindLayer(seed)
+			if seed != "" {
+				m.editor.SetSearch(seed)
+			}
+			a.pushLayer(fl)
+			return
+		case FocusExplorer:
+			m.explorer.ActivateSearch()
+			return
+		case FocusResults:
+			a.pushLayer(newFilterLayer(m.table.Filter()))
+			return
+		}
+	}
+
 	// Query panel is non-modal: every keystroke goes straight to the
 	// editor. The editor ignores Ctrl+<rune> combos so global shortcuts
 	// like Ctrl+L (clear) can still be handled below if needed.
@@ -954,16 +985,6 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		if k.Ctrl && k.Rune == 'l' {
 			m.editor.buf.Clear()
 			m.promoteActiveIfPreview()
-			return
-		}
-		// Ctrl+F: find/replace. Seed with current selection if any.
-		if k.Ctrl && k.Rune == 'f' {
-			seed := m.editor.buf.Selection()
-			fl := newFindLayer(seed)
-			if seed != "" {
-				m.editor.SetSearch(seed)
-			}
-			a.pushLayer(fl)
 			return
 		}
 		before := m.editor.buf.Text()
@@ -987,6 +1008,15 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 // tables and views, or opens the DDL for routines/triggers. 's' always
 // prefills a SELECT; 'e' opens the DDL for views/routines/triggers.
 func (m *mainLayer) handleExplorerKey(a *app, k Key) {
+	// When the explorer's inline search bar is open, typed runes and
+	// Backspace go to the input. Nav keys (Up/Down/PgUp/PgDn/Enter) and
+	// Esc fall through to the handlers below -- Esc closes the bar,
+	// everything else drives the filtered cursor.
+	if m.explorer.IsSearching() {
+		if m.explorer.HandleSearchKey(k) {
+			return
+		}
+	}
 	switch k.Kind {
 	case KeyUp:
 		m.explorer.MoveCursor(-1)
@@ -1153,7 +1183,7 @@ func (m *mainLayer) editObjectFromExplorer(a *app) {
 // handleResultsKey processes keys when the Results panel is focused.
 // Navigation moves the cell cursor (Up/Dn/Lt/Rt); PgUp/PgDn page the
 // row cursor. Home/End jump to the first/last row. 'w' toggles wrap.
-// 's' cycles sort state on the current column; '/' opens the filter
+// 's' cycles sort state on the current column; Ctrl+F opens the filter
 // prompt; 'y' / 'Y' copy cell / row to the system clipboard; Enter
 // opens the cell inspector.
 func (m *mainLayer) handleResultsKey(a *app, k Key) {
@@ -1222,8 +1252,6 @@ func (m *mainLayer) handleResultsKey(a *app, k Key) {
 			}
 			m.status = fmt.Sprintf("sort: %s %s", name, dir)
 		}
-	case '/':
-		a.pushLayer(newFilterLayer(m.table.Filter()))
 	case 'y':
 		if !m.table.HasColumns() {
 			return
@@ -1353,6 +1381,36 @@ func (m *mainLayer) drawResultsSuccess(c *cellbuf, r rect) {
 		col = innerCol
 	}
 	c.SetFg(colorOK)
+	c.WriteAt(row, col, truncate(msg, innerW))
+	c.ResetStyle()
+}
+
+// drawResultsRunning renders a centered "running query…" placeholder
+// with the current spinner frame while a query is in flight and has
+// not yet produced columns. Keeps the Results panel visually alive
+// even when the session has no previous result set to fall back to.
+func (m *mainLayer) drawResultsRunning(c *cellbuf, r rect) {
+	innerRow := r.Row + 1
+	innerCol := r.Col + 1
+	innerW := r.W - 2
+	innerH := r.H - 2
+	if innerW <= 0 || innerH <= 0 {
+		return
+	}
+	frame := ""
+	if m.session != nil {
+		frame = m.session.runnerFrame
+	}
+	msg := "running query…"
+	if frame != "" {
+		msg = frame + " " + msg
+	}
+	row := innerRow + innerH/2
+	col := innerCol + (innerW-len([]rune(msg)))/2
+	if col < innerCol {
+		col = innerCol
+	}
+	c.SetFg(colorStatusBar)
 	c.WriteAt(row, col, truncate(msg, innerW))
 	c.ResetStyle()
 }
@@ -1599,53 +1657,38 @@ func (m *mainLayer) Hints(a *app) string {
 	return joinHints("F1=help", "Ctrl+Q=quit")
 }
 
-// joinHints concatenates non-empty pieces with two spaces between them.
-// Empty strings are dropped so callers can write `hint(cond, "...")`
-// helpers and pass their results straight in.
-func joinHints(parts ...string) string {
-	out := ""
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		if out == "" {
-			out = p
-		} else {
-			out += "  " + p
-		}
-	}
-	return out
-}
-
-// hintIf returns h when cond is true, "" otherwise. Keeps the branches in
-// Hints builders readable.
-func hintIf(cond bool, h string) string {
-	if cond {
-		return h
-	}
-	return ""
-}
+// joinHints and hintIf forward to widget. Kept as local aliases so
+// Hints() builders in this package don't each import widget.
+func joinHints(parts ...string) string { return widget.JoinHints(parts...) }
+func hintIf(cond bool, h string) string { return widget.HintIf(cond, h) }
 
 func (m *mainLayer) explorerHints(_ *app) string {
+	searching := m.explorer.IsSearching()
+	searchFocused := m.explorer.IsSearchFocused()
 	enterHint := ""
 	eHint := ""
-	switch m.explorer.SelectedKind() {
-	case itemTable:
-		enterHint = "Enter=SELECT"
-	case itemView:
-		enterHint = "Enter=SELECT"
-		eHint = "e=edit"
-	case itemProcedure, itemFunction, itemTrigger:
-		enterHint = "Enter=edit"
-		eHint = "e=edit"
-	case itemSchema, itemSubgroup:
-		enterHint = "Enter=expand"
+	if !searchFocused {
+		switch m.explorer.SelectedKind() {
+		case itemTable:
+			enterHint = "Enter=SELECT"
+		case itemView:
+			enterHint = "Enter=SELECT"
+			eHint = "e=edit"
+		case itemProcedure, itemFunction, itemTrigger:
+			enterHint = "Enter=edit"
+			eHint = "e=edit"
+		case itemSchema, itemSubgroup:
+			enterHint = "Enter=expand"
+		}
 	}
 	return joinHints(
 		"F1=help",
 		"Ctrl+Q=quit",
 		enterHint,
 		eHint,
+		hintIf(!searching, "Ctrl+F=search"),
+		hintIf(searching && !searchFocused, "Ctrl+F=edit query"),
+		hintIf(searching, "Esc=close search"),
 		"Ctrl+K=menu",
 	)
 }

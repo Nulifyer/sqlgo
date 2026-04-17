@@ -99,6 +99,21 @@ var migrations = []string{
 	// strings mean the connection uses the preset driver path.
 	`ALTER TABLE connections ADD COLUMN profile TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE connections ADD COLUMN transport TEXT NOT NULL DEFAULT ''`,
+
+	// v6: per-cwd last-directory memory for file modals.
+	//
+	// cwd = the directory sqlgo was launched from (absolute + cleaned).
+	// kind = 'open' | 'save' | 'export'. dir = remembered target dir.
+	// PK(cwd, kind) so each shell/project remembers its own recent
+	// folders per action. No FK: rows outlive deletion of target dirs
+	// and are silently fallen back on by the UI when the dir is gone.
+	`CREATE TABLE last_dirs (
+        cwd        TEXT NOT NULL,
+        kind       TEXT NOT NULL,
+        dir        TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (cwd, kind)
+    )`,
 }
 
 // migrate brings the schema forward using the package-level migrations

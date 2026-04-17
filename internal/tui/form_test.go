@@ -17,12 +17,12 @@ func TestPostgresSSLModeCyclerWrapsThroughKnownValues(t *testing.T) {
 	// the postgres spec, so coreCount is the index.
 	f.active = coreCount
 	ff := f.activeField()
-	if ff == nil || !ff.isCycler() {
+	if ff == nil || !ff.IsCycler() {
 		t.Fatalf("active field at coreCount should be sslmode cycler, got %+v", ff)
 	}
 
 	// Initial value is empty (driver default).
-	if got := ff.in.String(); got != "" {
+	if got := ff.Input.String(); got != "" {
 		t.Errorf("initial sslmode = %q, want empty", got)
 	}
 
@@ -31,13 +31,13 @@ func TestPostgresSSLModeCyclerWrapsThroughKnownValues(t *testing.T) {
 	for i := 1; i < len(postgresSSLModeValues); i++ {
 		f.handle(Key{Kind: KeyRight})
 		want := postgresSSLModeValues[i]
-		if got := ff.in.String(); got != want {
+		if got := ff.Input.String(); got != want {
 			t.Errorf("after %d Right: sslmode = %q, want %q", i, got, want)
 		}
 	}
 	// One more Right wraps back to the first entry.
 	f.handle(Key{Kind: KeyRight})
-	if got := ff.in.String(); got != postgresSSLModeValues[0] {
+	if got := ff.Input.String(); got != postgresSSLModeValues[0] {
 		t.Errorf("after wrap: sslmode = %q, want %q", got, postgresSSLModeValues[0])
 	}
 }
@@ -53,13 +53,13 @@ func TestCyclerLeftArrowGoesBackwards(t *testing.T) {
 	// From empty, Left should wrap to the last entry.
 	f.handle(Key{Kind: KeyLeft})
 	last := postgresSSLModeValues[len(postgresSSLModeValues)-1]
-	if got := ff.in.String(); got != last {
+	if got := ff.Input.String(); got != last {
 		t.Errorf("Left from empty = %q, want %q", got, last)
 	}
 	// Left again steps to the second-to-last.
 	f.handle(Key{Kind: KeyLeft})
 	want := postgresSSLModeValues[len(postgresSSLModeValues)-2]
-	if got := ff.in.String(); got != want {
+	if got := ff.Input.String(); got != want {
 		t.Errorf("Left #2 = %q, want %q", got, want)
 	}
 }
@@ -73,7 +73,7 @@ func TestCyclerSwallowsPrintableKeys(t *testing.T) {
 	f.active = coreCount
 	ff := f.activeField()
 	f.handle(Key{Kind: KeyRune, Rune: 'x'})
-	if got := ff.in.String(); got != "" {
+	if got := ff.Input.String(); got != "" {
 		t.Errorf("after printable key, sslmode = %q, want empty", got)
 	}
 }
@@ -90,11 +90,11 @@ func TestCyclerUnknownValueResetsToFirstEntry(t *testing.T) {
 	})
 	f.active = coreCount
 	ff := f.activeField()
-	if got := ff.in.String(); got != "not-a-real-mode" {
+	if got := ff.Input.String(); got != "not-a-real-mode" {
 		t.Fatalf("imported sslmode = %q, want preserved", got)
 	}
 	f.handle(Key{Kind: KeyRight})
-	if got := ff.in.String(); got != postgresSSLModeValues[0] {
+	if got := ff.Input.String(); got != postgresSSLModeValues[0] {
 		t.Errorf("after Right on unknown value, sslmode = %q, want %q", got, postgresSSLModeValues[0])
 	}
 }
@@ -107,7 +107,7 @@ func TestMSSQLEncryptFieldIsCycler(t *testing.T) {
 	// encrypt is the first engine field on the mssql spec.
 	f.active = coreCount
 	ff := f.activeField()
-	if ff == nil || !ff.isCycler() {
+	if ff == nil || !ff.IsCycler() {
 		t.Errorf("mssql encrypt should be a cycler, got %+v", ff)
 	}
 }
@@ -119,7 +119,7 @@ func TestMySQLTLSFieldIsCycler(t *testing.T) {
 	f := newConnForm("test", &config.Connection{Driver: "mysql"})
 	f.active = coreCount
 	ff := f.activeField()
-	if ff == nil || !ff.isCycler() {
+	if ff == nil || !ff.IsCycler() {
 		t.Errorf("mysql tls should be a cycler, got %+v", ff)
 	}
 }
@@ -134,14 +134,14 @@ func TestFreeFormEngineFieldStillTakesInput(t *testing.T) {
 	// and sslrootcert) and is NOT a cycler.
 	f.active = coreCount + 2
 	ff := f.activeField()
-	if ff == nil || ff.isCycler() {
+	if ff == nil || ff.IsCycler() {
 		t.Fatalf("application_name should be free-form, got %+v", ff)
 	}
 	// Type "myapp".
 	for _, r := range "myapp" {
 		f.handle(Key{Kind: KeyRune, Rune: r})
 	}
-	if got := ff.in.String(); got != "myapp" {
+	if got := ff.Input.String(); got != "myapp" {
 		t.Errorf("application_name = %q, want %q", got, "myapp")
 	}
 }
@@ -152,11 +152,11 @@ func TestFreeFormEngineFieldStillTakesInput(t *testing.T) {
 func TestCyclerValueRoundTripsThroughToConnection(t *testing.T) {
 	t.Parallel()
 	f := newConnForm("test", &config.Connection{Driver: "postgres"})
-	f.fixed[coreName].in.SetString("test")
-	f.fixed[coreHost].in.SetString("db.example.com")
-	f.fixed[coreUser].in.SetString("u")
-	f.fixed[corePassword].in.SetString("p")
-	f.fixed[coreDatabase].in.SetString("d")
+	f.fixed[coreName].Input.SetString("test")
+	f.fixed[coreHost].Input.SetString("db.example.com")
+	f.fixed[coreUser].Input.SetString("u")
+	f.fixed[corePassword].Input.SetString("p")
+	f.fixed[coreDatabase].Input.SetString("d")
 	f.active = coreCount
 	// Step to "require".
 	for _, v := range postgresSSLModeValues {
@@ -182,11 +182,11 @@ func TestCyclerValueRoundTripsThroughToConnection(t *testing.T) {
 func TestCyclerEmptyValueIsOmittedFromOptions(t *testing.T) {
 	t.Parallel()
 	f := newConnForm("test", &config.Connection{Driver: "postgres"})
-	f.fixed[coreName].in.SetString("test")
-	f.fixed[coreHost].in.SetString("db.example.com")
-	f.fixed[coreUser].in.SetString("u")
-	f.fixed[corePassword].in.SetString("p")
-	f.fixed[coreDatabase].in.SetString("d")
+	f.fixed[coreName].Input.SetString("test")
+	f.fixed[coreHost].Input.SetString("db.example.com")
+	f.fixed[coreUser].Input.SetString("u")
+	f.fixed[corePassword].Input.SetString("p")
+	f.fixed[coreDatabase].Input.SetString("d")
 	// Leave sslmode at its default empty.
 	c, err := f.toConnection()
 	if err != nil {

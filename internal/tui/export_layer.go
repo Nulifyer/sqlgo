@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 	"github.com/Nulifyer/sqlgo/internal/output"
+	"github.com/Nulifyer/sqlgo/internal/store"
+	"github.com/Nulifyer/sqlgo/internal/tui/widget"
 )
 
 // exportFormats is the ordered list shown by the in-layer picker.
@@ -28,48 +29,47 @@ var exportFormats = []output.Format{
 }
 
 // exportLayer is the modal overlay that prompts for an export path and
-// writes the current results buffer to disk. The format is chosen via
-// an in-layer picker (Tab / Shift+Tab) which keeps the path extension
-// in sync; FormatFromPath is still used as the initial guess when the
-// user hand-edits the extension directly.
-//
-// Kept as its own layer (rather than wedging it into the command menu)
-// because it owns a live input field and a transient status display.
+// writes the current results buffer to disk. Directory + filename +
+// format are all driven by widget.FilePicker in ModeSaveTarget, with the
+// Format row always visible since exportFormats has eight entries.
 type exportLayer struct {
-	path   *input
-	format output.Format
-	status string
+	picker *widget.FilePicker
 	// query / tableName are snapshotted at construction so a mid-edit
 	// to the query editor doesn't change what gets written to the
 	// MarkdownQuery / SQLInsert outputs.
 	query     string
 	tableName string
-	// confirmOverwrite is set after the first Enter finds an existing
-	// file. A second Enter (with the path unchanged) proceeds with the
-	// write; any edit to the path clears the flag so the user re-confirms
-	// against the new path.
-	confirmOverwrite bool
-	confirmedPath    string
 	// busy is set while a goroutine is writing the file. Input and
 	// Enter are ignored during this window so the user can't kick off a
 	// second export or dismiss the layer mid-write (Esc still cancels
 	// the UI, but the write keeps running -- that's fine, it's local
 	// disk).
-	busy  bool
-	frame string
+	busy     bool
+	frame    string
+	status   string
+	initDone bool
 }
 
-// newExportLayer builds a layer seeded with a timestamped default path
-// and the session's current query text. The seed extension follows the
-// initial format (CSV) and is auto-synced when the user cycles formats.
+// newExportLayer builds a layer seeded with a timestamped default name,
+// cwd as the initial dir, and the session's current query text.
 func newExportLayer(a *app) *exportLayer {
-	format := output.CSV
-	stamp := time.Now().Format("2006-01-02-T-15-04-05")
-	seed := "results-" + stamp + format.DefaultExt()
+	dir := seedDir(a, store.LastDirExport)
+	stem := "results-" + time.Now().Format("2006-01-02-T-15-04-05")
+
+	choices := make([]widget.ExtChoice, len(exportFormats))
+	for i, f := range exportFormats {
+		choices[i] = widget.ExtChoice{Ext: f.DefaultExt(), Label: f.String()}
+	}
+	fp := widget.NewFilePicker(widget.FilePickerOpts{
+		Mode:       widget.ModeSaveTarget,
+		Dir:        dir,
+		Name:       stem,
+		Choices:    choices,
+		ShowFormat: true,
+	})
 
 	el := &exportLayer{
-		path:      newInput(seed),
-		format:    format,
+		picker:    fp,
 		tableName: "results",
 	}
 	if m := a.mainLayerPtr(); m != nil && m.session != nil {
@@ -78,31 +78,46 @@ func newExportLayer(a *app) *exportLayer {
 	return el
 }
 
-// syncExtension rewrites the path's extension to match the current
-// format, preserving the stem the user typed. If the user deleted the
-// extension entirely we still append the new one so the file lands
-// with a recognizable suffix.
-func (el *exportLayer) syncExtension() {
-	p := el.path.String()
-	if p == "" {
-		return
-	}
-	ext := filepath.Ext(p)
-	stem := strings.TrimSuffix(p, ext)
-	el.path.SetString(stem + el.format.DefaultExt())
+// triggerScan is the OnDirChange callback wired on first Draw. Mirrors
+// the save_layer pattern: list one directory level on a goroutine, post
+// back via asyncCh, discard when the layer has been popped.
+func (el *exportLayer) triggerScan(a *app) {
+	base := el.picker.ScanBase()
+	go func() {
+		rows, err := widget.ListDir(base)
+		errStr := ""
+		if err != nil {
+			errStr = err.Error()
+		}
+		a.asyncCh <- func(app *app) {
+			if top, ok := app.topLayer().(*exportLayer); !ok || top != el {
+				return
+			}
+			el.picker.ApplyRows(base, rows, errStr)
+		}
+	}()
 }
 
 func (el *exportLayer) Draw(a *app, c *cellbuf) {
-	boxW := 64
-	if boxW > a.term.width-4 {
+	if !el.initDone {
+		el.initDone = true
+		el.picker.SetOnDirChange(func() { el.triggerScan(a) })
+		el.picker.NotifyDirChange()
+	}
+
+	boxW := 80
+	if boxW > a.term.width-dialogMargin {
 		boxW = a.term.width - dialogMargin
 	}
-	if boxW < 40 {
-		boxW = 40
+	if boxW < 50 {
+		boxW = 50
 	}
-	boxH := 11
-	if boxH > a.term.height-4 {
+	boxH := el.picker.PreferredHeight(10)
+	if boxH > a.term.height-dialogMargin {
 		boxH = a.term.height - dialogMargin
+	}
+	if boxH < 13 {
+		boxH = 13
 	}
 	row := (a.term.height - boxH) / 2
 	col := (a.term.width - boxW) / 2
@@ -113,49 +128,34 @@ func (el *exportLayer) Draw(a *app, c *cellbuf) {
 		col = 1
 	}
 	r := rect{Row: row, Col: col, W: boxW, H: boxH}
-	c.FillRect(r)
-	drawFrame(c, r, "Export results", true)
+	widget.DrawDialog(c, r, "Export results", true)
 
-	innerCol := col + 2
-	cur := row + 1
+	el.picker.Draw(c, r, widget.DrawOpts{
+		FocusedFG: colorBorderFocused,
+		DimStyle:  Style{FG: ansiBrightBlack, BG: ansiDefaultBG},
+		Truncate:  truncate,
+	})
 
-	c.WriteAt(cur+1, innerCol, truncate("Path:", boxW-4))
-	// Value display with cursor.
-	valCol := innerCol + 7
-	maxVal := boxW - 7 - 4
-	if maxVal < 1 {
-		maxVal = 1
-	}
-	val := el.path.String()
-	rs := []rune(val)
-	if len(rs) > maxVal {
-		rs = rs[len(rs)-maxVal:]
-	}
-	c.WriteAt(cur+1, valCol, string(rs))
-	c.PlaceCursor(cur+1, valCol+len(rs))
-
-	c.WriteAt(cur+3, innerCol, truncate("Format: "+el.format.String(), boxW-4))
+	innerCol := r.Col + 2
+	innerW := r.W - 4
 
 	rows := 0
 	if a.layers != nil {
 		rows = a.mainLayerPtr().table.RowCount()
 	}
-	c.WriteAt(cur+5, innerCol, truncate(fmt.Sprintf("Rows to export: %d", rows), boxW-4))
+	rowInfo := fmt.Sprintf("Rows: %d", rows)
 
 	status := el.status
 	if el.busy {
 		status = "writing " + el.frame
 	}
+	statusLine := rowInfo
 	if status != "" {
-		c.SetFg(colorBorderFocused)
-		c.WriteAt(r.Row+r.H-3, innerCol, truncate(status, boxW-4))
-		c.ResetStyle()
+		statusLine = rowInfo + "   " + status
 	}
-
-	// Hint pinned to the bottom row, dim so it reads as chrome rather
-	// than content.
-	hintStyle := Style{FG: ansiBrightBlack, BG: ansiDefaultBG}
-	c.WriteStyled(r.Row+r.H-2, innerCol, truncate("Tab/Shift+Tab=format  Enter=save  Esc=cancel", boxW-4), hintStyle)
+	c.SetFg(colorBorderFocused)
+	c.WriteAt(r.Row+r.H-2, innerCol, truncate(statusLine, innerW))
+	c.ResetStyle()
 }
 
 func (el *exportLayer) HandleKey(a *app, k Key) {
@@ -172,78 +172,35 @@ func (el *exportLayer) HandleKey(a *app, k Key) {
 		a.popLayer()
 		return
 	}
-	if k.Kind == KeyTab {
-		el.cycleFormat(false)
-		return
-	}
-	if k.Kind == KeyBackTab {
-		el.cycleFormat(true)
-		return
-	}
-	if k.Kind == KeyEnter {
+	res := el.picker.HandleKey(k)
+	if res.SaveRequested {
 		el.save(a)
-		return
 	}
-	before := el.path.String()
-	el.path.handle(k)
-	if el.path.String() != before {
-		// Any path edit invalidates the overwrite confirmation so the
-		// user has to reconfirm for the new target.
-		el.confirmOverwrite = false
-		el.confirmedPath = ""
-	}
-}
-
-// cycleFormat advances (or rewinds with shift) the picker and rewrites
-// the path's extension to match.
-func (el *exportLayer) cycleFormat(back bool) {
-	idx := 0
-	for i, f := range exportFormats {
-		if f == el.format {
-			idx = i
-			break
-		}
-	}
-	if back {
-		idx = (idx - 1 + len(exportFormats)) % len(exportFormats)
-	} else {
-		idx = (idx + 1) % len(exportFormats)
-	}
-	el.format = exportFormats[idx]
-	el.syncExtension()
-	el.confirmOverwrite = false
-	el.confirmedPath = ""
-	el.status = ""
 }
 
 func (el *exportLayer) save(a *app) {
-	path := el.path.String()
-	if path == "" {
-		el.status = "path is required"
-		return
-	}
-
 	m := a.mainLayerPtr()
 	if !m.table.HasColumns() {
 		el.status = "no results to export"
 		return
 	}
 
-	// Overwrite guard: two-Enter pattern. Path must match the one that
-	// triggered the first prompt, otherwise the user edited between
-	// presses and should reconfirm.
-	if _, err := os.Stat(path); err == nil {
-		if !el.confirmOverwrite || el.confirmedPath != path {
-			el.confirmOverwrite = true
-			el.confirmedPath = path
-			el.status = "file exists -- Enter again to overwrite"
-			return
-		}
+	path := el.picker.Path()
+	parent := filepath.Dir(path)
+	if info, err := os.Stat(parent); err != nil || !info.IsDir() {
+		el.status = "directory does not exist: " + parent
+		return
+	}
+
+	// Overwrite guard: two-Enter pattern via picker's shared guard.
+	if !el.picker.Guard.Check(path) {
+		el.status = "file exists -- Enter again to overwrite"
+		return
 	}
 
 	cols, rows := m.table.Snapshot()
 	opts := output.Options{Query: el.query, TableName: el.tableName}
-	format := el.format
+	format := exportFormats[el.picker.ExtIdx]
 
 	el.busy = true
 	el.frame = spinnerFrames[0]
@@ -264,6 +221,7 @@ func (el *exportLayer) save(a *app) {
 				el.status = writeErr.Error()
 				return
 			}
+			recordDir(a, store.LastDirExport, filepath.Dir(path))
 			// If the user Esc'd the layer mid-write, post the success
 			// onto the main view instead so they still see it.
 			msg := fmt.Sprintf("exported %d row(s) to %s", len(rows), path)
@@ -294,5 +252,24 @@ func writeExportFile(path string, cols []db.Column, rows [][]string, format outp
 
 func (el *exportLayer) Hints(a *app) string {
 	_ = a
-	return joinHints("type=path", "Tab=format", "Enter=save", "Esc=cancel")
+	if el.picker.Guard.Armed() {
+		return joinHints("Enter=overwrite", "edit=cancel", "Esc=close")
+	}
+	switch el.picker.Focus {
+	case widget.FocusDir:
+		return joinHints("type=dir", "Tab=next", "Enter=descend", "Esc=cancel")
+	case widget.FocusList:
+		has := el.picker.HasEntries()
+		return joinHints(
+			hintIf(has, "Up/Dn=move"),
+			"Tab=next",
+			"Enter=pick",
+			"Esc=cancel",
+		)
+	case widget.FocusInput:
+		return joinHints("type=name", "Tab=next", "Enter=save", "Esc=cancel")
+	case widget.FocusExt:
+		return joinHints("Up/Dn=format", "Tab=next", "Esc=cancel")
+	}
+	return joinHints("Tab=next", "Enter=save", "Esc=cancel")
 }

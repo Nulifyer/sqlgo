@@ -41,6 +41,7 @@ import (
 	"github.com/Nulifyer/sqlgo/internal/sqltok"
 	"github.com/Nulifyer/sqlgo/internal/sshtunnel"
 	"github.com/Nulifyer/sqlgo/internal/store"
+	"github.com/Nulifyer/sqlgo/internal/tui/widget"
 )
 
 // queryEventKind tags the lifecycle phase of a running query. A single
@@ -668,34 +669,22 @@ func (a *app) connectTo(c config.Connection) {
 	}()
 }
 
-// spinnerFrames cycle at ~10fps on any long-running status indicator.
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+// spinnerFrames re-exports widget.SpinnerFrames so existing call sites
+// that seed an initial glyph (e.g. spinnerFrames[0]) keep compiling.
+var spinnerFrames = widget.SpinnerFrames
 
-// runSpinner ticks a spinner until done is closed. Each frame is
-// delivered to apply via asyncCh so the main loop owns all UI mutation
-// -- the goroutine never touches app state directly. apply receives
-// the current frame glyph and should splice it into whatever status
-// surface the caller owns (picker status, layer field, etc.).
+// runSpinner is the app-level adapter for widget.RunSpinner: it wraps
+// apply in a non-blocking asyncCh send so all UI mutation stays on
+// the main goroutine. Dropping a frame under backpressure is fine --
+// the next tick paints anyway -- and avoids stalling the goroutine
+// which would delay the final "done" apply from the caller.
 func runSpinner(a *app, done <-chan struct{}, apply func(a *app, frame string)) {
-	t := time.NewTicker(100 * time.Millisecond)
-	defer t.Stop()
-	i := 0
-	for {
+	widget.RunSpinner(done, func(frame string) {
 		select {
-		case <-done:
-			return
-		case <-t.C:
-			i++
-			frame := spinnerFrames[i%len(spinnerFrames)]
-			// Non-blocking send: dropping a frame under backpressure is
-			// fine (next tick paints anyway), but blocking would stall
-			// the spinner goroutine and delay the final "done" apply.
-			select {
-			case a.asyncCh <- func(a *app) { apply(a, frame) }:
-			default:
-			}
+		case a.asyncCh <- func(a *app) { apply(a, frame) }:
+		default:
 		}
-	}
+	})
 }
 
 // finishConnect runs on the main loop after d.Open returns. It applies

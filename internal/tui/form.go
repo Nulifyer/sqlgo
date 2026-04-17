@@ -7,7 +7,12 @@ import (
 
 	"github.com/Nulifyer/sqlgo/internal/config"
 	"github.com/Nulifyer/sqlgo/internal/db"
+	"github.com/Nulifyer/sqlgo/internal/tui/widget"
 )
+
+// formField aliases widget.FormField so tests and probe code that
+// poke at fields keep compiling while domain code reads idiomatically.
+type formField = widget.FormField
 
 // connForm is the add/edit form. Layout: fixed core fields, then
 // engine-specific options, then SSH block. Tab/Up/Down to move,
@@ -16,12 +21,12 @@ type connForm struct {
 	title        string
 	originalName string // edit target; passed to SaveConnection as oldName
 
-	fixed        []formField
+	fixed        []widget.FormField
 	driverNames  []string // from db.Registered(); drives the Driver picker
 	driverIdx    int
 	driverChosen bool // false for new forms until the driver picker commits
-	engine       []formField
-	ssh          []formField
+	engine       []widget.FormField
+	ssh          []widget.FormField
 
 	// "Other..." flow: user picks dialect + transport independently.
 	profileName   string
@@ -30,18 +35,6 @@ type connForm struct {
 	active int
 	status string
 }
-
-type formField struct {
-	label string
-	in    *input
-	mask  bool
-	// values, when non-nil, constrains the field to a fixed set.
-	// Renders as a cycler; Left/Right steps; typing is swallowed.
-	// Imported out-of-set values jump to values[0] on first press.
-	values []string
-}
-
-func (ff *formField) isCycler() bool { return len(ff.values) > 0 }
 
 // portString returns the string form of a default port, or "" when
 // the port is 0 (no default for that driver).
@@ -88,18 +81,32 @@ func newConnForm(title string, c *config.Connection) *connForm {
 		driverIdx:    idx,
 		driverChosen: chosen,
 	}
-	f.fixed = make([]formField, coreCount)
-	f.fixed[coreName] = formField{label: "Name", in: newInput("")}
-	f.fixed[coreDriver] = formField{label: "Driver", in: newInput(spec.driver)}
-	f.fixed[coreHost] = formField{label: "Host", in: newInput("")}
-	f.fixed[corePort] = formField{label: "Port", in: newInput("")}
-	f.fixed[coreUser] = formField{label: "User", in: newInput("")}
-	f.fixed[corePassword] = formField{label: "Password", in: newInput(""), mask: true}
-	f.fixed[coreDatabase] = formField{label: "Database", in: newInput("")}
+	f.fixed = make([]widget.FormField, coreCount)
+	f.fixed[coreName] = widget.FormField{Label: "Name", Input: widget.NewInput("")}
+	f.fixed[coreDriver] = widget.FormField{
+		Label:        "Driver",
+		Input:        widget.NewInput(spec.driver),
+		SwallowInput: true,
+		Display: func() string {
+			if !f.driverChosen {
+				return "[ select driver... ]"
+			}
+			lbl := engineSpecFor(f.driverNames[f.driverIdx]).label
+			if f.profileName != "" && f.transportName != "" {
+				lbl = f.profileName + " / " + f.transportName
+			}
+			return "[ " + lbl + " ]"
+		},
+	}
+	f.fixed[coreHost] = widget.FormField{Label: "Host", Input: widget.NewInput("")}
+	f.fixed[corePort] = widget.FormField{Label: "Port", Input: widget.NewInput("")}
+	f.fixed[coreUser] = widget.FormField{Label: "User", Input: widget.NewInput("")}
+	f.fixed[corePassword] = widget.FormField{Label: "Password", Input: widget.NewInput(""), Mask: true}
+	f.fixed[coreDatabase] = widget.FormField{Label: "Database", Input: widget.NewInput("")}
 	if chosen {
-		f.fixed[coreHost].in.SetString("localhost")
-		f.fixed[corePort].in.SetString(strconv.Itoa(spec.defaultPort))
-		f.fixed[coreUser].in.SetString(spec.defaultUser)
+		f.fixed[coreHost].Input.SetString("localhost")
+		f.fixed[corePort].Input.SetString(strconv.Itoa(spec.defaultPort))
+		f.fixed[coreUser].Input.SetString(spec.defaultUser)
 		f.engine = buildEngineFields(spec, nil)
 	}
 	f.ssh = buildSSHFields(config.SSHTunnel{})
@@ -108,13 +115,13 @@ func newConnForm(title string, c *config.Connection) *connForm {
 		f.originalName = c.Name
 		f.profileName = c.Profile
 		f.transportName = c.Transport
-		f.fixed[coreName].in.SetString(c.Name)
-		f.fixed[coreDriver].in.SetString(c.Driver)
-		f.fixed[coreHost].in.SetString(c.Host)
-		f.fixed[corePort].in.SetString(strconv.Itoa(c.Port))
-		f.fixed[coreUser].in.SetString(c.User)
-		f.fixed[corePassword].in.SetString(c.Password)
-		f.fixed[coreDatabase].in.SetString(c.Database)
+		f.fixed[coreName].Input.SetString(c.Name)
+		f.fixed[coreDriver].Input.SetString(c.Driver)
+		f.fixed[coreHost].Input.SetString(c.Host)
+		f.fixed[corePort].Input.SetString(strconv.Itoa(c.Port))
+		f.fixed[coreUser].Input.SetString(c.User)
+		f.fixed[corePassword].Input.SetString(c.Password)
+		f.fixed[coreDatabase].Input.SetString(c.Database)
 		f.engine = buildEngineFields(spec, c.Options)
 		f.ssh = buildSSHFields(c.SSH)
 	}
@@ -126,22 +133,22 @@ func newConnForm(title string, c *config.Connection) *connForm {
 	return f
 }
 
-// buildEngineFields turns spec.fields into formFields pre-filled
+// buildEngineFields turns spec.fields into widget.FormFields pre-filled
 // from opts. Cycler values are copied through.
-func buildEngineFields(spec engineSpec, opts map[string]string) []formField {
-	out := make([]formField, 0, len(spec.fields))
+func buildEngineFields(spec engineSpec, opts map[string]string) []widget.FormField {
+	out := make([]widget.FormField, 0, len(spec.fields))
 	for _, opt := range spec.fields {
-		in := newInput("")
+		in := widget.NewInput("")
 		if opts != nil {
 			if v, ok := opts[opt.key]; ok {
 				in.SetString(v)
 			}
 		}
-		out = append(out, formField{
-			label:  opt.label,
-			in:     in,
-			mask:   opt.mask,
-			values: opt.values,
+		out = append(out, widget.FormField{
+			Label:  opt.label,
+			Input:  in,
+			Mask:   opt.mask,
+			Values: opt.values,
 		})
 	}
 	return out
@@ -149,28 +156,28 @@ func buildEngineFields(spec engineSpec, opts map[string]string) []formField {
 
 // buildSSHFields is the SSH block. Password/key both shown;
 // key wins at dial time if set.
-func buildSSHFields(t config.SSHTunnel) []formField {
+func buildSSHFields(t config.SSHTunnel) []widget.FormField {
 	port := ""
 	if t.Port != 0 {
 		port = strconv.Itoa(t.Port)
 	}
-	return []formField{
-		{label: "SSH host", in: newInput(t.Host)},
-		{label: "SSH port", in: newInput(port)},
-		{label: "SSH user", in: newInput(t.User)},
-		{label: "SSH pass", in: newInput(t.Password), mask: true},
-		{label: "SSH key", in: newInput(t.KeyPath)},
+	return []widget.FormField{
+		{Label: "SSH host", Input: widget.NewInput(t.Host)},
+		{Label: "SSH port", Input: widget.NewInput(port)},
+		{Label: "SSH user", Input: widget.NewInput(t.User)},
+		{Label: "SSH pass", Input: widget.NewInput(t.Password), Mask: true},
+		{Label: "SSH key", Input: widget.NewInput(t.KeyPath)},
 	}
 }
 
 // allFields returns all fields flat: fixed, engine, ssh.
 // Until a driver is picked only the driver row is visible so the rest
 // of the form can't be edited against unknown defaults.
-func (f *connForm) allFields() []*formField {
+func (f *connForm) allFields() []*widget.FormField {
 	if !f.driverChosen {
-		return []*formField{&f.fixed[coreDriver]}
+		return []*widget.FormField{&f.fixed[coreDriver]}
 	}
-	out := make([]*formField, 0, len(f.fixed)+len(f.engine)+len(f.ssh))
+	out := make([]*widget.FormField, 0, len(f.fixed)+len(f.engine)+len(f.ssh))
 	for i := range f.fixed {
 		out = append(out, &f.fixed[i])
 	}
@@ -183,25 +190,6 @@ func (f *connForm) allFields() []*formField {
 	return out
 }
 
-func (f *connForm) fixedLen() int {
-	if !f.driverChosen {
-		return 1
-	}
-	return len(f.fixed)
-}
-func (f *connForm) engineLen() int {
-	if !f.driverChosen {
-		return 0
-	}
-	return len(f.engine)
-}
-func (f *connForm) sshLen() int {
-	if !f.driverChosen {
-		return 0
-	}
-	return len(f.ssh)
-}
-
 // onDriverRow reports whether the active field is the driver selector
 // row, regardless of whether other fields are currently gated.
 func (f *connForm) onDriverRow() bool {
@@ -212,8 +200,8 @@ func (f *connForm) onDriverRow() bool {
 // isFieldRequired reports whether a form field must be non-empty
 // per the active driver's engineSpec. Used to render the "*" marker
 // and kept in sync with toConnection's validation.
-func (f *connForm) isFieldRequired(field *formField) bool {
-	spec := engineSpecFor(f.fixed[coreDriver].in.String())
+func (f *connForm) isFieldRequired(field *widget.FormField) bool {
+	spec := engineSpecFor(f.fixed[coreDriver].Input.String())
 	for i := range f.fixed {
 		if &f.fixed[i] == field {
 			return spec.coreRequired(i)
@@ -230,7 +218,7 @@ func (f *connForm) isFieldRequired(field *formField) bool {
 	return false
 }
 
-func (f *connForm) activeField() *formField {
+func (f *connForm) activeField() *widget.FormField {
 	fields := f.allFields()
 	if f.active < 0 || f.active >= len(fields) {
 		return nil
@@ -245,30 +233,7 @@ func (f *connForm) onEngineCycler() bool {
 		return false
 	}
 	ff := f.activeField()
-	return ff != nil && ff.isCycler()
-}
-
-// cycleFieldValue steps a cycler by delta with wrap-around.
-// Unknown current values drop to values[0] on first press.
-func cycleFieldValue(ff *formField, delta int) {
-	if !ff.isCycler() {
-		return
-	}
-	cur := ff.in.String()
-	idx := -1
-	for i, v := range ff.values {
-		if v == cur {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		ff.in.SetString(ff.values[0])
-		return
-	}
-	n := len(ff.values)
-	next := (idx + delta + n) % n
-	ff.in.SetString(ff.values[next])
+	return ff != nil && ff.IsCycler()
 }
 
 // setDriver applies an absolute driver choice from the picker. On the
@@ -281,15 +246,15 @@ func (f *connForm) setDriver(name string) {
 		spec := engineSpecFor(f.driverNames[newIdx])
 		f.driverIdx = newIdx
 		f.driverChosen = true
-		f.fixed[coreDriver].in.SetString(spec.driver)
-		if f.fixed[coreHost].in.String() == "" {
-			f.fixed[coreHost].in.SetString("localhost")
+		f.fixed[coreDriver].Input.SetString(spec.driver)
+		if f.fixed[coreHost].Input.String() == "" {
+			f.fixed[coreHost].Input.SetString("localhost")
 		}
-		if f.fixed[corePort].in.String() == "" {
-			f.fixed[corePort].in.SetString(portString(spec.defaultPort))
+		if f.fixed[corePort].Input.String() == "" {
+			f.fixed[corePort].Input.SetString(portString(spec.defaultPort))
 		}
-		if f.fixed[coreUser].in.String() == "" {
-			f.fixed[coreUser].in.SetString(spec.defaultUser)
+		if f.fixed[coreUser].Input.String() == "" {
+			f.fixed[coreUser].Input.SetString(spec.defaultUser)
 		}
 		f.engine = buildEngineFields(spec, nil)
 		return
@@ -316,31 +281,31 @@ func (f *connForm) cycleDriver(delta int) {
 	priorSpec := engineSpecFor(f.driverNames[f.driverIdx])
 	for i, opt := range priorSpec.fields {
 		if i < len(f.engine) {
-			prior[opt.key] = f.engine[i].in.String()
+			prior[opt.key] = f.engine[i].Input.String()
 		}
 	}
 	f.driverIdx = newIdx
 	newSpec := engineSpecFor(f.driverNames[newIdx])
 	f.engine = buildEngineFields(newSpec, prior)
-	f.fixed[coreDriver].in.SetString(newSpec.driver)
+	f.fixed[coreDriver].Input.SetString(newSpec.driver)
 	priorPort := portString(priorSpec.defaultPort)
-	if f.fixed[corePort].in.String() == priorPort || f.fixed[corePort].in.String() == "" || f.fixed[corePort].in.String() == "0" {
-		f.fixed[corePort].in.SetString(portString(newSpec.defaultPort))
+	if f.fixed[corePort].Input.String() == priorPort || f.fixed[corePort].Input.String() == "" || f.fixed[corePort].Input.String() == "0" {
+		f.fixed[corePort].Input.SetString(portString(newSpec.defaultPort))
 	}
-	if f.fixed[coreUser].in.String() == priorSpec.defaultUser {
-		f.fixed[coreUser].in.SetString(newSpec.defaultUser)
+	if f.fixed[coreUser].Input.String() == priorSpec.defaultUser {
+		f.fixed[coreUser].Input.SetString(newSpec.defaultUser)
 	}
 }
 
 // toConnection validates the form into a config.Connection.
 func (f *connForm) toConnection() (config.Connection, error) {
-	name := strings.TrimSpace(f.fixed[coreName].in.String())
-	driver := strings.TrimSpace(f.fixed[coreDriver].in.String())
-	host := strings.TrimSpace(f.fixed[coreHost].in.String())
-	portStr := strings.TrimSpace(f.fixed[corePort].in.String())
-	user := strings.TrimSpace(f.fixed[coreUser].in.String())
-	password := f.fixed[corePassword].in.String()
-	database := strings.TrimSpace(f.fixed[coreDatabase].in.String())
+	name := strings.TrimSpace(f.fixed[coreName].Input.String())
+	driver := strings.TrimSpace(f.fixed[coreDriver].Input.String())
+	host := strings.TrimSpace(f.fixed[coreHost].Input.String())
+	portStr := strings.TrimSpace(f.fixed[corePort].Input.String())
+	user := strings.TrimSpace(f.fixed[coreUser].Input.String())
+	password := f.fixed[corePassword].Input.String()
+	database := strings.TrimSpace(f.fixed[coreDatabase].Input.String())
 
 	spec := engineSpecFor(driver)
 	// Required-field validation per driver. Password is not trimmed
@@ -393,7 +358,7 @@ func (f *connForm) toConnection() (config.Connection, error) {
 		if i >= len(f.engine) {
 			break
 		}
-		v := strings.TrimSpace(f.engine[i].in.String())
+		v := strings.TrimSpace(f.engine[i].Input.String())
 		if opt.required && v == "" {
 			return config.Connection{}, errSimple(opt.label + " is required")
 		}
@@ -407,12 +372,12 @@ func (f *connForm) toConnection() (config.Connection, error) {
 
 	// SSH tunnel.
 	ssh := config.SSHTunnel{
-		Host:     strings.TrimSpace(f.ssh[0].in.String()),
-		User:     strings.TrimSpace(f.ssh[2].in.String()),
-		Password: f.ssh[3].in.String(),
-		KeyPath:  strings.TrimSpace(f.ssh[4].in.String()),
+		Host:     strings.TrimSpace(f.ssh[0].Input.String()),
+		User:     strings.TrimSpace(f.ssh[2].Input.String()),
+		Password: f.ssh[3].Input.String(),
+		KeyPath:  strings.TrimSpace(f.ssh[4].Input.String()),
 	}
-	if s := strings.TrimSpace(f.ssh[1].in.String()); s != "" {
+	if s := strings.TrimSpace(f.ssh[1].Input.String()); s != "" {
 		p, err := strconv.Atoi(s)
 		if err != nil || p < 1 || p > maxTCPPort {
 			return config.Connection{}, errSimple("ssh port must be 1..65535")
@@ -427,65 +392,28 @@ func (f *connForm) toConnection() (config.Connection, error) {
 	return out, nil
 }
 
-func (f *connForm) nextField() {
-	n := f.fixedLen() + f.engineLen() + f.sshLen()
-	f.active = (f.active + 1) % n
-}
-
-func (f *connForm) prevField() {
-	n := f.fixedLen() + f.engineLen() + f.sshLen()
-	f.active = (f.active - 1 + n) % n
-}
-
 // handle returns (c, submit) where submit=true means persist c.
+// Keyboard behavior is delegated to widget.Form; the domain-specific
+// bits left here are driver-row Enter (picker trigger, defensive no-op
+// since formLayer intercepts it upstream) and submit validation.
 func (f *connForm) handle(k Key) (config.Connection, bool) {
-	switch k.Kind {
-	case KeyTab, KeyDown:
-		f.nextField()
-		return config.Connection{}, false
-	case KeyBackTab, KeyUp:
-		f.prevField()
-		return config.Connection{}, false
-	case KeyLeft:
-		if f.onEngineCycler() {
-			cycleFieldValue(f.activeField(), -1)
-			return config.Connection{}, false
-		}
-	case KeyRight:
-		if f.onEngineCycler() {
-			cycleFieldValue(f.activeField(), 1)
-			return config.Connection{}, false
-		}
-	case KeyEnter:
-		// Driver row Enter is intercepted by formLayer to push the picker;
-		// if we get it here something else routed the key, no-op.
-		if f.onDriverRow() {
-			return config.Connection{}, false
-		}
-		c, err := f.toConnection()
-		if err != nil {
-			f.status = err.Error()
-			return config.Connection{}, false
-		}
-		return c, true
-	}
-	if k.Ctrl && k.Rune == 's' {
-		c, err := f.toConnection()
-		if err != nil {
-			f.status = err.Error()
-			return config.Connection{}, false
-		}
-		return c, true
-	}
-	// Driver row (picker) and cycler rows swallow printable chars.
-	if f.onDriverRow() || f.onEngineCycler() {
+	// Defensive: formLayer should have intercepted Enter on the driver
+	// row and pushed the picker before routing here.
+	if f.onDriverRow() && k.Kind == KeyEnter {
 		return config.Connection{}, false
 	}
-	fields := f.allFields()
-	if f.active >= 0 && f.active < len(fields) {
-		fields[f.active].in.handle(k)
+	wf := widget.Form{Fields: f.allFields(), Active: f.active}
+	submit := wf.HandleKey(k)
+	f.active = wf.Active
+	if !submit {
+		return config.Connection{}, false
 	}
-	return config.Connection{}, false
+	c, err := f.toConnection()
+	if err != nil {
+		f.status = err.Error()
+		return config.Connection{}, false
+	}
+	return c, true
 }
 
 func (f *connForm) draw(s *cellbuf, termW, termH int) {
@@ -517,104 +445,15 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 	innerCol := col + 2
 	innerW := boxW - 4
 	fieldTop := row + 2
-
-	// Scroll active field into view on short terminals.
 	bodyH := boxH - 4
-	scroll := 0
-	if f.active >= bodyH {
-		scroll = f.active - bodyH + 1
-	}
-	if scroll < 0 {
-		scroll = 0
-	}
 
-	y := 0
-	for i, field := range fields {
-		if i < scroll {
-			continue
-		}
-		if y >= bodyH {
-			break
-		}
-		lineRow := fieldTop + y
-		label := field.label
-		if f.isFieldRequired(field) {
-			label += " *"
-		}
-		label += ":"
-		if i == f.active {
-			s.SetFg(colorBorderFocused)
-		} else {
-			s.SetFg(colorTitleUnfocused)
-		}
-		s.WriteAt(lineRow, innerCol, padRightString(label, labelW))
-		s.ResetStyle()
-
-		val := field.in.String()
-		if field.mask {
-			val = strings.Repeat("*", len([]rune(val)))
-		}
-		isDriverRow := field == &f.fixed[coreDriver]
-		if isDriverRow {
-			if f.driverChosen {
-				label := engineSpecFor(f.driverNames[f.driverIdx]).label
-				if f.profileName != "" && f.transportName != "" {
-					label = f.profileName + " / " + f.transportName
-				}
-				val = "[ " + label + " ]"
-			} else {
-				val = "[ select driver... ]"
-			}
-		} else if field.isCycler() {
-			display := val
-			if display == "" {
-				display = "(default)"
-			}
-			val = "< " + display + " >"
-		}
-
-		vCol := innerCol + labelW + 2
-		maxVal := innerW - labelW - 2
-		if maxVal < 1 {
-			maxVal = 1
-		}
-		rs := []rune(val)
-		// Scroll the visible window so the cursor stays in view. For
-		// driver/cycler rows there's no editing cursor, so just tail-slice.
-		editable := !isDriverRow && !field.isCycler()
-		cursorOffset := 0
-		if editable {
-			cur := field.in.cur
-			if cur > len(rs) {
-				cur = len(rs)
-			}
-			start := 0
-			if len(rs) > maxVal {
-				// Keep cursor visible: shift window so cur sits inside [start, start+maxVal].
-				start = cur - maxVal
-				if start < 0 {
-					start = 0
-				}
-				if start+maxVal > len(rs) {
-					start = len(rs) - maxVal
-				}
-				rs = rs[start : start+maxVal]
-			}
-			cursorOffset = cur - start
-		} else if len(rs) > maxVal {
-			rs = rs[len(rs)-maxVal:]
-		}
-		s.WriteAt(lineRow, vCol, string(rs))
-
-		if i == f.active && editable {
-			cursorCol := vCol + cursorOffset
-			if cursorCol > vCol+maxVal {
-				cursorCol = vCol + maxVal
-			}
-			s.PlaceCursor(lineRow, cursorCol)
-		}
-		y++
-	}
+	wf := widget.Form{Fields: fields, Active: f.active}
+	wf.Draw(s, rect{Row: fieldTop, Col: innerCol, W: innerW, H: bodyH}, widget.FormDrawOpts{
+		LabelW:       labelW,
+		ActiveFG:     colorBorderFocused,
+		InactiveFG:   colorTitleUnfocused,
+		RequiredFunc: func(ff *widget.FormField) bool { return f.isFieldRequired(ff) },
+	})
 
 	if f.status != "" {
 		lines := wrapText(f.status, innerW)
@@ -628,13 +467,6 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 		}
 		s.ResetStyle()
 	}
-}
-
-func padRightString(s string, w int) string {
-	for len([]rune(s)) < w {
-		s += " "
-	}
-	return s
 }
 
 // simpleErr is a string-only error type. Avoids importing errors
@@ -674,8 +506,8 @@ func (fl *formLayer) HandleKey(a *app, k Key) {
 					fl.f.transportName = transport
 					fl.f.setDriver("other")
 					if t, ok := db.GetTransport(transport); ok {
-						if fl.f.fixed[corePort].in.String() == "" || fl.f.fixed[corePort].in.String() == "0" {
-							fl.f.fixed[corePort].in.SetString(portString(t.DefaultPort))
+						if fl.f.fixed[corePort].Input.String() == "" || fl.f.fixed[corePort].Input.String() == "0" {
+							fl.f.fixed[corePort].Input.SetString(portString(t.DefaultPort))
 						}
 					}
 				})

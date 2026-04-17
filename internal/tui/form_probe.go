@@ -29,10 +29,10 @@ const probeTimeout = 5 * time.Second
 // there's no socket to dial.
 func (fl *formLayer) startTestNetwork(a *app) {
 	f := fl.f
-	driver := strings.TrimSpace(f.fixed[coreDriver].in.String())
-	host := strings.TrimSpace(f.fixed[coreHost].in.String())
-	portStr := strings.TrimSpace(f.fixed[corePort].in.String())
-	database := strings.TrimSpace(f.fixed[coreDatabase].in.String())
+	driver := strings.TrimSpace(f.fixed[coreDriver].Input.String())
+	host := strings.TrimSpace(f.fixed[coreHost].Input.String())
+	portStr := strings.TrimSpace(f.fixed[corePort].Input.String())
+	database := strings.TrimSpace(f.fixed[coreDatabase].Input.String())
 
 	f.status = "testing network..."
 	go func() {

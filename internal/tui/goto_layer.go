@@ -3,6 +3,8 @@ package tui
 import (
 	"strconv"
 	"strings"
+
+	"github.com/Nulifyer/sqlgo/internal/tui/widget"
 )
 
 // gotoLayer is a small modal overlay that jumps the active editor to a
@@ -19,25 +21,11 @@ func newGotoLayer(curRow int) *gotoLayer {
 }
 
 func (gl *gotoLayer) Draw(a *app, c *cellbuf) {
-	boxW := 48
-	if boxW > a.term.width-dialogMargin {
-		boxW = a.term.width - dialogMargin
-	}
-	if boxW < 24 {
-		boxW = 24
-	}
-	boxH := 6
-	row := (a.term.height - boxH) / 2
-	col := (a.term.width - boxW) / 2
-	if row < 1 {
-		row = 1
-	}
-	if col < 1 {
-		col = 1
-	}
-	r := rect{Row: row, Col: col, W: boxW, H: boxH}
-	c.FillRect(r)
-	drawFrame(c, r, "Go to line", true)
+	r := widget.CenterDialog(a.term.width, a.term.height, widget.DialogOpts{
+		PrefW: 48, PrefH: 6, MinW: 24, MinH: 6, Margin: dialogMargin,
+	})
+	row, col := r.Row, r.Col
+	widget.DrawDialog(c, r, "Go to line", true)
 
 	innerCol := col + 2
 	m := a.mainLayerPtr()
@@ -49,23 +37,17 @@ func (gl *gotoLayer) Draw(a *app, c *cellbuf) {
 	c.WriteAt(row+1, innerCol, prompt)
 	valRow := row + 2
 	valCol := innerCol
-	maxVal := boxW - 4
+	maxVal := r.W - 4
 	if maxVal < 1 {
 		maxVal = 1
 	}
-	val := gl.input.String()
-	rs := []rune(val)
-	if len(rs) > maxVal {
-		rs = rs[len(rs)-maxVal:]
-	}
-	c.WriteAt(valRow, valCol, string(rs))
-	c.PlaceCursor(valRow, valCol+len(rs))
+	drawInput(c, gl.input, valRow, valCol, maxVal)
 
 	if gl.err != "" {
 		errStyle := Style{FG: ansiBrightRed, BG: ansiDefaultBG}
-		c.WriteStyled(row+3, innerCol, truncate(gl.err, boxW-4), errStyle)
+		c.WriteStyled(row+3, innerCol, truncate(gl.err, r.W-4), errStyle)
 	}
-	c.WriteAt(row+boxH-2, innerCol, truncate("Enter=go  Esc=cancel  (accepts line or line:col)", boxW-4))
+	c.WriteAt(row+r.H-2, innerCol, truncate("Enter=go  Esc=cancel  (accepts line or line:col)", r.W-4))
 }
 
 func (gl *gotoLayer) HandleKey(a *app, k Key) {
@@ -107,7 +89,7 @@ func (gl *gotoLayer) HandleKey(a *app, k Key) {
 		return
 	}
 	gl.err = ""
-	gl.input.handle(k)
+	gl.input.Handle(k)
 }
 
 func (gl *gotoLayer) Hints(a *app) string {

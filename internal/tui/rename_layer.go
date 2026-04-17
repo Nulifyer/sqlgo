@@ -1,6 +1,10 @@
 package tui
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/Nulifyer/sqlgo/internal/tui/widget"
+)
 
 // renameLayer is a small modal overlay that edits the title of a query
 // tab. Invoked by Ctrl+R or by a double-click on the query tab strip. Enter
@@ -17,42 +21,21 @@ func newRenameLayer(idx int, seed string) *renameLayer {
 }
 
 func (rl *renameLayer) Draw(a *app, c *cellbuf) {
-	boxW := 48
-	if boxW > a.term.width-dialogMargin {
-		boxW = a.term.width - dialogMargin
-	}
-	if boxW < 24 {
-		boxW = 24
-	}
-	boxH := 5
-	row := (a.term.height - boxH) / 2
-	col := (a.term.width - boxW) / 2
-	if row < 1 {
-		row = 1
-	}
-	if col < 1 {
-		col = 1
-	}
-	r := rect{Row: row, Col: col, W: boxW, H: boxH}
-	c.FillRect(r)
-	drawFrame(c, r, "Rename query tab", true)
+	r := widget.CenterDialog(a.term.width, a.term.height, widget.DialogOpts{
+		PrefW: 48, PrefH: 5, MinW: 24, MinH: 5, Margin: dialogMargin,
+	})
+	widget.DrawDialog(c, r, "Rename query tab", true)
 
-	innerCol := col + 2
-	c.WriteAt(row+1, innerCol, "Name:")
+	innerCol := r.Col + 2
+	c.WriteAt(r.Row+1, innerCol, "Name:")
 	valCol := innerCol + 6
-	maxVal := boxW - 6 - 4
+	maxVal := r.W - 6 - 4
 	if maxVal < 1 {
 		maxVal = 1
 	}
-	val := rl.input.String()
-	rs := []rune(val)
-	if len(rs) > maxVal {
-		rs = rs[len(rs)-maxVal:]
-	}
-	c.WriteAt(row+1, valCol, string(rs))
-	c.PlaceCursor(row+1, valCol+len(rs))
+	drawInput(c, rl.input, r.Row+1, valCol, maxVal)
 
-	c.WriteAt(row+3, innerCol, truncate("Enter=save  Esc=cancel", boxW-4))
+	c.WriteAt(r.Row+3, innerCol, truncate("Enter=save  Esc=cancel", r.W-4))
 }
 
 func (rl *renameLayer) HandleKey(a *app, k Key) {
@@ -71,7 +54,7 @@ func (rl *renameLayer) HandleKey(a *app, k Key) {
 		a.popLayer()
 		return
 	}
-	rl.input.handle(k)
+	rl.input.Handle(k)
 }
 
 func (rl *renameLayer) Hints(a *app) string {

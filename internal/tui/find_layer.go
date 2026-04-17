@@ -81,7 +81,7 @@ func (fl *findLayer) drawInputSlice(c *cellbuf, row, col, maxVal int, in *input,
 	}
 	c.WriteAt(row, col, string(rs[start:]))
 	if active {
-		curCol := col + (in.cur - start)
+		curCol := col + (in.Cursor() - start)
 		if curCol < col {
 			curCol = col
 		}
@@ -156,7 +156,7 @@ func (fl *findLayer) HandleKey(a *app, k Key) {
 	} else {
 		target = fl.replace
 	}
-	if target.handle(k) {
+	if target.Handle(k) {
 		fl.status = ""
 		if fl.activeField == findFieldFind {
 			ed.SetSearch(fl.find.String())

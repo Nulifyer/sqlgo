@@ -1,111 +1,42 @@
 package tui
 
-import (
-	"sort"
-	"strings"
-)
+import "github.com/Nulifyer/sqlgo/internal/tui/widget"
 
 // driverPickerLayer is a searchable fuzzy menu for choosing a driver.
 // Typing filters the list; Up/Down moves; Enter commits via onPick;
-// Esc cancels.
+// Esc cancels. The fuzzy matching, query input, and selection/scroll
+// bookkeeping live in widget.FuzzyPicker; this layer only owns the
+// frame, row formatting (label + "(name)" suffix), and enter/esc
+// semantics.
 type driverPickerLayer struct {
-	query    *input
-	names    []string
-	filtered []driverPickItem
-	selected int
-	onPick   func(string)
-}
-
-type driverPickItem struct {
-	name  string
-	label string
-	score int
+	picker *widget.FuzzyPicker
+	onPick func(string)
 }
 
 func newDriverPickerLayer(names []string, onPick func(string)) *driverPickerLayer {
-	l := &driverPickerLayer{
-		query:  newInput(""),
-		names:  names,
-		onPick: onPick,
+	items := make([]widget.FuzzyPickerItem, 0, len(names))
+	for _, n := range names {
+		items = append(items, widget.FuzzyPickerItem{Key: n, Label: engineSpecFor(n).label})
 	}
-	l.refilter()
-	return l
-}
-
-func (l *driverPickerLayer) refilter() {
-	q := l.query.String()
-	items := make([]driverPickItem, 0, len(l.names))
-	for _, n := range l.names {
-		label := engineSpecFor(n).label
-		if q == "" {
-			items = append(items, driverPickItem{name: n, label: label})
-			continue
-		}
-		// Score against both label and driver name; take the better.
-		sL, _, okL := fuzzyScore(q, label)
-		sN, _, okN := fuzzyScore(q, n)
-		if !okL && !okN {
-			continue
-		}
-		s := sL
-		if !okL || (okN && sN > sL) {
-			s = sN
-		}
-		items = append(items, driverPickItem{name: n, label: label, score: s})
-	}
-	if q == "" {
-		sort.SliceStable(items, func(i, j int) bool {
-			return strings.ToLower(items[i].label) < strings.ToLower(items[j].label)
-		})
-	} else {
-		sort.SliceStable(items, func(i, j int) bool {
-			if items[i].score != items[j].score {
-				return items[i].score > items[j].score
-			}
-			return strings.ToLower(items[i].label) < strings.ToLower(items[j].label)
-		})
-	}
-	l.filtered = items
-	if l.selected >= len(items) {
-		l.selected = len(items) - 1
-	}
-	if l.selected < 0 {
-		l.selected = 0
-	}
+	fp := widget.NewFuzzyPicker(items)
+	fp.SortAlpha = true
+	fp.SecondaryKey = true
+	fp.Refilter()
+	return &driverPickerLayer{picker: fp, onPick: onPick}
 }
 
 func (l *driverPickerLayer) Draw(a *app, s *cellbuf) {
-	termW, termH := a.term.width, a.term.height
-	boxW := 50
-	if boxW > termW-dialogMargin {
-		boxW = termW - dialogMargin
-	}
-	if boxW < 24 {
-		boxW = 24
-	}
-	boxH := len(l.filtered) + 6
-	if boxH < 10 {
-		boxH = 10
-	}
-	if boxH > termH-dialogMargin {
-		boxH = termH - dialogMargin
-	}
-	row := (termH - boxH) / 2
-	col := (termW - boxW) / 2
-	if row < 1 {
-		row = 1
-	}
-	if col < 1 {
-		col = 1
-	}
-	r := rect{Row: row, Col: col, W: boxW, H: boxH}
-	s.FillRect(r)
-	drawFrame(s, r, "Select driver", true)
+	r := widget.CenterDialog(a.term.width, a.term.height, widget.DialogOpts{
+		PrefW: 50, PrefH: len(l.picker.Filtered) + 6,
+		MinW: 24, MinH: 10, Margin: dialogMargin,
+	})
+	row, col := r.Row, r.Col
+	boxH := r.H
+	widget.DrawDialog(s, r, "Select driver", true)
 
 	innerCol := col + 2
-	innerW := boxW - 4
+	innerW := r.W - 4
 
-	// Search input row.
 	searchRow := row + 1
 	s.SetFg(colorTitleUnfocused)
 	s.WriteAt(searchRow, innerCol, "Search:")
@@ -115,34 +46,29 @@ func (l *driverPickerLayer) Draw(a *app, s *cellbuf) {
 	if qMax < 1 {
 		qMax = 1
 	}
-	qs := []rune(l.query.String())
-	if len(qs) > qMax {
-		qs = qs[len(qs)-qMax:]
-	}
-	s.WriteAt(searchRow, qCol, string(qs))
-	s.PlaceCursor(searchRow, qCol+len(qs))
+	drawInput(s, l.picker.Query, searchRow, qCol, qMax)
 
-	// List.
 	listTop := row + 3
-	maxRows := boxH - 5
-	if maxRows < 1 {
-		maxRows = 1
+	listH := boxH - 5
+	if listH < 1 {
+		listH = 1
 	}
-	scroll := 0
-	if l.selected >= maxRows {
-		scroll = l.selected - maxRows + 1
-	}
-	for i := 0; i < maxRows && i+scroll < len(l.filtered); i++ {
-		item := l.filtered[i+scroll]
-		line := item.label
-		if item.label != item.name {
-			line = item.label + "  (" + item.name + ")"
+	l.picker.List.ListTop = listTop
+	l.picker.List.ListH = listH
+	l.picker.List.ViewportScroll(listH)
+
+	start, end := l.picker.List.VisibleRange()
+	for i := start; i < end; i++ {
+		item := l.picker.Filtered[i]
+		line := item.Label
+		if item.Label != item.Key {
+			line = item.Label + "  (" + item.Key + ")"
 		}
 		if len([]rune(line)) > innerW {
 			line = string([]rune(line)[:innerW])
 		}
-		y := listTop + i
-		if i+scroll == l.selected {
+		y := listTop + (i - start)
+		if l.picker.List.IsSelected(i) {
 			s.SetFg(colorBorderFocused)
 			s.WriteAt(y, innerCol, "> "+line)
 			s.ResetStyle()
@@ -150,7 +76,7 @@ func (l *driverPickerLayer) Draw(a *app, s *cellbuf) {
 			s.WriteAt(y, innerCol, "  "+line)
 		}
 	}
-	if len(l.filtered) == 0 {
+	if len(l.picker.Filtered) == 0 {
 		s.WriteAt(listTop, innerCol, "(no matches)")
 	}
 }
@@ -160,29 +86,19 @@ func (l *driverPickerLayer) HandleKey(a *app, k Key) {
 	case KeyEsc:
 		a.popLayer()
 		return
-	case KeyUp:
-		if l.selected > 0 {
-			l.selected--
-		}
-		return
-	case KeyDown:
-		if l.selected < len(l.filtered)-1 {
-			l.selected++
-		}
-		return
 	case KeyEnter:
-		if l.selected >= 0 && l.selected < len(l.filtered) {
-			name := l.filtered[l.selected].name
+		if it, ok := l.picker.Selected(); ok {
 			a.popLayer()
 			if l.onPick != nil {
-				l.onPick(name)
+				l.onPick(it.Key)
 			}
 		}
 		return
 	}
-	if l.query.handle(k) {
-		l.refilter()
+	if l.picker.HandleNav(k) {
+		return
 	}
+	l.picker.HandleQuery(k)
 }
 
 func (l *driverPickerLayer) Hints(a *app) string {

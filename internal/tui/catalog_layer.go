@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
+	"github.com/Nulifyer/sqlgo/internal/tui/widget"
 )
 
 // catalogLayer is the SSMS-style "change active database" picker. Opens
@@ -15,15 +16,11 @@ import (
 // the active query tab's activeCatalog. The first entry is a sentinel
 // that clears the pin (session falls back to the login default).
 type catalogLayer struct {
-	all      []string
-	entries  []string
-	search   *input
-	selected int
-	scroll   int
-	status   string
-
-	lastListTop int
-	lastListH   int
+	all     []string
+	entries []string
+	search  *input
+	list    widget.ScrollList
+	status  string
 }
 
 // catalogClear is the sentinel label rendered above the real DB list.
@@ -47,12 +44,8 @@ func (cl *catalogLayer) refilter() {
 			cl.entries = append(cl.entries, n)
 		}
 	}
-	if cl.selected >= len(cl.entries) {
-		cl.selected = len(cl.entries) - 1
-	}
-	if cl.selected < 0 {
-		cl.selected = 0
-	}
+	cl.list.Len = len(cl.entries)
+	cl.list.Clamp()
 	if len(cl.all) == 0 {
 		cl.status = "no databases available"
 	} else {
@@ -61,52 +54,26 @@ func (cl *catalogLayer) refilter() {
 }
 
 func (cl *catalogLayer) Draw(a *app, c *cellbuf) {
-	boxW := 60
-	if boxW > a.term.width-dialogMargin {
-		boxW = a.term.width - dialogMargin
-	}
-	if boxW < 30 {
-		boxW = 30
-	}
-	boxH := 16
-	if boxH > a.term.height-dialogMargin {
-		boxH = a.term.height - dialogMargin
-	}
-	if boxH < 10 {
-		boxH = 10
-	}
-	row := (a.term.height - boxH) / 2
-	col := (a.term.width - boxW) / 2
-	if row < 1 {
-		row = 1
-	}
-	if col < 1 {
-		col = 1
-	}
-	r := rect{Row: row, Col: col, W: boxW, H: boxH}
-	c.FillRect(r)
+	r := widget.CenterDialog(a.term.width, a.term.height, widget.DialogOpts{
+		PrefW: 60, PrefH: 16, MinW: 30, MinH: 10, Margin: dialogMargin,
+	})
+	row, col := r.Row, r.Col
 
 	title := "Change database"
 	m := a.mainLayerPtr()
 	if m != nil && m.session != nil && m.session.activeCatalog != "" {
 		title = title + " (current: " + m.session.activeCatalog + ")"
 	}
-	drawFrame(c, r, title, true)
+	widget.DrawDialog(c, r, title, true)
 
 	innerCol := col + 2
 	c.WriteAt(row+1, innerCol, "Search:")
 	searchCol := innerCol + 8
-	searchW := boxW - 8 - 4
+	searchW := r.W - 8 - 4
 	if searchW < 1 {
 		searchW = 1
 	}
-	val := cl.search.String()
-	rs := []rune(val)
-	if len(rs) > searchW {
-		rs = rs[len(rs)-searchW:]
-	}
-	c.WriteAt(row+1, searchCol, string(rs))
-	c.PlaceCursor(row+1, searchCol+len(rs))
+	drawInput(c, cl.search, row+1, searchCol, searchW)
 
 	c.HLine(row+2, col+1, col+r.W-2, '─')
 
@@ -116,37 +83,26 @@ func (cl *catalogLayer) Draw(a *app, c *cellbuf) {
 	if listH < 1 {
 		listH = 1
 	}
-	cl.lastListTop = listTop
-	cl.lastListH = listH
+	cl.list.ListTop = listTop
+	cl.list.ListH = listH
+	cl.list.ViewportScroll(listH)
 
-	if cl.selected < cl.scroll {
-		cl.scroll = cl.selected
-	}
-	if cl.selected >= cl.scroll+listH {
-		cl.scroll = cl.selected - listH + 1
-	}
-	if cl.scroll < 0 {
-		cl.scroll = 0
-	}
-
-	for i := 0; i < listH; i++ {
-		idx := cl.scroll + i
-		if idx >= len(cl.entries) {
-			break
-		}
-		label := cl.entries[idx]
-		if idx == cl.selected {
+	start, end := cl.list.VisibleRange()
+	for i := start; i < end; i++ {
+		label := cl.entries[i]
+		y := listTop + (i - start)
+		if cl.list.IsSelected(i) {
 			c.SetFg(colorBorderFocused)
-			c.WriteAt(listTop+i, innerCol, truncate("▶ "+label, boxW-4))
+			c.WriteAt(y, innerCol, truncate("▶ "+label, r.W-4))
 			c.ResetStyle()
 		} else {
-			c.WriteAt(listTop+i, innerCol, truncate("  "+label, boxW-4))
+			c.WriteAt(y, innerCol, truncate("  "+label, r.W-4))
 		}
 	}
 
 	if cl.status != "" {
 		c.SetFg(colorStatusBar)
-		c.WriteAt(row+r.H-2, innerCol, truncate(cl.status, boxW-4))
+		c.WriteAt(row+r.H-2, innerCol, truncate(cl.status, r.W-4))
 		c.ResetStyle()
 	}
 }
@@ -156,43 +112,24 @@ func (cl *catalogLayer) HandleKey(a *app, k Key) {
 	case KeyEsc:
 		a.popLayer()
 		return
-	case KeyUp:
-		if cl.selected > 0 {
-			cl.selected--
-		}
-		return
-	case KeyDown:
-		if cl.selected < len(cl.entries)-1 {
-			cl.selected++
-		}
-		return
-	case KeyPgUp:
-		cl.selected -= 10
-		if cl.selected < 0 {
-			cl.selected = 0
-		}
-		return
-	case KeyPgDn:
-		cl.selected += 10
-		if cl.selected > len(cl.entries)-1 {
-			cl.selected = len(cl.entries) - 1
-		}
-		return
 	case KeyEnter:
 		cl.apply(a)
 		return
 	}
-	cl.search.handle(k)
-	cl.selected = 0
-	cl.scroll = 0
+	if cl.list.HandleKey(k) {
+		return
+	}
+	cl.search.Handle(k)
+	cl.list.Selected = 0
+	cl.list.Scroll = 0
 	cl.refilter()
 }
 
 func (cl *catalogLayer) apply(a *app) {
-	if cl.selected < 0 || cl.selected >= len(cl.entries) {
+	if cl.list.Selected < 0 || cl.list.Selected >= len(cl.entries) {
 		return
 	}
-	pick := cl.entries[cl.selected]
+	pick := cl.entries[cl.list.Selected]
 	m := a.mainLayerPtr()
 	if m == nil || m.session == nil {
 		a.popLayer()

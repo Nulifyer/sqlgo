@@ -96,6 +96,22 @@ type explorer struct {
 	err      string         // non-empty when schema load failed
 	loading  string         // non-empty while a schema fetch is in flight; holds current spinner frame
 
+	// Inline search. When active, the explorer draws a search bar at the
+	// top of its inner area and filters items to those whose label (or a
+	// descendant's label) contains the query substring (case-insensitive).
+	// During search, all groups behave as if expanded so matches aren't
+	// hidden behind a collapsed parent; the actual expanded map is
+	// preserved and restored when search is deactivated.
+	//
+	// searchFocused splits the active state so shortcut runes (e, s, R,
+	// u...) don't fight with the search input. Only when focused do
+	// typed runes feed the query; once the user presses Up/Down to
+	// navigate the filtered list, focus drops so runes resume their
+	// shortcut meaning. Ctrl+F re-focuses without clearing the filter.
+	searchActive  bool
+	searchFocused bool
+	searchInput   *input
+
 	// DB-tier mode (SupportsCrossDatabase + blank default database).
 	// dbMode flips rebuild into a top-level list of databases; each
 	// expanded entry draws the standard schema tier from dbSchemas[name].
@@ -125,6 +141,93 @@ func (e *explorer) ResetDatabases() {
 	e.dbLoading = map[string]string{}
 	e.dbErr = map[string]string{}
 	e.expanded = map[string]bool{}
+	e.searchActive = false
+	e.searchFocused = false
+	e.searchInput = nil
+}
+
+// ActivateSearch opens the inline search bar and focuses it so typed
+// runes start narrowing the filter immediately. If the bar is already
+// open, ActivateSearch just re-focuses it so Ctrl+F after navigating
+// away brings the caret back into the query field without clearing it.
+func (e *explorer) ActivateSearch() {
+	if e.searchInput == nil {
+		e.searchInput = newInput("")
+	}
+	if !e.searchActive {
+		e.searchActive = true
+		e.cursor = 0
+		e.scroll = 0
+		e.rebuild()
+	}
+	e.searchFocused = true
+}
+
+// DeactivateSearch clears the search bar and returns the tree to its
+// pre-search view (original expansion state preserved).
+func (e *explorer) DeactivateSearch() {
+	e.searchActive = false
+	e.searchFocused = false
+	if e.searchInput != nil {
+		e.searchInput = newInput("")
+	}
+	e.cursor = 0
+	e.scroll = 0
+	e.rebuild()
+}
+
+// IsSearching reports whether the inline search bar is currently open.
+func (e *explorer) IsSearching() bool {
+	return e.searchActive
+}
+
+// IsSearchFocused reports whether the search bar is the current key
+// target. False when the bar is open but the user has moved the cursor
+// into the filtered list; in that state runes resume their shortcut
+// meaning (e=edit, s=SELECT, etc.).
+func (e *explorer) IsSearchFocused() bool {
+	return e.searchActive && e.searchFocused
+}
+
+// HandleSearchKey feeds a key to the inline search input, but only
+// when the search bar currently owns focus. Returns false (letting the
+// caller handle the key) for nav keys and anything pressed while the
+// bar is defocused. Up/Down/PgUp/PgDn defocus the bar as a side effect
+// so the next typed rune works as a tree shortcut; the filter itself
+// stays applied.
+func (e *explorer) HandleSearchKey(k Key) bool {
+	if !e.searchActive || !e.searchFocused {
+		return false
+	}
+	switch k.Kind {
+	case KeyEsc:
+		e.DeactivateSearch()
+		return true
+	case KeyUp, KeyDown, KeyPgUp, KeyPgDn:
+		e.searchFocused = false
+		return false
+	case KeyEnter:
+		return false
+	}
+	if e.searchInput == nil {
+		e.searchInput = newInput("")
+	}
+	if e.searchInput.Handle(k) {
+		e.cursor = 0
+		e.scroll = 0
+		e.rebuild()
+	}
+	return true
+}
+
+// isExpanded returns the effective expansion state for key: during
+// search everything is treated as expanded so matches deep in a
+// collapsed subtree still surface.
+func (e *explorer) isExpanded(key string) bool {
+	if e.searchActive {
+		return true
+	}
+	return e.expanded[key]
 }
 
 // SetSchema replaces the displayed schema and resets cursor/scroll.
@@ -389,6 +492,13 @@ func (e *explorer) SelectedSchema() string {
 func (e *explorer) ItemAt(r rect, screenRow int) int {
 	innerRow := r.Row + 1
 	innerH := r.H - 2
+	if e.searchActive {
+		innerRow++
+		innerH--
+	}
+	if innerH <= 0 {
+		return -1
+	}
 	if screenRow < innerRow || screenRow >= innerRow+innerH {
 		return -1
 	}
@@ -496,7 +606,7 @@ func (e *explorer) rebuild() {
 				label:   name,
 				catalog: name,
 			})
-			if !e.expanded[dbExpansionKey(name)] {
+			if !e.isExpanded(dbExpansionKey(name)) {
 				continue
 			}
 			if msg, ok := e.dbErr[name]; ok && msg != "" {
@@ -525,12 +635,86 @@ func (e *explorer) rebuild() {
 		e.emitSchemaTier("", e.info, e.depth)
 	}
 
+	e.applySearchFilter()
+
 	if e.cursor >= len(e.items) {
 		e.cursor = len(e.items) - 1
 	}
 	if e.cursor < 0 {
 		e.cursor = 0
 	}
+}
+
+// applySearchFilter drops items that don't match the current search
+// query or aren't on the ancestry chain of a match. Label-matching is
+// case-insensitive substring. When a parent (DB/schema/subgroup) itself
+// matches, all of its descendants are kept too -- e.g. typing "Tables"
+// keeps the Tables subgroup plus every table under it.
+func (e *explorer) applySearchFilter() {
+	if !e.searchActive || e.searchInput == nil {
+		return
+	}
+	q := strings.ToLower(strings.TrimSpace(e.searchInput.String()))
+	if q == "" {
+		return
+	}
+	keep := make([]bool, len(e.items))
+
+	// First pass: row kept if it or any live ancestor matches.
+	dbMatch, schemaMatch, subMatch := false, false, false
+	for i, it := range e.items {
+		lm := strings.Contains(strings.ToLower(it.label), q)
+		switch it.kind {
+		case itemDatabase:
+			dbMatch = lm
+			schemaMatch = false
+			subMatch = false
+		case itemSchema:
+			schemaMatch = lm
+			subMatch = false
+		case itemSubgroup:
+			subMatch = lm
+		}
+		if lm || dbMatch || schemaMatch || subMatch {
+			keep[i] = true
+		}
+	}
+
+	// Second pass: pull every kept row's ancestors into the result.
+	dbIdx, schemaIdx, subIdx := -1, -1, -1
+	for i, it := range e.items {
+		switch it.kind {
+		case itemDatabase:
+			dbIdx = i
+			schemaIdx = -1
+			subIdx = -1
+		case itemSchema:
+			schemaIdx = i
+			subIdx = -1
+		case itemSubgroup:
+			subIdx = i
+		}
+		if !keep[i] {
+			continue
+		}
+		if dbIdx >= 0 {
+			keep[dbIdx] = true
+		}
+		if schemaIdx >= 0 {
+			keep[schemaIdx] = true
+		}
+		if subIdx >= 0 {
+			keep[subIdx] = true
+		}
+	}
+
+	out := make([]explorerItem, 0, len(e.items))
+	for i, it := range e.items {
+		if keep[i] {
+			out = append(out, it)
+		}
+	}
+	e.items = out
 }
 
 // emitSchemaTier flattens info into schema/subgroup/leaf rows under
@@ -613,7 +797,7 @@ func (e *explorer) emitSchemaTier(catalog string, info *db.SchemaInfo, depth db.
 				catalog:    catalog,
 				schemaName: s,
 			})
-			if !e.expanded[schemaExpansionKey(catalog, s)] {
+			if !e.isExpanded(schemaExpansionKey(catalog, s)) {
 				continue
 			}
 			emit(s, buckets[s])
@@ -630,7 +814,7 @@ func (e *explorer) emitSchemaTier(catalog string, info *db.SchemaInfo, depth db.
 			catalog:    catalog,
 			schemaName: sysSchemaSentinel,
 		})
-		if e.expanded[schemaExpansionKey(catalog, sysSchemaSentinel)] {
+		if e.isExpanded(schemaExpansionKey(catalog, sysSchemaSentinel)) {
 			emit(sysSchemaSentinel, sysBucket)
 		}
 	}
@@ -647,7 +831,7 @@ func (e *explorer) appendTableSubgroup(catalog, schema string, sg subgroupKind, 
 		schemaName: schema,
 		subgroup:   sg,
 	})
-	if !e.expanded[subgroupExpansionKey(catalog, schema, sg)] {
+	if !e.isExpanded(subgroupExpansionKey(catalog, schema, sg)) {
 		return
 	}
 	for _, t := range entries {
@@ -677,7 +861,7 @@ func (e *explorer) appendRoutineSubgroup(catalog, schema string, sg subgroupKind
 		schemaName: schema,
 		subgroup:   sg,
 	})
-	if !e.expanded[subgroupExpansionKey(catalog, schema, sg)] {
+	if !e.isExpanded(subgroupExpansionKey(catalog, schema, sg)) {
 		return
 	}
 	leafKind := itemFunction
@@ -712,7 +896,7 @@ func (e *explorer) appendTriggerSubgroup(catalog, schema string, entries []db.Tr
 		schemaName: schema,
 		subgroup:   subgroupTriggers,
 	})
-	if !e.expanded[subgroupExpansionKey(catalog, schema, subgroupTriggers)] {
+	if !e.isExpanded(subgroupExpansionKey(catalog, schema, subgroupTriggers)) {
 		return
 	}
 	for _, tr := range entries {
@@ -765,6 +949,33 @@ func (e *explorer) draw(c *cellbuf, r rect, focused bool) {
 		return
 	}
 
+	// When search is active, reserve the top inner row for the search
+	// input so the list still starts just below it. Up/Down stay bound
+	// to the list; the input only receives typed runes via
+	// HandleSearchKey.
+	if e.searchActive {
+		label := "Find: "
+		c.WriteAt(innerRow, innerCol, label)
+		valCol := innerCol + len([]rune(label))
+		valMax := innerW - len([]rune(label))
+		if valMax < 1 {
+			valMax = 1
+		}
+		if e.searchInput == nil {
+			e.searchInput = newInput("")
+		}
+		if focused && e.searchFocused {
+			drawInput(c, e.searchInput, innerRow, valCol, valMax)
+		} else {
+			c.WriteAt(innerRow, valCol, truncate(e.searchInput.String(), valMax))
+		}
+		innerRow++
+		innerH--
+		if innerH <= 0 {
+			return
+		}
+	}
+
 	if e.loading != "" {
 		c.WriteAt(innerRow, innerCol, truncate(e.loading+" loading schema…", innerW))
 		return
@@ -774,9 +985,12 @@ func (e *explorer) draw(c *cellbuf, r rect, focused bool) {
 		return
 	}
 	if len(e.items) == 0 {
-		msg := "(no schema loaded)"
-		if e.info != nil {
-			msg = "(empty)"
+		msg := "(no matches)"
+		if !e.searchActive {
+			msg = "(no schema loaded)"
+			if e.info != nil {
+				msg = "(empty)"
+			}
 		}
 		c.WriteAt(innerRow, innerCol, truncate(msg, innerW))
 		return
@@ -798,7 +1012,7 @@ func (e *explorer) draw(c *cellbuf, r rect, focused bool) {
 		if idx >= len(e.items) {
 			break
 		}
-		line := renderExplorerLine(e.items[idx], e.expanded)
+		line := renderExplorerLine(e.items[idx], e.isExpanded)
 		selected := idx == e.cursor && focused
 		if selected {
 			c.SetFg(colorTitleFocused)
@@ -815,7 +1029,7 @@ func (e *explorer) draw(c *cellbuf, r rect, focused bool) {
 // mode (SQLite) the schema layer is skipped so subgroups sit at 0 and
 // leaves at 2. The Flat case is distinguished by an empty schemaName
 // on the subgroup / leaf (populated by rebuild()).
-func renderExplorerLine(it explorerItem, expanded map[string]bool) string {
+func renderExplorerLine(it explorerItem, isExpanded func(string) bool) string {
 	dbIndent := ""
 	if it.catalog != "" && it.kind != itemDatabase {
 		dbIndent = "  "
@@ -823,13 +1037,13 @@ func renderExplorerLine(it explorerItem, expanded map[string]bool) string {
 	switch it.kind {
 	case itemDatabase:
 		marker := "▸"
-		if expanded[dbExpansionKey(it.catalog)] {
+		if isExpanded(dbExpansionKey(it.catalog)) {
 			marker = "▾"
 		}
 		return marker + " " + it.label
 	case itemSchema:
 		marker := "▸"
-		if expanded[schemaExpansionKey(it.catalog, it.schemaName)] {
+		if isExpanded(schemaExpansionKey(it.catalog, it.schemaName)) {
 			marker = "▾"
 		}
 		return dbIndent + marker + " " + it.label
@@ -841,7 +1055,7 @@ func renderExplorerLine(it explorerItem, expanded map[string]bool) string {
 			return dbIndent + "  " + it.label
 		}
 		marker := "▸"
-		if expanded[subgroupExpansionKey(it.catalog, it.schemaName, it.subgroup)] {
+		if isExpanded(subgroupExpansionKey(it.catalog, it.schemaName, it.subgroup)) {
 			marker = "▾"
 		}
 		if it.schemaName == "" {

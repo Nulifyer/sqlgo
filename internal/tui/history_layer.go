@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/store"
+	"github.com/Nulifyer/sqlgo/internal/tui/widget"
 )
 
 // historyScope selects which connection's history the browser shows.
@@ -30,23 +31,16 @@ const (
 // scope with 'X' (two-press confirmation). Tab toggles between the
 // current-connection scope and the all-connections scope.
 type historyLayer struct {
-	search   *input
-	entries  []store.HistoryEntry
-	selected int
-	scroll   int
-	scope    historyScope
-	status   string
+	search  *input
+	entries []store.HistoryEntry
+	list    widget.ScrollList
+	scope   historyScope
+	status  string
 	// clearArmed is a transient flag: pressing 'X' the first time
 	// arms the confirmation, a second press within the confirmation
 	// window actually wipes. Any other keypress disarms.
 	clearArmed bool
-
-	// lastListTop / lastListH record the last-rendered results-list
-	// geometry so the mouse hit test can map a Y coordinate to an
-	// entry index without recomputing the dialog box layout.
-	lastListTop int
-	lastListH   int
-	clicks      clickTracker
+	clicks     clickTracker
 }
 
 // historyFetchSize scales the row pull with the terminal height so
@@ -101,17 +95,14 @@ func (h *historyLayer) reload(a *app) {
 	if err != nil {
 		h.status = "history: " + err.Error()
 		h.entries = nil
-		h.selected = 0
-		h.scroll = 0
+		h.list.Len = 0
+		h.list.Selected = 0
+		h.list.Scroll = 0
 		return
 	}
 	h.entries = entries
-	if h.selected >= len(entries) {
-		h.selected = len(entries) - 1
-	}
-	if h.selected < 0 {
-		h.selected = 0
-	}
+	h.list.Len = len(entries)
+	h.list.Clamp()
 	if len(entries) == 0 {
 		h.status = "no matches"
 	} else {
@@ -164,13 +155,7 @@ func (h *historyLayer) Draw(a *app, c *cellbuf) {
 	if searchW < 1 {
 		searchW = 1
 	}
-	val := h.search.String()
-	rs := []rune(val)
-	if len(rs) > searchW {
-		rs = rs[len(rs)-searchW:]
-	}
-	c.WriteAt(row+1, searchCol, string(rs))
-	c.PlaceCursor(row+1, searchCol+len(rs))
+	drawInput(c, h.search, row+1, searchCol, searchW)
 
 	// Separator row of dashes under the search field.
 	c.HLine(row+2, col+1, col+r.W-2, '─')
@@ -182,8 +167,8 @@ func (h *historyLayer) Draw(a *app, c *cellbuf) {
 	if listH < 1 {
 		listH = 1
 	}
-	h.lastListTop = listTop
-	h.lastListH = listH
+	h.list.ListTop = listTop
+	h.list.ListH = listH
 
 	if len(h.entries) == 0 {
 		msg := "(no history)"
@@ -192,30 +177,18 @@ func (h *historyLayer) Draw(a *app, c *cellbuf) {
 		}
 		c.WriteAt(listTop, innerCol, truncate(msg, boxW-4))
 	} else {
-		// Keep the selected row visible.
-		if h.selected < h.scroll {
-			h.scroll = h.selected
-		}
-		if h.selected >= h.scroll+listH {
-			h.scroll = h.selected - listH + 1
-		}
-		if h.scroll < 0 {
-			h.scroll = 0
-		}
-
-		for i := 0; i < listH; i++ {
-			idx := h.scroll + i
-			if idx >= len(h.entries) {
-				break
-			}
-			e := h.entries[idx]
+		h.list.ViewportScroll(listH)
+		start, end := h.list.VisibleRange()
+		for i := start; i < end; i++ {
+			e := h.entries[i]
 			line := formatHistoryLine(e, boxW-4, h.scope == scopeAll)
-			if idx == h.selected {
+			y := listTop + (i - start)
+			if h.list.IsSelected(i) {
 				c.SetFg(colorBorderFocused)
-				c.WriteAt(listTop+i, innerCol, truncate("▶ "+line, boxW-4))
+				c.WriteAt(y, innerCol, truncate("▶ "+line, boxW-4))
 				c.ResetStyle()
 			} else {
-				c.WriteAt(listTop+i, innerCol, truncate("  "+line, boxW-4))
+				c.WriteAt(y, innerCol, truncate("  "+line, boxW-4))
 			}
 		}
 	}
@@ -233,28 +206,6 @@ func (h *historyLayer) HandleKey(a *app, k Key) {
 	case KeyEsc:
 		a.popLayer()
 		return
-	case KeyUp:
-		if h.selected > 0 {
-			h.selected--
-		}
-		return
-	case KeyDown:
-		if h.selected < len(h.entries)-1 {
-			h.selected++
-		}
-		return
-	case KeyPgUp:
-		h.selected -= 10
-		if h.selected < 0 {
-			h.selected = 0
-		}
-		return
-	case KeyPgDn:
-		h.selected += 10
-		if h.selected > len(h.entries)-1 {
-			h.selected = len(h.entries) - 1
-		}
-		return
 	case KeyEnter:
 		h.useSelected(a)
 		return
@@ -265,10 +216,13 @@ func (h *historyLayer) HandleKey(a *app, k Key) {
 		} else {
 			h.scope = scopeCurrent
 		}
-		h.selected = 0
-		h.scroll = 0
+		h.list.Selected = 0
+		h.list.Scroll = 0
 		h.clearArmed = false
 		h.reload(a)
+		return
+	}
+	if h.list.HandleKey(k) {
 		return
 	}
 	// 'd' deletes the selected entry; 'X' wipes the whole current
@@ -290,9 +244,9 @@ func (h *historyLayer) HandleKey(a *app, k Key) {
 	// disarms the clear confirmation so the user can't accidentally
 	// confirm by typing in the search box.
 	h.clearArmed = false
-	h.search.handle(k)
-	h.selected = 0
-	h.scroll = 0
+	h.search.Handle(k)
+	h.list.Selected = 0
+	h.list.Scroll = 0
 	h.reload(a)
 }
 
@@ -300,10 +254,10 @@ func (h *historyLayer) HandleKey(a *app, k Key) {
 // the store and reloads the visible list. Status line carries the
 // outcome so the user sees which id went away.
 func (h *historyLayer) deleteSelected(a *app) {
-	if h.selected < 0 || h.selected >= len(h.entries) {
+	if h.list.Selected < 0 || h.list.Selected >= len(h.entries) {
 		return
 	}
-	target := h.entries[h.selected]
+	target := h.entries[h.list.Selected]
 	ctx, cancel := context.WithTimeout(context.Background(), storeQuickTimeout)
 	defer cancel()
 	if err := a.store.DeleteHistory(ctx, target.ID); err != nil {
@@ -312,15 +266,15 @@ func (h *historyLayer) deleteSelected(a *app) {
 	}
 	// Stay on roughly the same position after reload: if we just
 	// deleted the last row, step back by one.
-	prev := h.selected
+	prev := h.list.Selected
 	h.reload(a)
 	if prev >= len(h.entries) {
-		h.selected = len(h.entries) - 1
-		if h.selected < 0 {
-			h.selected = 0
+		h.list.Selected = len(h.entries) - 1
+		if h.list.Selected < 0 {
+			h.list.Selected = 0
 		}
 	} else {
-		h.selected = prev
+		h.list.Selected = prev
 	}
 	h.status = fmt.Sprintf("deleted entry #%d", target.ID)
 }
@@ -356,17 +310,17 @@ func (h *historyLayer) confirmClear(a *app) {
 		h.status = "clear: " + err.Error()
 		return
 	}
-	h.selected = 0
-	h.scroll = 0
+	h.list.Selected = 0
+	h.list.Scroll = 0
 	h.reload(a)
 	h.status = fmt.Sprintf("cleared %d entries", n)
 }
 
 func (h *historyLayer) useSelected(a *app) {
-	if h.selected < 0 || h.selected >= len(h.entries) {
+	if h.list.Selected < 0 || h.list.Selected >= len(h.entries) {
 		return
 	}
-	sql := h.entries[h.selected].SQL
+	sql := h.entries[h.list.Selected].SQL
 	m := a.mainLayerPtr()
 	m.editor.buf.SetText(sql)
 	m.focus = FocusQuery
@@ -386,41 +340,19 @@ func (h *historyLayer) HandleInput(a *app, msg InputMsg) bool {
 	if !ok {
 		return false
 	}
-	switch mm.Button {
-	case MouseButtonWheelUp:
-		if h.selected > 0 {
-			h.selected--
-		}
-		return true
-	case MouseButtonWheelDown:
-		if h.selected < len(h.entries)-1 {
-			h.selected++
-		}
-		return true
-	case MouseButtonLeft:
-		if mm.Action != MouseActionPress {
-			return false
-		}
-		if h.lastListH <= 0 {
-			return false
-		}
-		rowIdx := mm.Y - h.lastListTop
-		if rowIdx < 0 || rowIdx >= h.lastListH {
-			return false
-		}
-		entryIdx := h.scroll + rowIdx
-		if entryIdx < 0 || entryIdx >= len(h.entries) {
-			return false
-		}
-		h.selected = entryIdx
+	clicked, consumed := h.list.HandleMouse(mm)
+	if !consumed {
+		return false
+	}
+	if clicked >= 0 {
+		h.list.Selected = clicked
 		h.clearArmed = false
 		count := h.clicks.bump(mm)
 		if count >= 2 {
 			h.useSelected(a)
 		}
-		return true
 	}
-	return false
+	return true
 }
 
 func (h *historyLayer) Hints(a *app) string {
