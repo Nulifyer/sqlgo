@@ -23,6 +23,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/Nulifyer/sqlgo/internal/db/errinfo"
 	"github.com/Nulifyer/sqlgo/internal/sqltok"
 )
 
@@ -430,6 +431,12 @@ func (a aliasDriver) Name() string               { return a.name }
 func (a aliasDriver) Capabilities() Capabilities { return a.base.Capabilities() }
 func (a aliasDriver) Open(ctx context.Context, cfg Config) (Conn, error) {
 	return a.base.Open(ctx, cfg)
+}
+func (a aliasDriver) ParseError(err error, sql string) errinfo.Info {
+	if parser, ok := a.base.(ErrorParser); ok {
+		return parser.ParseError(err, sql)
+	}
+	return errinfo.Plain(err)
 }
 
 // Get returns a registered driver by name.

@@ -247,6 +247,7 @@ func (e *editor) acceptCompletion() {
 		e.buf.Backspace()
 	}
 	e.buf.InsertText(item.text)
+	e.ClearErrorLocation()
 	e.complete = nil
 }
 

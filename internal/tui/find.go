@@ -130,6 +130,7 @@ func (e *editor) applyReplaceAt(m matchRange, replacement string) {
 		e.buf.Backspace()
 	}
 	e.buf.InsertText(replacement)
+	e.ClearErrorLocation()
 }
 
 // jumpToCurrentMatch moves the cursor to the match start; scroll

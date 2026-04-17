@@ -45,6 +45,7 @@ var defaultTheme = term.Theme{
 	SQLFunction: Style{FG: ansiBrightYellow, BG: ansiDefaultBG, Attrs: attrBold},
 	SQLTable:    Style{FG: ansiBrightCyan, BG: ansiDefaultBG},
 	SQLColumn:   Style{FG: ansiDefault, BG: ansiDefaultBG},
+	EditorError: Style{FG: ansiBrightRed, BG: ansiDefaultBG},
 }
 
 var currentTheme = defaultTheme

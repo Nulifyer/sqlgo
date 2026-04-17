@@ -107,6 +107,9 @@ func (m *mainLayer) HandleInput(a *app, msg InputMsg) bool {
 		if m.focus == FocusQuery && v.Text != "" {
 			before := m.editor.buf.Text()
 			m.editor.buf.InsertText(v.Text)
+			if m.editor.buf.Text() != before {
+				m.editor.ClearErrorLocation()
+			}
 			if len(m.sessions) == 0 && m.editor.buf.Text() != before {
 				m.ensureActiveTab()
 			}
@@ -1041,7 +1044,11 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 			if len(m.sessions) == 0 {
 				return
 			}
+			before := m.editor.buf.Text()
 			m.editor.buf.Clear()
+			if m.editor.buf.Text() != before {
+				m.editor.ClearErrorLocation()
+			}
 			m.promoteActiveIfPreview()
 			return
 		}
@@ -1547,6 +1554,7 @@ func (m *mainLayer) formatQuery() {
 		return
 	}
 	m.editor.buf.SetText(formatted)
+	m.editor.ClearErrorLocation()
 	m.promoteActiveIfPreview()
 	m.status = "formatted"
 }
@@ -1591,6 +1599,7 @@ func (m *mainLayer) prefillSelectFromExplorer(a *app) {
 	sess := m.sessions[prev]
 	sess.title = t.Name
 	sess.editor.buf.SetText(sql)
+	sess.editor.ClearErrorLocation()
 	if t.Catalog != "" {
 		sess.activeCatalog = t.Catalog
 	}

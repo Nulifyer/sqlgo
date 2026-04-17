@@ -231,6 +231,7 @@ func (ol *openLayer) load(a *app) {
 	text := string(data)
 	sess := m.ensureActiveTab()
 	sess.editor.buf.SetText(text)
+	sess.editor.ClearErrorLocation()
 	sess.sourcePath = path
 	sess.savedText = text
 	sess.title = filepath.Base(path)
@@ -262,6 +263,7 @@ func (ol *openLayer) loadMarked(a *app, marked []string) {
 		m.newTab()
 		text := string(data)
 		m.editor.buf.SetText(text)
+		m.editor.ClearErrorLocation()
 		m.session.sourcePath = abs
 		m.session.savedText = text
 		m.session.title = filepath.Base(abs)

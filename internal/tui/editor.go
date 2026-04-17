@@ -33,6 +33,12 @@ type editor struct {
 	scrollRow int
 	scrollCol int
 
+	// errLine/errCol hold the most recent query error location for
+	// this editor. line/col are 1-based so they match server errors
+	// and the Results-pane header text directly.
+	errLine int
+	errCol  int
+
 	// complete is the live autocomplete popup or nil. One-shot:
 	// typing after open dismisses (no prefix refinement).
 	complete *completionState
@@ -62,9 +68,46 @@ func newEditor() *editor {
 	return &editor{buf: newBuffer()}
 }
 
+// SetErrorLocation stores the most recent query error location for this
+// editor. line/col are 1-based; col <= 0 means "line only".
+func (e *editor) SetErrorLocation(line, col int) {
+	if line <= 0 {
+		e.ClearErrorLocation()
+		return
+	}
+	e.errLine = line
+	if col > 0 {
+		e.errCol = col
+	} else {
+		e.errCol = 0
+	}
+}
+
+// ClearErrorLocation removes any query error marker from the editor.
+func (e *editor) ClearErrorLocation() {
+	e.errLine = 0
+	e.errCol = 0
+}
+
+func (e *editor) hasErrorLocation() bool {
+	return e.errLine > 0
+}
+
 // handleInsert applies one keypress. Returns true if consumed.
 // nil app is fine (tests); clipboard calls become no-ops.
 func (e *editor) handleInsert(a *app, k Key) bool {
+	// Only pay for buffer snapshots while an error marker exists and
+	// could become stale on the next edit.
+	before := ""
+	if e.hasErrorLocation() {
+		before = e.buf.Text()
+		defer func() {
+			if e.hasErrorLocation() && e.buf.Text() != before {
+				e.ClearErrorLocation()
+			}
+		}()
+	}
+
 	// Ctrl+Alt+Up/Down: column-add multi-cursor. Checked first
 	// so the Ctrl-arrow word-jump path below doesn't swallow it.
 	if k.Ctrl && k.Alt {
@@ -460,22 +503,30 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 	e.ensureCursorVisible(bodyW, innerH)
 
 	gutterStyle := Style{FG: ansiBrightBlack, BG: ansiDefaultBG}
+	errorStyle := currentTheme.EditorError
 	if gutter > 0 {
 		lineCount := e.buf.LineCount()
 		for i := 0; i < innerH; i++ {
 			lineIdx := e.scrollRow + i
-			var label string
-			if lineIdx < lineCount {
-				num := strconv.Itoa(lineIdx + 1)
-				pad := gutter - 1 - len(num)
-				if pad < 0 {
-					pad = 0
-					num = num[len(num)-(gutter-1):]
-				}
-				label = strings.Repeat(" ", pad) + num + " "
-			} else {
-				label = strings.Repeat(" ", gutter)
+			if lineIdx >= lineCount {
+				s.WriteStyled(innerRow+i, innerCol, strings.Repeat(" ", gutter), gutterStyle)
+				continue
 			}
+			num := strconv.Itoa(lineIdx + 1)
+			pad := gutter - 1 - len(num)
+			if pad < 0 {
+				pad = 0
+				num = num[len(num)-(gutter-1):]
+			}
+			if e.errLine == lineIdx+1 {
+				if pad > 0 {
+					s.WriteStyled(innerRow+i, innerCol, strings.Repeat(" ", pad), gutterStyle)
+				}
+				s.WriteStyled(innerRow+i, innerCol+pad, num, errorStyle)
+				s.WriteStyled(innerRow+i, innerCol+gutter-1, "!", errorStyle)
+				continue
+			}
+			label := strings.Repeat(" ", pad) + num + " "
 			s.WriteStyled(innerRow+i, innerCol, label, gutterStyle)
 		}
 	}
@@ -544,6 +595,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 
 		tokens := sqltok.TokenizeLine(line)
 		startState := lineStartStates[i]
+		markedLine, errStartCol, errEndCol, errBlankCol := e.errorMarkerForLine(lineIdx, line, tokens)
 
 		// Walk runes from scrollCol onward. colOut advances by
 		// runewidth so wide glyphs take 2 columns.
@@ -573,6 +625,9 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			if hasSel && inSelection(lineIdx, vc, selR1, selC1, selR2, selC2) {
 				st = selStyle
 			}
+			if markedLine && vc >= errStartCol && vc < errEndCol {
+				st = applyEditorErrorStyle(st)
+			}
 			// If the wide rune would spill past the right edge,
 			// paint a space instead so no half-glyph leaks.
 			if rw == 2 && colOut+2 > bodyW {
@@ -594,6 +649,17 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			for colOut < bodyW {
 				s.WriteStyled(innerRow+i, bodyCol+colOut, " ", selStyle)
 				colOut++
+			}
+		}
+
+		if markedLine && errBlankCol >= 0 {
+			if blankOut, ok := screenColForRune(line, e.scrollCol, errBlankCol); ok && blankOut < bodyW {
+				st := defaultStyle()
+				if hasSel && inSelection(lineIdx, errBlankCol, selR1, selC1, selR2, selC2) {
+					st = selStyle
+				}
+				st = applyEditorErrorFallbackStyle(st)
+				s.WriteStyled(innerRow+i, bodyCol+blankOut, " ", st)
 			}
 		}
 	}
@@ -635,6 +701,77 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 // a blank.
 func isPrintable(r rune) bool {
 	return r >= 0x20 && r != 0x7f
+}
+
+func applyEditorErrorStyle(st Style) Style {
+	st.FG = currentTheme.EditorError.FG
+	if currentTheme.EditorError.BG != ansiDefaultBG {
+		st.BG = currentTheme.EditorError.BG
+	}
+	st.Attrs |= currentTheme.EditorError.Attrs
+	return st
+}
+
+func applyEditorErrorFallbackStyle(st Style) Style {
+	st = applyEditorErrorStyle(st)
+	st.Attrs |= attrReverse
+	return st
+}
+
+// errorMarkerForLine resolves the visible error span for lineIdx.
+// Returns markedLine plus either a token/single-column underline span
+// [startCol,endCol) in rune offsets or a blankCol fallback for errors
+// that point just past the end of the line.
+func (e *editor) errorMarkerForLine(lineIdx int, line []rune, tokens []sqltok.Token) (markedLine bool, startCol, endCol, blankCol int) {
+	blankCol = -1
+	if e.errLine != lineIdx+1 {
+		return false, 0, 0, blankCol
+	}
+	if e.errCol <= 0 {
+		return true, 0, 0, blankCol
+	}
+	targetCol := e.errCol - 1
+	if targetCol < 0 {
+		return true, 0, 0, blankCol
+	}
+	for _, t := range tokens {
+		if targetCol < t.StartCol {
+			break
+		}
+		if targetCol < t.EndCol {
+			if t.Kind != sqltok.Whitespace {
+				return true, t.StartCol, t.EndCol, blankCol
+			}
+			return true, 0, 0, targetCol
+		}
+	}
+	if targetCol < len(line) {
+		return true, targetCol, targetCol + 1, blankCol
+	}
+	return true, 0, 0, targetCol
+}
+
+// screenColForRune converts a buffer rune column into a visible body
+// column offset for the current horizontal scroll position. Columns
+// beyond the end of the line keep counting as single-width blanks.
+func screenColForRune(line []rune, scrollCol, runeCol int) (int, bool) {
+	if runeCol < scrollCol {
+		return 0, false
+	}
+	colOut := 0
+	limit := runeCol
+	if limit > len(line) {
+		limit = len(line)
+	}
+	for vc := scrollCol; vc < limit; vc++ {
+		if rw := runeDisplayWidth(line[vc]); rw > 0 {
+			colOut += rw
+		}
+	}
+	if runeCol > len(line) {
+		colOut += runeCol - len(line)
+	}
+	return colOut, true
 }
 
 // styleForCol returns the syntax-highlight style for the column offset

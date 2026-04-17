@@ -22,7 +22,6 @@ import (
 	_ "github.com/Nulifyer/sqlgo/internal/db/clickhouse"
 	_ "github.com/Nulifyer/sqlgo/internal/db/d1"
 	_ "github.com/Nulifyer/sqlgo/internal/db/databricks"
-	"github.com/Nulifyer/sqlgo/internal/db/errinfo"
 	_ "github.com/Nulifyer/sqlgo/internal/db/file"
 	_ "github.com/Nulifyer/sqlgo/internal/db/firebird"
 	_ "github.com/Nulifyer/sqlgo/internal/db/flightsql"
@@ -343,6 +342,7 @@ func Run(opts Options) error {
 	ml := newMainLayer()
 	if opts.InitialQuery != "" {
 		ml.ensureActiveTab().editor.buf.SetText(opts.InitialQuery)
+		ml.editor.ClearErrorLocation()
 	}
 	a.layers = []Layer{ml}
 
@@ -634,6 +634,7 @@ func (a *app) finishConnect(c config.Connection, conn db.Conn, tunnel *sshtunnel
 	m := a.mainLayerPtr()
 	m.status = "connected"
 	m.editor.buf.Clear()
+	m.editor.ClearErrorLocation()
 	m.resetResults()
 	m.explorer.ResetDatabases()
 	for _, s := range m.sessions {
@@ -919,6 +920,7 @@ func (a *app) runQueryUnsafe() {
 	sess.lastQueryPreambleLines = preambleLines
 	sess.lastQueryStart = time.Now()
 	sess.resetResults()
+	sess.editor.ClearErrorLocation()
 	sess.status = "running query…"
 	go runSpinner(a, sess.runnerDone, func(a *app, frame string) {
 		m := a.mainLayerPtr()
@@ -1068,17 +1070,24 @@ func (a *app) handleQueryEvent(e queryEvent) {
 				e.tab.lastErr = "cancelled"
 				e.tab.lastErrLine = 0
 				e.tab.lastErrCol = 0
+				sess.editor.ClearErrorLocation()
 			} else {
-				e.tab.lastErr = e.err.Error()
-				loc := errinfo.Locate(e.err, sess.lastQuerySentSQL).
-					ShiftLines(-sess.lastQueryPreambleLines)
+				info := db.ParseErrorInfo(a.errorDriverName(), e.err, sess.lastQuerySentSQL)
+				e.tab.lastErr = info.Format()
+				loc := info.Location.ShiftLines(-sess.lastQueryPreambleLines)
 				e.tab.lastErrLine = loc.Line
 				e.tab.lastErrCol = loc.Column
+				if loc.Line > 0 {
+					sess.editor.SetErrorLocation(loc.Line, loc.Column)
+				} else {
+					sess.editor.ClearErrorLocation()
+				}
 			}
 		} else {
 			e.tab.lastErr = ""
 			e.tab.lastErrLine = 0
 			e.tab.lastErrCol = 0
+			sess.editor.ClearErrorLocation()
 		}
 	case evtDone:
 		sess.running = false
@@ -1105,6 +1114,16 @@ func (a *app) handleQueryEvent(e queryEvent) {
 		}
 		a.recordHistory(sess, e)
 	}
+}
+
+func (a *app) errorDriverName() string {
+	if a.activeConn != nil && a.activeConn.Driver != "" {
+		return a.activeConn.Driver
+	}
+	if a.conn != nil {
+		return a.conn.Driver()
+	}
+	return ""
 }
 
 // recordHistory persists the just-finished query to the store's history

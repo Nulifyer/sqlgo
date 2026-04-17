@@ -1,22 +1,14 @@
-// Package errinfo extracts line-number information from driver-specific
-// query errors. The TUI uses this to show "Line N:" above the wrapped
-// error body in the Results pane error view.
-//
-// Kept in its own package so internal/db stays driver-agnostic; only
-// this file imports pgconn and go-mssqldb directly.
+// Package errinfo defines the shared structured query-error shape used
+// across drivers. Driver packages parse their native errors into Info;
+// the TUI formats and renders that one shape without branching on DB
+// engine names or driver types.
 package errinfo
 
 import (
-	"errors"
-	"regexp"
+	"fmt"
 	"strconv"
-
-	gomysql "github.com/go-sql-driver/mysql"
-	"github.com/jackc/pgx/v5/pgconn"
-	mssql "github.com/microsoft/go-mssqldb"
+	"strings"
 )
-
-var mysqlLineRE = regexp.MustCompile(`(?i)\bat line (\d+)\b`)
 
 // Location is a 1-based line / column pair into the user's SQL text.
 // Zero values mean the driver didn't supply that part of the location.
@@ -38,63 +30,63 @@ func (loc Location) ShiftLines(delta int) Location {
 	return loc
 }
 
-// Line reports the 1-based line in sql where the server located the
-// error, or 0 if the driver didn't supply one. sql is the query text
-// that produced err; it's only consulted for engines that report a
-// character position rather than a line number (Postgres).
-func Line(err error, sql string) int {
-	return Locate(err, sql).Line
+// Info is the structured view of a query error. Fields are populated on
+// a best-effort basis from whichever driver-specific error type is
+// available; zero values mean the driver did not supply that piece.
+type Info struct {
+	Location Location
+
+	Engine   string
+	Message  string
+	Severity string
+	Name     string
+	Type     string
+	Reason   string
+
+	// SQLState is set for engines that expose one (Postgres/MySQL,
+	// and some Trino/Sybase paths).
+	SQLState string
+	// Number/State/Class cover engines that surface numeric server codes
+	// (MySQL error number, MSSQL/Sybase state/class, Oracle/Firebird SQL
+	// code, ClickHouse exception code, BigQuery HTTP code, etc.).
+	Number int
+	State  int
+	Class  int
+
+	Detail     string
+	Hint       string
+	Where      string
+	Schema     string
+	Table      string
+	Column     string
+	Constraint string
+	DataType   string
+	Server     string
+	Procedure  string
+	RequestID  string
+	Codes      []int
 }
 
-// Column reports the 1-based column in sql where the server located the
-// error, or 0 if the driver didn't supply one.
-func Column(err error, sql string) int {
-	return Locate(err, sql).Column
-}
-
-// Locate reports the 1-based line / column in sql where the server
-// located the error, or the zero location when the driver didn't supply
-// one. sql is only consulted for engines that report a character
-// position rather than an explicit line / column (Postgres).
-func Locate(err error, sql string) Location {
+// Plain wraps err in the shared structured shape without any
+// driver-specific fields. Nil errors return the zero Info.
+func Plain(err error) Info {
 	if err == nil {
-		return Location{}
+		return Info{}
 	}
-	var me mssql.Error
-	if errors.As(err, &me) {
-		if me.LineNo > 0 {
-			return Location{Line: int(me.LineNo)}
-		}
-		for _, e := range me.All {
-			if e.LineNo > 0 {
-				return Location{Line: int(e.LineNo)}
-			}
-		}
-	}
-	var pe *pgconn.PgError
-	if errors.As(err, &pe) && pe.Position > 0 {
-		return locationFromPos(sql, int(pe.Position))
-	}
-	var my *gomysql.MySQLError
-	if errors.As(err, &my) {
-		if line := parseMySQLLine(my.Message); line > 0 {
-			return Location{Line: line}
-		}
-	}
-	return Location{}
+	return Info{Message: err.Error()}
 }
 
-// locationFromPos converts a 1-based character index into sql to a
-// 1-based line / column pair. Postgres reports Position in characters,
-// so walk the string as runes rather than bytes.
-func locationFromPos(s string, pos int) Location {
+// LocationFromPos converts a 1-based character index into sql to a
+// 1-based line / column pair. Engines such as Postgres and ClickHouse
+// report positions in characters, so walk the string as runes rather
+// than bytes.
+func LocationFromPos(sql string, pos int) Location {
 	if pos <= 0 {
 		return Location{}
 	}
-
 	loc := Location{Line: 1, Column: 1}
 	charPos := 1
-	for _, r := range s {
+	for _, r := range sql {
 		if charPos >= pos {
 			break
 		}
@@ -109,14 +101,150 @@ func locationFromPos(s string, pos int) Location {
 	return loc
 }
 
-func parseMySQLLine(msg string) int {
-	m := mysqlLineRE.FindStringSubmatch(msg)
-	if len(m) != 2 {
-		return 0
+// Format returns a user-facing multiline string that keeps the driver's
+// primary message first and appends any additional structured fields on
+// separate lines.
+func (info Info) Format() string {
+	if info.Message == "" {
+		return ""
 	}
-	n, err := strconv.Atoi(m[1])
-	if err != nil || n <= 0 {
-		return 0
+	lines := []string{info.primaryLine()}
+	switch info.Engine {
+	case "postgres":
+		appendKV(&lines, "schema", info.Schema)
+		appendKV(&lines, "table", info.Table)
+		appendKV(&lines, "column", info.Column)
+		appendKV(&lines, "constraint", info.Constraint)
+		appendKV(&lines, "data type", info.DataType)
+		appendKV(&lines, "detail", info.Detail)
+		appendKV(&lines, "hint", info.Hint)
+		appendKV(&lines, "where", info.Where)
+	case "mssql":
+		if info.Number > 0 {
+			lines = append(lines, fmt.Sprintf("number: %d", info.Number))
+		}
+		if info.State > 0 {
+			lines = append(lines, fmt.Sprintf("state: %d", info.State))
+		}
+		if info.Class > 0 {
+			lines = append(lines, fmt.Sprintf("class: %d", info.Class))
+		}
+		appendKV(&lines, "server", info.Server)
+		appendKV(&lines, "procedure", info.Procedure)
+	case "sybase":
+		if info.Number > 0 {
+			lines = append(lines, fmt.Sprintf("number: %d", info.Number))
+		}
+		if info.State > 0 {
+			lines = append(lines, fmt.Sprintf("state: %d", info.State))
+		}
+		if info.Class > 0 {
+			lines = append(lines, fmt.Sprintf("class: %d", info.Class))
+		}
+		appendKV(&lines, "sqlstate", info.SQLState)
+		appendKV(&lines, "server", info.Server)
+		appendKV(&lines, "procedure", info.Procedure)
+	case "trino":
+		if info.Number > 0 {
+			lines = append(lines, fmt.Sprintf("code: %d", info.Number))
+		}
+		appendKV(&lines, "name", info.Name)
+		appendKV(&lines, "type", info.Type)
+		appendKV(&lines, "detail", info.Detail)
+	case "clickhouse":
+		appendKV(&lines, "name", info.Name)
+	case "libsql":
+		appendKV(&lines, "code", info.Name)
+	case "firebird":
+		if info.Number != 0 {
+			lines = append(lines, fmt.Sprintf("sql code: %d", info.Number))
+		}
+		switch len(info.Codes) {
+		case 1:
+			lines = append(lines, fmt.Sprintf("gds code: %d", info.Codes[0]))
+		case 2, 3, 4, 5, 6, 7, 8:
+			var parts []string
+			for _, code := range info.Codes {
+				parts = append(parts, strconv.Itoa(code))
+			}
+			lines = append(lines, "gds codes: "+strings.Join(parts, ", "))
+		default:
+			if len(info.Codes) > 0 {
+				lines = append(lines, fmt.Sprintf("gds code: %d", info.Codes[0]))
+			}
+		}
+	case "spanner", "bigquery":
+		appendKV(&lines, "reason", info.Reason)
+		appendKV(&lines, "request id", info.RequestID)
 	}
-	return n
+	return strings.Join(lines, "\n")
+}
+
+func (info Info) primaryLine() string {
+	switch info.Engine {
+	case "postgres":
+		msg := info.Message
+		if info.Severity != "" {
+			msg = info.Severity + ": " + msg
+		}
+		if info.SQLState != "" {
+			msg += " (SQLSTATE " + info.SQLState + ")"
+		}
+		return msg
+	case "mysql":
+		if info.Number > 0 && info.SQLState != "" {
+			return fmt.Sprintf("Error %d (%s): %s", info.Number, info.SQLState, info.Message)
+		}
+		if info.Number > 0 {
+			return fmt.Sprintf("Error %d: %s", info.Number, info.Message)
+		}
+	case "mssql":
+		return "mssql: " + info.Message
+	case "trino":
+		msg := info.Message
+		if info.Type != "" {
+			msg = info.Type + ": " + msg
+		}
+		if info.SQLState != "" {
+			msg += " (SQLSTATE " + info.SQLState + ")"
+		}
+		return "trino: " + msg
+	case "clickhouse":
+		msg := info.Message
+		if info.Number > 0 {
+			msg += fmt.Sprintf(" (code %d)", info.Number)
+		}
+		return "clickhouse: " + msg
+	case "libsql":
+		msg := info.Message
+		if info.Name != "" {
+			msg += " (" + info.Name + ")"
+		}
+		return "libsql: " + msg
+	case "sybase":
+		return "sybase: " + info.Message
+	case "oracle":
+		return "oracle: " + info.Message
+	case "firebird":
+		return "firebird: " + info.Message
+	case "spanner":
+		msg := info.Message
+		if info.Type != "" {
+			msg = info.Type + ": " + msg
+		}
+		return "spanner: " + msg
+	case "bigquery":
+		if info.Number > 0 {
+			return fmt.Sprintf("bigquery: Error %d: %s", info.Number, info.Message)
+		}
+		return "bigquery: " + info.Message
+	}
+	return info.Message
+}
+
+func appendKV(lines *[]string, key, val string) {
+	if val == "" {
+		return
+	}
+	*lines = append(*lines, key+": "+val)
 }
