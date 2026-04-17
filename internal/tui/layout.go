@@ -1,5 +1,9 @@
 package tui
 
+import (
+	"github.com/Nulifyer/sqlgo/internal/tui/term"
+)
+
 // layout computes the geometry of the three-panel UI given a terminal size.
 //
 //	+----------+----------------------------+
@@ -16,15 +20,7 @@ package tui
 //
 // All rect coordinates are 1-based and inclusive on both edges. Borders are
 // drawn ON the rect edges, so panel content lives at row+1..row+h-2.
-type rect struct {
-	row, col, w, h int
-}
-
-// contains reports whether the given 1-based (row, col) cell is inside
-// this rect's bounding box (borders included). Used by mouse hit tests.
-func (r rect) contains(row, col int) bool {
-	return row >= r.row && row < r.row+r.h && col >= r.col && col < r.col+r.w
-}
+type rect = term.Rect
 
 type panels struct {
 	explorer rect
@@ -62,9 +58,9 @@ func computeLayout(termW, termH int) panels {
 	resultsH := bodyH - queryH
 
 	return panels{
-		explorer: rect{row: 1, col: 1, w: explW, h: bodyH},
-		query:    rect{row: 1, col: explW + 1, w: rightW, h: queryH},
-		results:  rect{row: 1 + queryH, col: explW + 1, w: rightW, h: resultsH},
-		status:   rect{row: bodyH + 1, col: 1, w: termW, h: statusH},
+		explorer: rect{Row: 1, Col: 1, W: explW, H: bodyH},
+		query:    rect{Row: 1, Col: explW + 1, W: rightW, H: queryH},
+		results:  rect{Row: 1 + queryH, Col: explW + 1, W: rightW, H: resultsH},
+		status:   rect{Row: bodyH + 1, Col: 1, W: termW, H: statusH},
 	}
 }

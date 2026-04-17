@@ -1,6 +1,10 @@
 package tui
 
-import "reflect"
+import (
+	"reflect"
+
+	"github.com/Nulifyer/sqlgo/internal/tui/term"
+)
 
 // Layer is a drawable, input-handling slice of the UI. The app keeps a
 // stack of layers; each frame every layer draws into its own cell buffer
@@ -28,19 +32,9 @@ type Layer interface {
 }
 
 // View declares terminal modes a layer wants active while it is on top
-// of the stack. Mode flags with zero values mean "off"; the one
-// exception is AltScreen, whose default is "on" via defaultView() so
-// layers that don't implement ViewProvider get the existing behavior.
-//
-// The screen tracks the last applied View and emits only the sequences
-// for flags that flipped, so per-frame View() calls are cheap when
-// nothing changes.
-type View struct {
-	AltScreen    bool
-	MouseEnabled bool
-	PasteEnabled bool
-	WindowTitle  string
-}
+// of the stack. Real definition lives in term/; this is a local alias
+// so existing layer code keeps compiling unchanged.
+type View = term.View
 
 // ViewProvider is implemented by layers that want to override the
 // default terminal modes while they're on top. The topmost

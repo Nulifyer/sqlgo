@@ -276,13 +276,13 @@ func (ol *openLayer) Draw(a *app, c *cellbuf) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	c.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	c.FillRect(r)
 	drawFrame(c, r, "Open SQL file", true)
 
 	innerCol := col + 2
 
-	c.writeAt(row+1, innerCol, "Search:")
+	c.WriteAt(row+1, innerCol, "Search:")
 	searchCol := innerCol + 8
 	searchW := boxW - 8 - 4
 	if searchW < 1 {
@@ -293,12 +293,12 @@ func (ol *openLayer) Draw(a *app, c *cellbuf) {
 	if len(rs) > searchW {
 		rs = rs[len(rs)-searchW:]
 	}
-	c.writeAt(row+1, searchCol, string(rs))
+	c.WriteAt(row+1, searchCol, string(rs))
 
-	c.hLine(row+2, col+1, col+r.w-2, '─')
+	c.HLine(row+2, col+1, col+r.W-2, '─')
 
 	listTop := row + 3
-	listBot := row + r.h - 3
+	listBot := row + r.H - 3
 	listH := listBot - listTop + 1
 	if listH < 1 {
 		listH = 1
@@ -311,7 +311,7 @@ func (ol *openLayer) Draw(a *app, c *cellbuf) {
 		if strings.TrimSpace(ol.search.String()) != "" {
 			msg = "(no matches -- Enter loads the typed path directly)"
 		}
-		c.writeAt(listTop, innerCol, truncate(msg, boxW-4))
+		c.WriteAt(listTop, innerCol, truncate(msg, boxW-4))
 	} else {
 		if ol.selected < ol.scroll {
 			ol.scroll = ol.selected
@@ -338,24 +338,24 @@ func (ol *openLayer) Draw(a *app, c *cellbuf) {
 			}
 			line := truncate(selMark+pickMark+e.rel, boxW-4)
 			if idx == ol.selected {
-				c.setFg(colorBorderFocused)
-				c.writeAt(listTop+i, innerCol, line)
-				c.resetStyle()
+				c.SetFg(colorBorderFocused)
+				c.WriteAt(listTop+i, innerCol, line)
+				c.ResetStyle()
 			} else {
-				c.writeAt(listTop+i, innerCol, line)
+				c.WriteAt(listTop+i, innerCol, line)
 			}
 		}
 	}
 
 	if ol.status != "" {
-		c.setFg(colorStatusBar)
-		c.writeAt(r.row+r.h-2, innerCol, truncate(ol.status, boxW-4))
-		c.resetStyle()
+		c.SetFg(colorStatusBar)
+		c.WriteAt(r.Row+r.H-2, innerCol, truncate(ol.status, boxW-4))
+		c.ResetStyle()
 	}
 
 	// Place cursor last so any intermediate style changes from the list
 	// render don't leave the terminal cursor in the wrong column.
-	c.placeCursor(row+1, searchCol+len(rs))
+	c.PlaceCursor(row+1, searchCol+len(rs))
 }
 
 func (ol *openLayer) HandleKey(a *app, k Key) {

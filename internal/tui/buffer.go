@@ -196,12 +196,20 @@ func (b *buffer) InsertText(s string) {
 	if b.anchorSet {
 		b.deleteSelectionNoSnap()
 	}
-	for _, r := range s {
+	for i, r := range s {
 		if r == '\n' {
 			b.insertNewlineNoSnap()
 			continue
 		}
 		if r == '\r' {
+			// CRLF pair: skip the \r, the following \n handles
+			// the newline. Standalone \r (Windows console in VT
+			// mode sends this for pasted line breaks): treat as
+			// newline so multi-line paste works.
+			if i+1 < len(s) && s[i+1] == '\n' {
+				continue
+			}
+			b.insertNewlineNoSnap()
 			continue
 		}
 		b.insertRuneNoSnap(r)

@@ -443,10 +443,10 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 // on multi-line selections is also filled with the selection style so
 // the highlight reads as a continuous block.
 func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
-	innerRow := r.row + 1
-	innerCol := r.col + 1
-	innerW := r.w - 2
-	innerH := r.h - 2
+	innerRow := r.Row + 1
+	innerCol := r.Col + 1
+	innerW := r.W - 2
+	innerH := r.H - 2
 	if innerW <= 0 || innerH <= 0 {
 		return
 	}
@@ -476,7 +476,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			} else {
 				label = strings.Repeat(" ", gutter)
 			}
-			s.writeStyled(innerRow+i, innerCol, label, gutterStyle)
+			s.WriteStyled(innerRow+i, innerCol, label, gutterStyle)
 		}
 	}
 
@@ -576,11 +576,11 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			// If the wide rune would spill past the right edge,
 			// paint a space instead so no half-glyph leaks.
 			if rw == 2 && colOut+2 > bodyW {
-				s.writeStyled(innerRow+i, bodyCol+colOut, " ", st)
+				s.WriteStyled(innerRow+i, bodyCol+colOut, " ", st)
 				colOut++
 				break
 			}
-			s.writeStyled(innerRow+i, bodyCol+colOut, string(r), st)
+			s.WriteStyled(innerRow+i, bodyCol+colOut, string(r), st)
 			colOut += rw
 		}
 
@@ -592,7 +592,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 				colOut = 0
 			}
 			for colOut < bodyW {
-				s.writeStyled(innerRow+i, bodyCol+colOut, " ", selStyle)
+				s.WriteStyled(innerRow+i, bodyCol+colOut, " ", selStyle)
 				colOut++
 			}
 		}
@@ -600,7 +600,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 
 	if cursorVisible {
 		row, col := e.buf.Cursor()
-		s.placeCursor(innerRow+(row-e.scrollRow), bodyCol+(col-e.scrollCol))
+		s.PlaceCursor(innerRow+(row-e.scrollRow), bodyCol+(col-e.scrollCol))
 		// Paint a reverse-video block at each extra cursor so
 		// the user can see where their column-add cursors sit.
 		// The real terminal caret stays on the primary.
@@ -621,7 +621,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			if cp.col < len(line) && isPrintable(line[cp.col]) {
 				ch = string(line[cp.col])
 			}
-			s.writeStyled(sr, sc, ch, caretStyle)
+			s.WriteStyled(sr, sc, ch, caretStyle)
 		}
 	}
 
@@ -832,10 +832,10 @@ func inSelection(row, col, r1, c1, r2, c2 int) bool {
 // when the click is outside the drawable interior; callers then decide
 // whether to ignore or clamp.
 func (e *editor) caretFromScreen(r rect, screenRow, screenCol int) (int, int, bool) {
-	innerRow := r.row + 1
-	innerCol := r.col + 1
-	innerW := r.w - 2
-	innerH := r.h - 2
+	innerRow := r.Row + 1
+	innerCol := r.Col + 1
+	innerW := r.W - 2
+	innerH := r.H - 2
 	if innerW <= 0 || innerH <= 0 {
 		return 0, 0, false
 	}

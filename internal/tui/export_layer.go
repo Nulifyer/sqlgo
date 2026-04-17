@@ -112,14 +112,14 @@ func (el *exportLayer) Draw(a *app, c *cellbuf) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	c.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	c.FillRect(r)
 	drawFrame(c, r, "Export results", true)
 
 	innerCol := col + 2
 	cur := row + 1
 
-	c.writeAt(cur+1, innerCol, truncate("Path:", boxW-4))
+	c.WriteAt(cur+1, innerCol, truncate("Path:", boxW-4))
 	// Value display with cursor.
 	valCol := innerCol + 7
 	maxVal := boxW - 7 - 4
@@ -131,31 +131,31 @@ func (el *exportLayer) Draw(a *app, c *cellbuf) {
 	if len(rs) > maxVal {
 		rs = rs[len(rs)-maxVal:]
 	}
-	c.writeAt(cur+1, valCol, string(rs))
-	c.placeCursor(cur+1, valCol+len(rs))
+	c.WriteAt(cur+1, valCol, string(rs))
+	c.PlaceCursor(cur+1, valCol+len(rs))
 
-	c.writeAt(cur+3, innerCol, truncate("Format: "+el.format.String(), boxW-4))
+	c.WriteAt(cur+3, innerCol, truncate("Format: "+el.format.String(), boxW-4))
 
 	rows := 0
 	if a.layers != nil {
 		rows = a.mainLayerPtr().table.RowCount()
 	}
-	c.writeAt(cur+5, innerCol, truncate(fmt.Sprintf("Rows to export: %d", rows), boxW-4))
+	c.WriteAt(cur+5, innerCol, truncate(fmt.Sprintf("Rows to export: %d", rows), boxW-4))
 
 	status := el.status
 	if el.busy {
 		status = "writing " + el.frame
 	}
 	if status != "" {
-		c.setFg(colorBorderFocused)
-		c.writeAt(r.row+r.h-3, innerCol, truncate(status, boxW-4))
-		c.resetStyle()
+		c.SetFg(colorBorderFocused)
+		c.WriteAt(r.Row+r.H-3, innerCol, truncate(status, boxW-4))
+		c.ResetStyle()
 	}
 
 	// Hint pinned to the bottom row, dim so it reads as chrome rather
 	// than content.
 	hintStyle := Style{FG: ansiBrightBlack, BG: ansiDefaultBG}
-	c.writeStyled(r.row+r.h-2, innerCol, truncate("Tab/Shift+Tab=format  Enter=save  Esc=cancel", boxW-4), hintStyle)
+	c.WriteStyled(r.Row+r.H-2, innerCol, truncate("Tab/Shift+Tab=format  Enter=save  Esc=cancel", boxW-4), hintStyle)
 }
 
 func (el *exportLayer) HandleKey(a *app, k Key) {

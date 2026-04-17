@@ -61,8 +61,8 @@ func newDebugLayer() *debugLayer {
 }
 
 func (d *debugLayer) Draw(a *app, c *cellbuf) {
-	r := rect{row: 0, col: 0, w: a.term.width, h: a.term.height}
-	c.fillRect(r)
+	r := rect{Row: 0, Col: 0, W: a.term.width, H: a.term.height}
+	c.FillRect(r)
 	passed, total := d.tally()
 	title := fmt.Sprintf("Key debug (F8)    %d / %d bindings verified", passed, total)
 	drawFrame(c, r, title, true)
@@ -97,7 +97,7 @@ func (d *debugLayer) Draw(a *app, c *cellbuf) {
 	if listW > 0 {
 		listCol := innerCol + logW + 1
 		for i := 0; i < innerH; i++ {
-			c.writeAt(innerRow+i, innerCol+logW, "│")
+			c.WriteAt(innerRow+i, innerCol+logW, "│")
 		}
 		d.drawChecklist(c, innerRow, listCol, listW, innerH)
 	}
@@ -110,7 +110,7 @@ func (d *debugLayer) drawLog(c *cellbuf, row, col, w, h int) {
 	headerStyle := Style{FG: ansiBrightCyan, BG: ansiDefaultBG, Attrs: attrBold}
 	hintStyle := Style{FG: ansiBrightBlack, BG: ansiDefaultBG}
 
-	c.writeStyled(row, col+1, truncate("Input feed", w-2), headerStyle)
+	c.WriteStyled(row, col+1, truncate("Input feed", w-2), headerStyle)
 
 	bodyTop := row + 2
 	bodyH := h - 2
@@ -119,14 +119,14 @@ func (d *debugLayer) drawLog(c *cellbuf, row, col, w, h int) {
 	}
 
 	if len(d.log) == 0 {
-		c.writeStyled(bodyTop, col+1, truncate("(press any key)", w-2), hintStyle)
+		c.WriteStyled(bodyTop, col+1, truncate("(press any key)", w-2), hintStyle)
 		return
 	}
 	n := len(d.log)
 	for i := 0; i < bodyH && i < n; i++ {
 		ev := d.log[n-1-i]
 		line := fmt.Sprintf("%3d %s", ev.sequence%1000, ev.desc)
-		c.writeAt(bodyTop+i, col+1, truncate(line, w-2))
+		c.WriteAt(bodyTop+i, col+1, truncate(line, w-2))
 	}
 }
 
@@ -139,7 +139,7 @@ func (d *debugLayer) drawChecklist(c *cellbuf, row, col, w, h int) {
 	okStyle := Style{FG: ansiBrightGreen, BG: ansiDefaultBG}
 	dimStyle := Style{FG: ansiBrightBlack, BG: ansiDefaultBG}
 
-	c.writeStyled(row, col+1, truncate("Bind checklist", w-2), headerStyle)
+	c.WriteStyled(row, col+1, truncate("Bind checklist", w-2), headerStyle)
 
 	bodyTop := row + 2
 	bodyH := h - 3
@@ -193,7 +193,7 @@ func (d *debugLayer) drawChecklist(c *cellbuf, row, col, w, h int) {
 			y := bodyTop + ri
 			e := entries[idx]
 			if e.bind == nil {
-				c.writeStyled(y, cx, truncate(e.header, colW), groupStyle)
+				c.WriteStyled(y, cx, truncate(e.header, colW), groupStyle)
 				continue
 			}
 			marker := "[ ]"
@@ -203,12 +203,12 @@ func (d *debugLayer) drawChecklist(c *cellbuf, row, col, w, h int) {
 				style = okStyle
 			}
 			line := fmt.Sprintf("%s %s", marker, e.bind.label)
-			c.writeStyled(y, cx, truncate(line, colW), style)
+			c.WriteStyled(y, cx, truncate(line, colW), style)
 		}
 	}
 
 	footer := fmt.Sprintf("%d/%d verified  Ctrl+R=reset", countDone(d.binds), len(d.binds))
-	c.writeStyled(row+h-1, col+1, truncate(footer, w-2), dimStyle)
+	c.WriteStyled(row+h-1, col+1, truncate(footer, w-2), dimStyle)
 }
 
 // buildEntries flattens the bind catalog into a column-friendly sequence:

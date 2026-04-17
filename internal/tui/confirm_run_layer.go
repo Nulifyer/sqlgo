@@ -54,8 +54,8 @@ func (cl *confirmRunLayer) Draw(a *app, c *cellbuf) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	c.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	c.FillRect(r)
 	drawFrame(c, r, "Confirm destructive query", true)
 
 	innerCol := col + 2
@@ -65,8 +65,8 @@ func (cl *confirmRunLayer) Draw(a *app, c *cellbuf) {
 	warnStyle := Style{FG: ansiBrightYellow, BG: ansiDefaultBG, Attrs: attrBold}
 	headStyle := Style{FG: ansiBrightRed, BG: ansiDefaultBG, Attrs: attrBold}
 	const warn = "⚠ "
-	c.writeStyled(row+1, innerCol, warn, warnStyle)
-	c.writeStyled(row+1, innerCol+runeWidth(warn),
+	c.WriteStyled(row+1, innerCol, warn, warnStyle)
+	c.WriteStyled(row+1, innerCol+runeWidth(warn),
 		truncate(fmt.Sprintf("%d statement(s) look destructive:", len(cl.findings)),
 			boxW-4-runeWidth(warn)),
 		headStyle)
@@ -77,10 +77,10 @@ func (cl *confirmRunLayer) Draw(a *app, c *cellbuf) {
 		lineRow := row + 2 + i
 		// Reason in red, then the statement excerpt in default style.
 		reason := f.Reason + " -- "
-		c.writeStyled(lineRow, innerCol, truncate(reason, boxW-4), reasonStyle)
+		c.WriteStyled(lineRow, innerCol, truncate(reason, boxW-4), reasonStyle)
 		rest := boxW - 4 - runeWidth(reason)
 		if rest > 0 {
-			c.writeAt(lineRow, innerCol+runeWidth(reason),
+			c.WriteAt(lineRow, innerCol+runeWidth(reason),
 				truncate(f.Statement, rest))
 		}
 	}
@@ -113,7 +113,7 @@ func (cl *confirmRunLayer) Draw(a *app, c *cellbuf) {
 			return
 		}
 		t := truncate(s, avail)
-		c.writeStyled(promptRow, x, t, st)
+		c.WriteStyled(promptRow, x, t, st)
 		w := runeWidth(t)
 		x += w
 		avail -= w
@@ -125,7 +125,7 @@ func (cl *confirmRunLayer) Draw(a *app, c *cellbuf) {
 	write(yesLabel, dangerStyle)
 
 	hintRow := promptRow + 2
-	c.writeStyled(hintRow, innerCol,
+	c.WriteStyled(hintRow, innerCol,
 		truncate("(y=yes, n/Esc=no, Tab/←→ switch, Enter=confirm)", boxW-4),
 		Style{FG: ansiBrightBlack, BG: ansiDefaultBG})
 }

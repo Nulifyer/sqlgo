@@ -185,8 +185,8 @@ func (hl *helpLayer) Draw(a *app, c *cellbuf) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	c.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	c.FillRect(r)
 	drawFrame(c, r, "Keybindings", true)
 
 	innerCol := col + 3
@@ -232,22 +232,22 @@ func (hl *helpLayer) Draw(a *app, c *cellbuf) {
 		if line.key == "" {
 			// Section header: bold cyan title, then a dim underline of
 			// dashes the width of the title for a subtle separator.
-			c.writeStyled(y, innerCol, truncate(line.desc, innerW), headerStyle)
+			c.WriteStyled(y, innerCol, truncate(line.desc, innerW), headerStyle)
 			continue
 		}
-		c.writeStyled(y, innerCol, truncate(line.key, keyColW), keyStyle)
+		c.WriteStyled(y, innerCol, truncate(line.key, keyColW), keyStyle)
 		descCol := innerCol + keyColW + gap
 		descW := innerW - keyColW - gap
 		if descW > 0 {
-			c.writeStyled(y, descCol, truncate(line.desc, descW), dimStyle)
+			c.WriteStyled(y, descCol, truncate(line.desc, descW), dimStyle)
 		}
 	}
 
 	// Footer separator + status line.
 	sepRow := row + boxH - 3
-	c.writeStyled(sepRow, innerCol, truncate(repeatRune('-', innerW), innerW), dimStyle)
+	c.WriteStyled(sepRow, innerCol, truncate(repeatRune('-', innerW), innerW), dimStyle)
 	status := "Up/Dn=scroll  PgUp/PgDn=page  F1/Esc=close"
-	c.writeAt(row+boxH-2, innerCol, truncate(status, innerW))
+	c.WriteAt(row+boxH-2, innerCol, truncate(status, innerW))
 }
 
 func repeatRune(r rune, n int) string {

@@ -147,6 +147,31 @@ func TestBufferInsertTextMultiline(t *testing.T) {
 	}
 }
 
+func TestBufferInsertTextCRLF(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"CRLF", "a\r\nb\r\nc", "a\nb\nc"},
+		{"LF only", "a\nb\nc", "a\nb\nc"},
+		{"CR only", "a\rb\rc", "a\nb\nc"},
+		{"mixed", "a\r\nb\rc\nd", "a\nb\nc\nd"},
+		{"trailing CR", "abc\r", "abc\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			b := newBuffer()
+			b.InsertText(tt.input)
+			if got := b.Text(); got != tt.want {
+				t.Errorf("InsertText(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBufferUndoRedo(t *testing.T) {
 	t.Parallel()
 	b := newBuffer()

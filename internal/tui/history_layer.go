@@ -142,8 +142,8 @@ func (h *historyLayer) Draw(a *app, c *cellbuf) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	c.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	c.FillRect(r)
 
 	title := "History"
 	switch h.scope {
@@ -158,7 +158,7 @@ func (h *historyLayer) Draw(a *app, c *cellbuf) {
 
 	innerCol := col + 2
 	// Search field on the first inner row.
-	c.writeAt(row+1, innerCol, "Search:")
+	c.WriteAt(row+1, innerCol, "Search:")
 	searchCol := innerCol + 8
 	searchW := boxW - 8 - 4
 	if searchW < 1 {
@@ -169,15 +169,15 @@ func (h *historyLayer) Draw(a *app, c *cellbuf) {
 	if len(rs) > searchW {
 		rs = rs[len(rs)-searchW:]
 	}
-	c.writeAt(row+1, searchCol, string(rs))
-	c.placeCursor(row+1, searchCol+len(rs))
+	c.WriteAt(row+1, searchCol, string(rs))
+	c.PlaceCursor(row+1, searchCol+len(rs))
 
 	// Separator row of dashes under the search field.
-	c.hLine(row+2, col+1, col+r.w-2, '─')
+	c.HLine(row+2, col+1, col+r.W-2, '─')
 
 	// Results list: rows 3..(h-2) inclusive inside the box.
 	listTop := row + 3
-	listBot := row + r.h - 3
+	listBot := row + r.H - 3
 	listH := listBot - listTop + 1
 	if listH < 1 {
 		listH = 1
@@ -190,7 +190,7 @@ func (h *historyLayer) Draw(a *app, c *cellbuf) {
 		if strings.TrimSpace(h.search.String()) != "" {
 			msg = "(no matches)"
 		}
-		c.writeAt(listTop, innerCol, truncate(msg, boxW-4))
+		c.WriteAt(listTop, innerCol, truncate(msg, boxW-4))
 	} else {
 		// Keep the selected row visible.
 		if h.selected < h.scroll {
@@ -211,20 +211,20 @@ func (h *historyLayer) Draw(a *app, c *cellbuf) {
 			e := h.entries[idx]
 			line := formatHistoryLine(e, boxW-4, h.scope == scopeAll)
 			if idx == h.selected {
-				c.setFg(colorBorderFocused)
-				c.writeAt(listTop+i, innerCol, truncate("▶ "+line, boxW-4))
-				c.resetStyle()
+				c.SetFg(colorBorderFocused)
+				c.WriteAt(listTop+i, innerCol, truncate("▶ "+line, boxW-4))
+				c.ResetStyle()
 			} else {
-				c.writeAt(listTop+i, innerCol, truncate("  "+line, boxW-4))
+				c.WriteAt(listTop+i, innerCol, truncate("  "+line, boxW-4))
 			}
 		}
 	}
 
 	// Status line at bottom of the box.
 	if h.status != "" {
-		c.setFg(colorStatusBar)
-		c.writeAt(row+r.h-2, innerCol, truncate(h.status, boxW-4))
-		c.resetStyle()
+		c.SetFg(colorStatusBar)
+		c.WriteAt(row+r.H-2, innerCol, truncate(h.status, boxW-4))
+		c.ResetStyle()
 	}
 }
 

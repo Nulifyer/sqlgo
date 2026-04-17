@@ -71,6 +71,8 @@ type session struct {
 	// *sql.DB pool underlying every adapter is already goroutine-safe,
 	// so parallel queries just need independent cancel handles.
 	running        bool
+	runnerFrame    string
+	runnerDone     chan struct{}
 	cancel         context.CancelFunc
 	lastQuerySQL   string
 	lastQueryStart time.Time
@@ -153,13 +155,11 @@ func (s *session) resetResults() {
 	s.resultTab = tab
 }
 
-// appendResultTab adds a new tab to the list and activates it. The goroutine
-// uses this via an evtResultSetStart event so tab creation stays on the
-// main loop.
+// appendResultTab adds a new tab to the list. The active tab stays on
+// whichever result the user last selected (defaults to Result 1) so
+// multi-statement runs don't yank focus to the final set.
 func (s *session) appendResultTab(tab *resultTab) {
 	s.results = append(s.results, tab)
-	s.activeResult = len(s.results) - 1
-	s.resultTab = tab
 }
 
 // switchResult activates the tab at idx (clamped). No-op if the index is

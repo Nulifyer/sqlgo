@@ -1,6 +1,6 @@
 //go:build windows
 
-package tui
+package term
 
 import (
 	"io"
@@ -12,7 +12,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// stdinReader returns a byte source that reads console input via
+// StdinReader returns a byte source that reads console input via
 // ReadConsoleW. Two layers on Windows translate ^Z -> EOF and close
 // the app on Ctrl+Z:
 //  1. Go's internal/poll console wrapper (golang/go#3530) -- bypassed
@@ -26,7 +26,7 @@ import (
 // The handle is os.Stdin's existing handle, which term.MakeRaw
 // already put into raw mode (console modes are per-handle, so a
 // fresh CONIN$ open would come back cooked).
-func stdinReader() io.Reader {
+func StdinReader() io.Reader {
 	return &conInReader{h: windows.Handle(os.Stdin.Fd())}
 }
 
@@ -36,29 +36,9 @@ type conInReader struct {
 	buf  []byte
 }
 
-// pasteEventThreshold is the minimum number of key-down events that
-// must be queued simultaneously before we treat the burst as a paste.
-// Normal typing rarely queues more than 1-2 events; a paste dumps all
-// characters at once. 8 avoids false positives from fast typing or
-// held-key repeat while still catching short multi-line pastes.
-const pasteEventThreshold = 8
-
 func (c *conInReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
-	}
-	if len(c.buf) == 0 {
-		// Heuristic paste detection: when many key events are
-		// already queued, batch-read them via ReadConsoleInputW
-		// and wrap the result in bracketed paste sequences.
-		// ReadConsoleW often does not relay the terminal's ESC[200~
-		// brackets, so this ensures the key decoder sees a single
-		// PasteMsg regardless of terminal support.
-		if c.pendingKeyCount() >= pasteEventThreshold {
-			if synth := c.readPasteBatch(); len(synth) > 0 {
-				c.buf = synth
-			}
-		}
 	}
 	if len(c.buf) == 0 {
 		var read uint32
@@ -76,100 +56,7 @@ func (c *conInReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// pendingKeyCount returns the number of key-down events with
-// printable/control characters currently queued. Returns 0 early if
-// the first key event is ESC (0x1B) -- that indicates a VT sequence
-// (possibly a native bracketed paste start) which ReadConsoleW should
-// handle directly.
-func (c *conInReader) pendingKeyCount() int {
-	var total uint32
-	if err := windows.GetNumberOfConsoleInputEvents(c.h, &total); err != nil || total < uint32(pasteEventThreshold) {
-		return 0
-	}
-	peekBuf := make([]inputRecord, min(int(total), 256))
-	var read uint32
-	r1, _, _ := procPeekConsoleInputW.Call(
-		uintptr(c.h),
-		uintptr(unsafe.Pointer(&peekBuf[0])),
-		uintptr(len(peekBuf)),
-		uintptr(unsafe.Pointer(&read)),
-	)
-	if r1 == 0 {
-		return 0
-	}
-	count := 0
-	for i := uint32(0); i < read; i++ {
-		if peekBuf[i].EventType != keyEvent {
-			continue
-		}
-		kr := (*keyEventRecord)(unsafe.Pointer(&peekBuf[i].Event[0]))
-		if kr.KeyDown == 0 || kr.UnicodeChar == 0 {
-			continue
-		}
-		// First character is ESC -> likely a VT sequence or
-		// native bracketed paste. Let ReadConsoleW handle it.
-		if count == 0 && kr.UnicodeChar == 0x1B {
-			return 0
-		}
-		count++
-	}
-	return count
-}
-
-// readPasteBatch drains all pending input records via
-// ReadConsoleInputW, extracts the character content from key-down
-// events, and returns it wrapped in bracketed paste sequences
-// (ESC[200~ ... ESC[201~). If the content already starts with
-// ESC[200~ it is returned as-is to avoid double-wrapping.
-func (c *conInReader) readPasteBatch() []byte {
-	recBuf := make([]inputRecord, 256)
-	var runes []rune
-	for {
-		var n uint32
-		if err := windows.GetNumberOfConsoleInputEvents(c.h, &n); err != nil || n == 0 {
-			break
-		}
-		toRead := min(int(n), len(recBuf))
-		var read uint32
-		r1, _, _ := procReadConsoleInputW.Call(
-			uintptr(c.h),
-			uintptr(unsafe.Pointer(&recBuf[0])),
-			uintptr(toRead),
-			uintptr(unsafe.Pointer(&read)),
-		)
-		if r1 == 0 || read == 0 {
-			break
-		}
-		for i := uint32(0); i < read; i++ {
-			if recBuf[i].EventType != keyEvent {
-				continue
-			}
-			kr := (*keyEventRecord)(unsafe.Pointer(&recBuf[i].Event[0]))
-			if kr.KeyDown == 0 || kr.UnicodeChar == 0 {
-				continue
-			}
-			ch := rune(kr.UnicodeChar)
-			rep := kr.RepeatCount
-			if rep == 0 {
-				rep = 1
-			}
-			for j := uint16(0); j < rep; j++ {
-				runes = append(runes, ch)
-			}
-		}
-	}
-	if len(runes) == 0 {
-		return nil
-	}
-	content := string(runes)
-	// Native bracketed paste already present: pass through.
-	if len(content) > 6 && content[0] == '\x1b' && content[1] == '[' {
-		return []byte(content)
-	}
-	return []byte("\x1b[200~" + content + "\x1b[201~")
-}
-
-// stdinPeekReadable reports whether a key event is pending on the
+// StdinPeekReadable reports whether a key event is pending on the
 // console input queue within d. It uses PeekConsoleInputW so we never
 // consume bytes and never start a second concurrent ReadConsoleW --
 // which would race the main reader on the shared bufio.Reader state
@@ -180,7 +67,7 @@ func (c *conInReader) readPasteBatch() []byte {
 // Mouse / focus / window / menu events are filtered out: ReadConsoleW
 // discards them, so a WaitForSingleObject-based signal would lie about
 // readability and cause the next ReadByte to block.
-func stdinPeekReadable(d time.Duration) bool {
+func StdinPeekReadable(d time.Duration) bool {
 	h := windows.Handle(os.Stdin.Fd())
 	deadline := time.Now().Add(d)
 	// Poll with 2ms granularity -- well under the 50ms window readEscape
@@ -277,7 +164,6 @@ type keyEventRecord struct {
 }
 
 var (
-	modKernel32            = windows.NewLazySystemDLL("kernel32.dll")
-	procPeekConsoleInputW  = modKernel32.NewProc("PeekConsoleInputW")
-	procReadConsoleInputW  = modKernel32.NewProc("ReadConsoleInputW")
+	modKernel32           = windows.NewLazySystemDLL("kernel32.dll")
+	procPeekConsoleInputW = modKernel32.NewProc("PeekConsoleInputW")
 )

@@ -124,7 +124,7 @@ func (m *mainLayer) handleMouse(a *app, msg MouseMsg) bool {
 		case MouseButtonWheelDown:
 			m.wheelQuery(a, 3)
 		case MouseButtonLeft:
-			r := rect{row: 1, col: 1, w: a.term.width, h: a.term.height - statusBarH}
+			r := rect{Row: 1, Col: 1, W: a.term.width, H: a.term.height - statusBarH}
 			if msg.Action == MouseActionPress {
 				count := m.clicks.bump(msg)
 				m.editor.clickAt(r, msg.Y, msg.X, count)
@@ -154,11 +154,11 @@ func (m *mainLayer) handleMouse(a *app, msg MouseMsg) bool {
 	p := computeLayout(a.term.width, a.term.height)
 	var target FocusTarget = -1
 	switch {
-	case p.explorer.contains(msg.Y, msg.X):
+	case p.explorer.Contains(msg.Y, msg.X):
 		target = FocusExplorer
-	case p.query.contains(msg.Y, msg.X):
+	case p.query.Contains(msg.Y, msg.X):
 		target = FocusQuery
-	case p.results.contains(msg.Y, msg.X):
+	case p.results.Contains(msg.Y, msg.X):
 		target = FocusResults
 	}
 	if target < 0 {
@@ -179,9 +179,9 @@ func (m *mainLayer) handleMouse(a *app, msg MouseMsg) bool {
 			m.dragTarget = -1
 		}
 	case MouseButtonMiddle:
-		if msg.Action == MouseActionPress && target == FocusQuery && p.query.h > 3 {
+		if msg.Action == MouseActionPress && target == FocusQuery && p.query.H > 3 {
 			strip := queryTabStripRect(p.query)
-			if msg.Y == strip.row {
+			if msg.Y == strip.Row {
 				for _, h := range m.queryTabHits(strip) {
 					if msg.X >= h.startCol && msg.X <= h.endCol {
 						m.closeTab(h.idx)
@@ -232,9 +232,9 @@ func (m *mainLayer) handleLeftClick(a *app, t FocusTarget, msg MouseMsg, count i
 			}
 		}
 	case FocusQuery:
-		if p.query.h > 3 {
+		if p.query.H > 3 {
 			strip := queryTabStripRect(p.query)
-			if msg.Y == strip.row {
+			if msg.Y == strip.Row {
 				for _, h := range m.queryTabHits(strip) {
 					if msg.X >= h.startCol && msg.X <= h.endCol {
 						if count >= 2 {
@@ -253,7 +253,7 @@ func (m *mainLayer) handleLeftClick(a *app, t FocusTarget, msg MouseMsg, count i
 	case FocusResults:
 		if len(m.results) > 1 {
 			strip := resultTabStripRect(p.results)
-			if msg.Y == strip.row {
+			if msg.Y == strip.Row {
 				for _, h := range m.resultTabHits(strip) {
 					if msg.X >= h.startCol && msg.X <= h.endCol {
 						m.switchResult(h.idx)
@@ -572,19 +572,19 @@ func (m *mainLayer) Draw(a *app, c *cellbuf) {
 	// Bottom status bar reflects the topmost layer's hints, so modal
 	// overlays can show their own keys here without touching the main
 	// view's hint logic.
-	c.setFg(colorStatusBar)
-	c.writeAt(p.status.row, p.status.col, m.statusText(a, p.status.w))
-	c.resetStyle()
+	c.SetFg(colorStatusBar)
+	c.WriteAt(p.status.Row, p.status.Col, m.statusText(a, p.status.W))
+	c.ResetStyle()
 }
 
 // queryTabStripRect returns the top-border row of the Query panel,
 // offset 2 cols in from the left corner. The tab strip is painted
 // directly on the frame border in place of a static title.
 func queryTabStripRect(q rect) rect {
-	if q.w < 5 {
-		return rect{row: q.row, col: q.col, w: 0, h: 1}
+	if q.W < 5 {
+		return rect{Row: q.Row, Col: q.Col, W: 0, H: 1}
 	}
-	return rect{row: q.row, col: q.col + 2, w: q.w - 4, h: 1}
+	return rect{Row: q.Row, Col: q.Col + 2, W: q.W - 4, H: 1}
 }
 
 // queryTabLabel formats a session's label for the query tab strip.
@@ -610,14 +610,14 @@ func queryTabLabel(s *session, active bool) string {
 // visible query tab given the strip rect. Used by mouse hit-tests.
 // endCol is inclusive.
 func (m *mainLayer) queryTabHits(r rect) []queryTabHit {
-	if r.w < 3 {
+	if r.W < 3 {
 		return nil
 	}
 	hits := make([]queryTabHit, 0, len(m.sessions))
-	col := r.col
+	col := r.Col
 	for i, s := range m.sessions {
 		lbl := queryTabLabel(s, i == m.activeTab)
-		remaining := r.col + r.w - col
+		remaining := r.Col + r.W - col
 		if remaining < 3 {
 			break
 		}
@@ -639,7 +639,7 @@ type queryTabHit struct {
 // drawQueryTabs renders the tab strip at the top of the Query pane.
 // Mirrors drawResultTabs but indexes m.sessions/m.activeTab.
 func (m *mainLayer) drawQueryTabs(c *cellbuf, r rect) {
-	if r.w < 3 || len(m.sessions) == 0 {
+	if r.W < 3 || len(m.sessions) == 0 {
 		return
 	}
 	for _, h := range m.queryTabHits(r) {
@@ -660,7 +660,7 @@ func (m *mainLayer) drawQueryTabs(c *cellbuf, r rect) {
 			// reliably support.
 			st.Attrs |= attrUnderline
 		}
-		c.writeStyled(r.row, h.startCol, lbl, st)
+		c.WriteStyled(r.Row, h.startCol, lbl, st)
 	}
 }
 
@@ -668,10 +668,10 @@ func (m *mainLayer) drawQueryTabs(c *cellbuf, r rect) {
 // offset 2 cols in from the left corner. Mirrors queryTabStripRect --
 // result tabs paint on the frame border in place of a static title.
 func resultTabStripRect(p rect) rect {
-	if p.w < 5 {
-		return rect{row: p.row, col: p.col, w: 0, h: 1}
+	if p.W < 5 {
+		return rect{Row: p.Row, Col: p.Col, W: 0, H: 1}
 	}
-	return rect{row: p.row, col: p.col + 2, w: p.w - 4, h: 1}
+	return rect{Row: p.Row, Col: p.Col + 2, W: p.W - 4, H: 1}
 }
 
 // resultTabLabel formats a result tab's label. Active tab gets square
@@ -708,14 +708,14 @@ func (m *mainLayer) resultTabSuffix(idx int) string {
 
 // resultTabHits returns per-tab click targets given the strip rect.
 func (m *mainLayer) resultTabHits(r rect) []queryTabHit {
-	if r.w < 3 {
+	if r.W < 3 {
 		return nil
 	}
 	hits := make([]queryTabHit, 0, len(m.results))
-	col := r.col
+	col := r.Col
 	for i, t := range m.results {
 		lbl := resultTabLabelWith(t, i == m.activeResult, m.resultTabSuffix(i))
-		remaining := r.col + r.w - col
+		remaining := r.Col + r.W - col
 		if remaining < 3 {
 			break
 		}
@@ -731,7 +731,7 @@ func (m *mainLayer) resultTabHits(r rect) []queryTabHit {
 // drawResultTabs renders the tab strip that appears across the top of the
 // Results pane when a query produced more than one result set.
 func (m *mainLayer) drawResultTabs(c *cellbuf, r rect) {
-	if r.w < 3 || len(m.results) == 0 {
+	if r.W < 3 || len(m.results) == 0 {
 		return
 	}
 	for _, h := range m.resultTabHits(r) {
@@ -743,7 +743,7 @@ func (m *mainLayer) drawResultTabs(c *cellbuf, r rect) {
 		if h.idx == m.activeResult {
 			fg = colorTitleFocused
 		}
-		c.writeStyled(r.row, h.startCol, lbl, Style{FG: fg, BG: ansiDefaultBG})
+		c.WriteStyled(r.Row, h.startCol, lbl, Style{FG: fg, BG: ansiDefaultBG})
 	}
 }
 
@@ -759,14 +759,14 @@ func (m *mainLayer) drawFullscreen(a *app, c *cellbuf) {
 	if bodyH < bodyMinH {
 		bodyH = bodyMinH
 	}
-	queryRect := rect{row: 1, col: 1, w: termW, h: bodyH}
+	queryRect := rect{Row: 1, Col: 1, W: termW, H: bodyH}
 	drawFrameInfo(c, queryRect, "Query [fullscreen]", m.queryRightInfo(), true)
 	m.editor.draw(c, queryRect, true)
 
 	statusRow := bodyH + 1
-	c.setFg(colorStatusBar)
-	c.writeAt(statusRow, 1, m.statusText(a, termW))
-	c.resetStyle()
+	c.SetFg(colorStatusBar)
+	c.WriteAt(statusRow, 1, m.statusText(a, termW))
+	c.ResetStyle()
 }
 
 func (m *mainLayer) HandleKey(a *app, k Key) {
@@ -1336,10 +1336,10 @@ func (m *mainLayer) inSuccessView() bool {
 // when a non-result query (DDL/DML) finishes without error, so the user
 // gets more obvious feedback than the default "(no results)" placeholder.
 func (m *mainLayer) drawResultsSuccess(c *cellbuf, r rect) {
-	innerRow := r.row + 1
-	innerCol := r.col + 1
-	innerW := r.w - 2
-	innerH := r.h - 2
+	innerRow := r.Row + 1
+	innerCol := r.Col + 1
+	innerW := r.W - 2
+	innerH := r.H - 2
 	if innerW <= 0 || innerH <= 0 {
 		return
 	}
@@ -1352,9 +1352,9 @@ func (m *mainLayer) drawResultsSuccess(c *cellbuf, r rect) {
 	if col < innerCol {
 		col = innerCol
 	}
-	c.setFg(colorOK)
-	c.writeAt(row, col, truncate(msg, innerW))
-	c.resetStyle()
+	c.SetFg(colorOK)
+	c.WriteAt(row, col, truncate(msg, innerW))
+	c.ResetStyle()
 }
 
 // drawResultsError renders the last query error in place of the table.
@@ -1362,10 +1362,10 @@ func (m *mainLayer) drawResultsSuccess(c *cellbuf, r rect) {
 // resultsErrScroll. Up/Dn adjust the scroll; 'y' and Alt+A copy the
 // full error string to the clipboard.
 func (m *mainLayer) drawResultsError(c *cellbuf, r rect) {
-	innerRow := r.row + 1
-	innerCol := r.col + 1
-	innerW := r.w - 2
-	innerH := r.h - 2
+	innerRow := r.Row + 1
+	innerCol := r.Col + 1
+	innerW := r.W - 2
+	innerH := r.H - 2
 	if innerW <= 0 || innerH <= 0 {
 		return
 	}
@@ -1373,9 +1373,9 @@ func (m *mainLayer) drawResultsError(c *cellbuf, r rect) {
 	if m.lastErrLine > 0 {
 		header = fmt.Sprintf("Query error (line %d):", m.lastErrLine)
 	}
-	c.setFg(colorError)
-	c.writeAt(innerRow, innerCol, truncate(header, innerW))
-	c.resetStyle()
+	c.SetFg(colorError)
+	c.WriteAt(innerRow, innerCol, truncate(header, innerW))
+	c.ResetStyle()
 	bodyRow := innerRow + 2
 	bodyH := innerH - 2
 	if bodyH <= 0 {
@@ -1393,7 +1393,7 @@ func (m *mainLayer) drawResultsError(c *cellbuf, r rect) {
 		visible = visible[:bodyH]
 	}
 	for i, line := range visible {
-		c.writeAt(bodyRow+i, innerCol, truncate(line, innerW))
+		c.WriteAt(bodyRow+i, innerCol, truncate(line, innerW))
 	}
 }
 

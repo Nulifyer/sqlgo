@@ -146,41 +146,10 @@ func (e *explorer) SetSchema(info *db.SchemaInfo, depth db.SchemaDepth) {
 	e.rebuild()
 }
 
-// seedExpansion marks schemas + default subgroups as expanded the first
-// time we see them under `catalog`. Shared by single-DB SetSchema and
-// per-DB SetDatabaseSchema so both tiers open to a usable default.
-func (e *explorer) seedExpansion(catalog string, info *db.SchemaInfo, depth db.SchemaDepth) {
-	defaultExpandedSubgroups := []subgroupKind{subgroupTables, subgroupViews}
-	seedSchema := func(s string) {
-		sk := schemaExpansionKey(catalog, s)
-		if _, seen := e.expanded[sk]; !seen {
-			e.expanded[sk] = true
-		}
-		for _, sg := range defaultExpandedSubgroups {
-			k := subgroupExpansionKey(catalog, s, sg)
-			if _, seen := e.expanded[k]; !seen {
-				e.expanded[k] = true
-			}
-		}
-	}
-	for _, t := range info.Tables {
-		seedSchema(t.Schema)
-	}
-	for _, r := range info.Routines {
-		seedSchema(r.Schema)
-	}
-	for _, tr := range info.Triggers {
-		seedSchema(tr.Schema)
-	}
-	if depth == db.SchemaDepthFlat {
-		for _, sg := range defaultExpandedSubgroups {
-			k := subgroupExpansionKey(catalog, "", sg)
-			if _, seen := e.expanded[k]; !seen {
-				e.expanded[k] = true
-			}
-		}
-	}
-	// Sys pseudo-schema and all its subgroups start collapsed.
+// seedExpansion ensures the Sys pseudo-schema starts collapsed the first
+// time we see it. All other schemas and subgroups also start collapsed;
+// the user expands them manually.
+func (e *explorer) seedExpansion(catalog string, _ *db.SchemaInfo, _ db.SchemaDepth) {
 	sysKey := schemaExpansionKey(catalog, sysSchemaSentinel)
 	if _, seen := e.expanded[sysKey]; !seen {
 		e.expanded[sysKey] = false
@@ -418,8 +387,8 @@ func (e *explorer) SelectedSchema() string {
 // index, or -1 if the row is outside the visible list. Used by the
 // mouse hit test in mainLayer.
 func (e *explorer) ItemAt(r rect, screenRow int) int {
-	innerRow := r.row + 1
-	innerH := r.h - 2
+	innerRow := r.Row + 1
+	innerH := r.H - 2
 	if screenRow < innerRow || screenRow >= innerRow+innerH {
 		return -1
 	}
@@ -788,20 +757,20 @@ func trimSpace(s string) string {
 
 // draw renders the tree inside r (caller has already drawn the border).
 func (e *explorer) draw(c *cellbuf, r rect, focused bool) {
-	innerRow := r.row + 1
-	innerCol := r.col + 1
-	innerW := r.w - 2
-	innerH := r.h - 2
+	innerRow := r.Row + 1
+	innerCol := r.Col + 1
+	innerW := r.W - 2
+	innerH := r.H - 2
 	if innerW <= 0 || innerH <= 0 {
 		return
 	}
 
 	if e.loading != "" {
-		c.writeAt(innerRow, innerCol, truncate(e.loading+" loading schema…", innerW))
+		c.WriteAt(innerRow, innerCol, truncate(e.loading+" loading schema…", innerW))
 		return
 	}
 	if e.err != "" {
-		c.writeAt(innerRow, innerCol, truncate("error: "+e.err, innerW))
+		c.WriteAt(innerRow, innerCol, truncate("error: "+e.err, innerW))
 		return
 	}
 	if len(e.items) == 0 {
@@ -809,7 +778,7 @@ func (e *explorer) draw(c *cellbuf, r rect, focused bool) {
 		if e.info != nil {
 			msg = "(empty)"
 		}
-		c.writeAt(innerRow, innerCol, truncate(msg, innerW))
+		c.WriteAt(innerRow, innerCol, truncate(msg, innerW))
 		return
 	}
 
@@ -832,11 +801,11 @@ func (e *explorer) draw(c *cellbuf, r rect, focused bool) {
 		line := renderExplorerLine(e.items[idx], e.expanded)
 		selected := idx == e.cursor && focused
 		if selected {
-			c.setFg(colorTitleFocused)
+			c.SetFg(colorTitleFocused)
 		}
-		c.writeAt(innerRow+i, innerCol, truncate(line, innerW))
+		c.WriteAt(innerRow+i, innerCol, truncate(line, innerW))
 		if selected {
-			c.resetStyle()
+			c.ResetStyle()
 		}
 	}
 }

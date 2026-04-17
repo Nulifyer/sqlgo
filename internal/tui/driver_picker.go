@@ -98,8 +98,8 @@ func (l *driverPickerLayer) Draw(a *app, s *cellbuf) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	s.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	s.FillRect(r)
 	drawFrame(s, r, "Select driver", true)
 
 	innerCol := col + 2
@@ -107,9 +107,9 @@ func (l *driverPickerLayer) Draw(a *app, s *cellbuf) {
 
 	// Search input row.
 	searchRow := row + 1
-	s.setFg(colorTitleUnfocused)
-	s.writeAt(searchRow, innerCol, "Search:")
-	s.resetStyle()
+	s.SetFg(colorTitleUnfocused)
+	s.WriteAt(searchRow, innerCol, "Search:")
+	s.ResetStyle()
 	qCol := innerCol + 8
 	qMax := innerW - 8
 	if qMax < 1 {
@@ -119,8 +119,8 @@ func (l *driverPickerLayer) Draw(a *app, s *cellbuf) {
 	if len(qs) > qMax {
 		qs = qs[len(qs)-qMax:]
 	}
-	s.writeAt(searchRow, qCol, string(qs))
-	s.placeCursor(searchRow, qCol+len(qs))
+	s.WriteAt(searchRow, qCol, string(qs))
+	s.PlaceCursor(searchRow, qCol+len(qs))
 
 	// List.
 	listTop := row + 3
@@ -143,15 +143,15 @@ func (l *driverPickerLayer) Draw(a *app, s *cellbuf) {
 		}
 		y := listTop + i
 		if i+scroll == l.selected {
-			s.setFg(colorBorderFocused)
-			s.writeAt(y, innerCol, "> "+line)
-			s.resetStyle()
+			s.SetFg(colorBorderFocused)
+			s.WriteAt(y, innerCol, "> "+line)
+			s.ResetStyle()
 		} else {
-			s.writeAt(y, innerCol, "  "+line)
+			s.WriteAt(y, innerCol, "  "+line)
 		}
 	}
 	if len(l.filtered) == 0 {
-		s.writeAt(listTop, innerCol, "(no matches)")
+		s.WriteAt(listTop, innerCol, "(no matches)")
 	}
 }
 

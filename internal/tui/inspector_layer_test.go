@@ -55,15 +55,15 @@ func TestWrapTextCRDoesNotOverwriteLine(t *testing.T) {
 
 func TestWrapTextCRLFCollapsesCorrectly(t *testing.T) {
 	t.Parallel()
-	// "\r\n" sanitizes to "\\r\n" (visible \r then newline).
-	lines := wrapText("a\r\nb", 40)
+	// "\r\n" collapses to a single newline; standalone "\r" stays literal.
+	lines := wrapText("a\r\nb\rc", 40)
 	if len(lines) != 2 {
-		t.Fatalf("wrap len = %d, want 2 (newline is a break)", len(lines))
+		t.Fatalf("wrap len = %d, want 2", len(lines))
 	}
-	if lines[0] != `a\r` {
-		t.Errorf("line[0] = %q", lines[0])
+	if lines[0] != "a" {
+		t.Errorf("line[0] = %q, want %q", lines[0], "a")
 	}
-	if lines[1] != "b" {
-		t.Errorf("line[1] = %q", lines[1])
+	if lines[1] != `b\rc` {
+		t.Errorf("line[1] = %q, want %q", lines[1], `b\rc`)
 	}
 }

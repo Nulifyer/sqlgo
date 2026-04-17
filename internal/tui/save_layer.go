@@ -40,12 +40,12 @@ func (sl *saveLayer) Draw(a *app, c *cellbuf) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	c.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	c.FillRect(r)
 	drawFrame(c, r, "Save SQL file", true)
 
 	innerCol := col + 2
-	c.writeAt(row+1, innerCol, "Path:")
+	c.WriteAt(row+1, innerCol, "Path:")
 	valCol := innerCol + 6
 	maxVal := boxW - 6 - 4
 	if maxVal < 1 {
@@ -56,13 +56,13 @@ func (sl *saveLayer) Draw(a *app, c *cellbuf) {
 	if len(rs) > maxVal {
 		rs = rs[len(rs)-maxVal:]
 	}
-	c.writeAt(row+1, valCol, string(rs))
-	c.placeCursor(row+1, valCol+len(rs))
+	c.WriteAt(row+1, valCol, string(rs))
+	c.PlaceCursor(row+1, valCol+len(rs))
 
 	if sl.status != "" {
-		c.setFg(colorBorderFocused)
-		c.writeAt(r.row+r.h-2, innerCol, truncate(sl.status, boxW-4))
-		c.resetStyle()
+		c.SetFg(colorBorderFocused)
+		c.WriteAt(r.Row+r.H-2, innerCol, truncate(sl.status, boxW-4))
+		c.ResetStyle()
 	}
 }
 

@@ -56,6 +56,31 @@ func (i *input) MoveRight() {
 func (i *input) MoveHome() { i.cur = 0 }
 func (i *input) MoveEnd()  { i.cur = len(i.runes) }
 
+// drawInput renders the input value at (row, col) within maxW runes,
+// scrolling so the cursor stays visible, and places the terminal cursor
+// at the correct position. Callers that previously did the tail-clip +
+// placeCursor dance inline should use this instead.
+func drawInput(c *cellbuf, in *input, row, col, maxW int) {
+	rs := in.runes
+	cur := in.cur
+	offset := 0
+	if len(rs) > maxW {
+		offset = len(rs) - maxW
+		if cur < offset {
+			offset = cur
+		}
+		if cur > offset+maxW {
+			offset = cur - maxW
+		}
+	}
+	visible := rs[offset:]
+	if len(visible) > maxW {
+		visible = visible[:maxW]
+	}
+	c.WriteAt(row, col, string(visible))
+	c.PlaceCursor(row, col+cur-offset)
+}
+
 // handle applies an ordinary typing keypress to the input. Returns true if
 // the key was consumed. Form-level keys (Tab, Enter, Esc) must be filtered
 // by the caller first.

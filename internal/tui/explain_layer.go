@@ -87,8 +87,8 @@ func (el *explainLayer) Draw(a *app, c *cellbuf) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	c.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	c.FillRect(r)
 	title := "Query Plan"
 	if el.showRaw {
 		title = "Query Plan [raw]"
@@ -110,12 +110,12 @@ func (el *explainLayer) Draw(a *app, c *cellbuf) {
 	if status == "" {
 		status = "Up/Dn=move  Space=collapse  r=raw  Esc=close"
 	}
-	c.writeAt(row+boxH-2, innerCol, truncate(status, innerW))
+	c.WriteAt(row+boxH-2, innerCol, truncate(status, innerW))
 }
 
 func (el *explainLayer) drawTree(c *cellbuf, row, col, w, h int) {
 	if len(el.flat) == 0 {
-		c.writeAt(row, col, truncate("(no plan)", w))
+		c.WriteAt(row, col, truncate("(no plan)", w))
 		return
 	}
 	if el.selected < el.scroll {
@@ -142,14 +142,14 @@ func (el *explainLayer) drawTree(c *cellbuf, row, col, w, h int) {
 			for displayWidth(padded) < w {
 				padded += " "
 			}
-			c.writeStyled(row+i, col, truncate(padded, w), sel)
+			c.WriteStyled(row+i, col, truncate(padded, w), sel)
 			continue
 		}
 		style := defaultStyle()
 		if rowEntry.isDetail {
 			style = dim
 		}
-		c.writeStyled(row+i, col, truncate(line, w), style)
+		c.WriteStyled(row+i, col, truncate(line, w), style)
 	}
 }
 
@@ -159,7 +159,7 @@ func (el *explainLayer) drawRaw(c *cellbuf, row, col, w, h int) {
 		raw = el.tree.raw
 	}
 	if raw == "" {
-		c.writeAt(row, col, truncate("(no raw output)", w))
+		c.WriteAt(row, col, truncate("(no raw output)", w))
 		return
 	}
 	lines := strings.Split(raw, "\n")
@@ -174,7 +174,7 @@ func (el *explainLayer) drawRaw(c *cellbuf, row, col, w, h int) {
 		if idx >= len(lines) {
 			break
 		}
-		c.writeAt(row+i, col, truncate(lines[idx], w))
+		c.WriteAt(row+i, col, truncate(lines[idx], w))
 	}
 }
 

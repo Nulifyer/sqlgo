@@ -33,12 +33,12 @@ func (rl *renameLayer) Draw(a *app, c *cellbuf) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	c.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	c.FillRect(r)
 	drawFrame(c, r, "Rename query tab", true)
 
 	innerCol := col + 2
-	c.writeAt(row+1, innerCol, "Name:")
+	c.WriteAt(row+1, innerCol, "Name:")
 	valCol := innerCol + 6
 	maxVal := boxW - 6 - 4
 	if maxVal < 1 {
@@ -49,10 +49,10 @@ func (rl *renameLayer) Draw(a *app, c *cellbuf) {
 	if len(rs) > maxVal {
 		rs = rs[len(rs)-maxVal:]
 	}
-	c.writeAt(row+1, valCol, string(rs))
-	c.placeCursor(row+1, valCol+len(rs))
+	c.WriteAt(row+1, valCol, string(rs))
+	c.PlaceCursor(row+1, valCol+len(rs))
 
-	c.writeAt(row+3, innerCol, truncate("Enter=save  Esc=cancel", boxW-4))
+	c.WriteAt(row+3, innerCol, truncate("Enter=save  Esc=cancel", boxW-4))
 }
 
 func (rl *renameLayer) HandleKey(a *app, k Key) {

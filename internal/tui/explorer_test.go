@@ -19,10 +19,42 @@ func fixtureSchema() *db.SchemaInfo {
 	}
 }
 
-func TestExplorerBuildsTreeExpanded(t *testing.T) {
+func TestExplorerBuildsTreeCollapsed(t *testing.T) {
 	t.Parallel()
 	e := newExplorer()
 	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
+
+	// Schemas start collapsed: only schema headers visible.
+	want := []struct {
+		kind  explorerItemKind
+		label string
+	}{
+		{itemSchema, "dbo"},
+		{itemSchema, "hr"},
+	}
+	if len(e.items) != len(want) {
+		t.Fatalf("items len = %d, want %d: %+v", len(e.items), len(want), e.items)
+	}
+	for i, w := range want {
+		if e.items[i].kind != w.kind || e.items[i].label != w.label {
+			t.Errorf("items[%d] = (%d %q), want (%d %q)", i, e.items[i].kind, e.items[i].label, w.kind, w.label)
+		}
+	}
+}
+
+func TestExplorerExpandsSchemaManually(t *testing.T) {
+	t.Parallel()
+	e := newExplorer()
+	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
+
+	// Expand dbo schema, then its Tables and Views subgroups.
+	e.cursor = 0
+	e.Toggle() // expand dbo
+	// dbo expanded shows subgroup headers (collapsed).
+	e.cursor = 1 // Tables subgroup
+	e.Toggle()   // expand Tables
+	e.cursor = 4 // Views subgroup (after dbo + Tables + orders + users)
+	e.Toggle()   // expand Views
 
 	want := []struct {
 		kind  explorerItemKind
@@ -35,8 +67,6 @@ func TestExplorerBuildsTreeExpanded(t *testing.T) {
 		{itemSubgroup, "Views"},
 		{itemView, "v_active"},
 		{itemSchema, "hr"},
-		{itemSubgroup, "Tables"},
-		{itemTable, "employees"},
 	}
 	if len(e.items) != len(want) {
 		t.Fatalf("items len = %d, want %d: %+v", len(e.items), len(want), e.items)
@@ -53,21 +83,18 @@ func TestExplorerToggleCollapsesSchema(t *testing.T) {
 	e := newExplorer()
 	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
 
-	// Move cursor to the dbo schema header and collapse it.
+	// Expand dbo, then collapse it again.
 	e.cursor = 0
-	e.Toggle()
-	if e.expanded["dbo"] {
-		t.Fatalf("expected dbo collapsed after toggle")
-	}
-	// After collapse: dbo header, hr header, Tables subgroup, employees leaf.
+	e.Toggle() // expand dbo
+	e.cursor = 0
+	e.Toggle() // collapse dbo
+	// After collapse: both schemas collapsed.
 	want := []struct {
 		kind  explorerItemKind
 		label string
 	}{
 		{itemSchema, "dbo"},
 		{itemSchema, "hr"},
-		{itemSubgroup, "Tables"},
-		{itemTable, "employees"},
 	}
 	if len(e.items) != len(want) {
 		t.Fatalf("items len after collapse = %d, want %d: %+v", len(e.items), len(want), e.items)
@@ -84,7 +111,11 @@ func TestExplorerToggleCollapsesSubgroup(t *testing.T) {
 	e := newExplorer()
 	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
 
-	// Find the dbo "Views" subgroup and collapse it.
+	// Expand dbo schema first (starts collapsed).
+	e.cursor = 0
+	e.Toggle()
+
+	// Expand Views subgroup so we can then collapse it.
 	target := -1
 	for i, it := range e.items {
 		if it.kind == itemSubgroup && it.schemaName == "dbo" && it.subgroup == subgroupViews {
@@ -95,6 +126,22 @@ func TestExplorerToggleCollapsesSubgroup(t *testing.T) {
 	if target < 0 {
 		t.Fatalf("dbo/Views subgroup not found in tree")
 	}
+	e.cursor = target
+	e.Toggle() // expand Views
+
+	// Verify v_active is visible.
+	found := false
+	for _, it := range e.items {
+		if it.kind == itemView && it.label == "v_active" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("v_active should be visible after expanding Views")
+	}
+
+	// Now collapse Views.
 	e.cursor = target
 	e.Toggle()
 
@@ -109,7 +156,7 @@ func TestExplorerToggleCollapsesSubgroup(t *testing.T) {
 		}
 	}
 	// The "Views" header itself should still be present.
-	found := false
+	found = false
 	for _, it := range e.items {
 		if it.kind == itemSubgroup && it.schemaName == "dbo" && it.subgroup == subgroupViews {
 			found = true
@@ -126,6 +173,10 @@ func TestExplorerMoveCursorClamps(t *testing.T) {
 	e := newExplorer()
 	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
 
+	// Expand dbo so there's more than 2 items to test with.
+	e.cursor = 0
+	e.Toggle()
+
 	e.MoveCursor(-50)
 	if e.cursor != 0 {
 		t.Errorf("cursor after underflow = %d, want 0", e.cursor)
@@ -141,13 +192,19 @@ func TestExplorerSelectedOnlyOnLeaf(t *testing.T) {
 	e := newExplorer()
 	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
 
-	// cursor on the dbo schema header → no selection
+	// Expand dbo schema and Tables subgroup to reach leaf rows.
+	e.cursor = 0
+	e.Toggle() // expand dbo
+	e.cursor = 1
+	e.Toggle() // expand Tables
+
+	// cursor on the dbo schema header -> no selection
 	e.cursor = 0
 	if _, ok := e.Selected(); ok {
 		t.Errorf("selection on schema header should be empty")
 	}
 
-	// cursor on the Tables subgroup header → no selection
+	// cursor on the Tables subgroup header -> no selection
 	e.cursor = 1
 	if _, ok := e.Selected(); ok {
 		t.Errorf("selection on subgroup header should be empty")
@@ -220,8 +277,38 @@ func TestExplorerFlatSchemaOmitsSchemaHeader(t *testing.T) {
 	e := newExplorer()
 	e.SetSchema(info, db.SchemaDepthFlat)
 
-	// No itemSchema row should appear; the tree starts with Tables.
-	want := []struct {
+	// Flat mode starts with just the two subgroup headers collapsed; no
+	// schema header appears even before expansion.
+	collapsed := []struct {
+		kind  explorerItemKind
+		label string
+	}{
+		{itemSubgroup, "Tables"},
+		{itemSubgroup, "Views"},
+	}
+	if len(e.items) != len(collapsed) {
+		t.Fatalf("collapsed items len = %d, want %d: %+v", len(e.items), len(collapsed), e.items)
+	}
+	for i, w := range collapsed {
+		if e.items[i].kind != w.kind || e.items[i].label != w.label {
+			t.Errorf("collapsed items[%d] = (%d %q), want (%d %q)",
+				i, e.items[i].kind, e.items[i].label, w.kind, w.label)
+		}
+	}
+	for _, it := range e.items {
+		if it.kind == itemSchema {
+			t.Errorf("flat mode emitted a schema header: %+v", it)
+		}
+	}
+
+	// Expand both subgroups to confirm leaves still materialize under the
+	// flat layout.
+	e.cursor = 0
+	e.Toggle() // Tables
+	e.cursor = 3
+	e.Toggle() // Views
+
+	expanded := []struct {
 		kind  explorerItemKind
 		label string
 	}{
@@ -231,18 +318,18 @@ func TestExplorerFlatSchemaOmitsSchemaHeader(t *testing.T) {
 		{itemSubgroup, "Views"},
 		{itemView, "v_active"},
 	}
-	if len(e.items) != len(want) {
-		t.Fatalf("items len = %d, want %d: %+v", len(e.items), len(want), e.items)
+	if len(e.items) != len(expanded) {
+		t.Fatalf("expanded items len = %d, want %d: %+v", len(e.items), len(expanded), e.items)
 	}
-	for i, w := range want {
+	for i, w := range expanded {
 		if e.items[i].kind != w.kind || e.items[i].label != w.label {
-			t.Errorf("items[%d] = (%d %q), want (%d %q)",
+			t.Errorf("expanded items[%d] = (%d %q), want (%d %q)",
 				i, e.items[i].kind, e.items[i].label, w.kind, w.label)
 		}
 	}
 	for _, it := range e.items {
 		if it.kind == itemSchema {
-			t.Errorf("flat mode emitted a schema header: %+v", it)
+			t.Errorf("flat mode emitted a schema header after expansion: %+v", it)
 		}
 	}
 }

@@ -1,4 +1,4 @@
-package tui
+package term
 
 import (
 	"bytes"
@@ -10,12 +10,12 @@ func TestIdleFrameEmitsNothing(t *testing.T) {
 	// same composited content should write zero bytes thanks to the
 	// framesEqual fast-path.
 	var buf bytes.Buffer
-	s := newScreen(&buf, 10, 3)
+	s := NewScreen(&buf, 10, 3)
 
-	layer := newCellbuf(10, 3)
-	layer.writeStyled(1, 1, "hello", defaultStyle())
-	s.composite([]*cellbuf{layer})
-	if err := s.flush(); err != nil {
+	layer := NewCellbuf(10, 3)
+	layer.WriteStyled(1, 1, "hello", DefaultStyle())
+	s.Composite([]*Cellbuf{layer})
+	if err := s.Flush(); err != nil {
 		t.Fatalf("flush 1: %v", err)
 	}
 	if buf.Len() == 0 {
@@ -23,10 +23,10 @@ func TestIdleFrameEmitsNothing(t *testing.T) {
 	}
 
 	buf.Reset()
-	layer2 := newCellbuf(10, 3)
-	layer2.writeStyled(1, 1, "hello", defaultStyle())
-	s.composite([]*cellbuf{layer2})
-	if err := s.flush(); err != nil {
+	layer2 := NewCellbuf(10, 3)
+	layer2.WriteStyled(1, 1, "hello", DefaultStyle())
+	s.Composite([]*Cellbuf{layer2})
+	if err := s.Flush(); err != nil {
 		t.Fatalf("flush 2: %v", err)
 	}
 	if buf.Len() != 0 {
@@ -36,32 +36,32 @@ func TestIdleFrameEmitsNothing(t *testing.T) {
 
 func TestApplyViewEmitsDeltasOnly(t *testing.T) {
 	var buf bytes.Buffer
-	s := newScreen(&buf, 10, 3)
+	s := NewScreen(&buf, 10, 3)
 
-	if err := s.applyView(View{AltScreen: true}); err != nil {
+	if err := s.ApplyView(View{AltScreen: true}); err != nil {
 		t.Fatalf("apply 1: %v", err)
 	}
-	if !bytes.Contains(buf.Bytes(), []byte(altScreenOn)) {
-		t.Errorf("first applyView did not emit altScreenOn: %q", buf.String())
+	if !bytes.Contains(buf.Bytes(), []byte(AltScreenOn)) {
+		t.Errorf("first ApplyView did not emit AltScreenOn: %q", buf.String())
 	}
 
 	buf.Reset()
-	if err := s.applyView(View{AltScreen: true}); err != nil {
+	if err := s.ApplyView(View{AltScreen: true}); err != nil {
 		t.Fatalf("apply 2: %v", err)
 	}
 	if buf.Len() != 0 {
-		t.Errorf("identical applyView wrote %d bytes, want 0", buf.Len())
+		t.Errorf("identical ApplyView wrote %d bytes, want 0", buf.Len())
 	}
 
 	buf.Reset()
-	if err := s.applyView(View{AltScreen: true, PasteEnabled: true}); err != nil {
+	if err := s.ApplyView(View{AltScreen: true, PasteEnabled: true}); err != nil {
 		t.Fatalf("apply 3: %v", err)
 	}
-	if !bytes.Contains(buf.Bytes(), []byte(pasteOn)) {
-		t.Errorf("paste flip did not emit pasteOn: %q", buf.String())
+	if !bytes.Contains(buf.Bytes(), []byte(PasteOn)) {
+		t.Errorf("paste flip did not emit PasteOn: %q", buf.String())
 	}
-	if bytes.Contains(buf.Bytes(), []byte(altScreenOn)) {
-		t.Errorf("unchanged AltScreen flag re-emitted altScreenOn: %q", buf.String())
+	if bytes.Contains(buf.Bytes(), []byte(AltScreenOn)) {
+		t.Errorf("unchanged AltScreen flag re-emitted AltScreenOn: %q", buf.String())
 	}
 }
 
@@ -77,7 +77,7 @@ func TestSanitizeWindowTitle(t *testing.T) {
 		{"tab\ttab", "tabtab"},
 		{"newline\nhere", "newlinehere"},
 		{"del\x7fhere", "delhere"},
-		{"unicode-πok", "unicode-πok"},
+		{"unicode-\u03c0ok", "unicode-\u03c0ok"},
 	}
 	for _, tc := range cases {
 		if got := sanitizeWindowTitle(tc.in); got != tc.want {

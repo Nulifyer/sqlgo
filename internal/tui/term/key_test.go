@@ -1,15 +1,15 @@
-package tui
+package term
 
 import (
 	"bytes"
 	"testing"
 )
 
-// readAll drains the keyReader until n messages arrive. Tests supply a
+// readAll drains the KeyReader until n messages arrive. Tests supply a
 // byte stream and expect a specific sequence of InputMsg values.
 func readAll(t *testing.T, raw string, n int) []InputMsg {
 	t.Helper()
-	kr := newKeyReader(bytes.NewReader([]byte(raw)))
+	kr := NewKeyReader(bytes.NewReader([]byte(raw)))
 	out := make([]InputMsg, 0, n)
 	for i := 0; i < n; i++ {
 		m, err := kr.Read()

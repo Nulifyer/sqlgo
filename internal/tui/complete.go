@@ -550,9 +550,9 @@ func (e *editor) drawComplete(c *cellbuf, innerRow, innerCol, innerW, innerH int
 			style = selected
 		}
 		for x := 0; x < popupW; x++ {
-			c.writeStyled(popupRow+i, anchorCol+x, " ", style)
+			c.WriteStyled(popupRow+i, anchorCol+x, " ", style)
 		}
-		c.writeStyled(popupRow+i, anchorCol+1, it.kind.marker(), style)
+		c.WriteStyled(popupRow+i, anchorCol+1, it.kind.marker(), style)
 		textCol := anchorCol + markerWidth
 		avail := popupW - markerWidth - 1
 		if avail < 0 {
@@ -577,7 +577,7 @@ func (e *editor) drawComplete(c *cellbuf, innerRow, innerCol, innerW, innerH int
 			if mi < len(it.matches) && it.matches[mi] == ri {
 				runeStyle.Attrs |= attrBold | attrUnderline
 			}
-			c.writeStyled(popupRow+i, col, string(r), runeStyle)
+			c.WriteStyled(popupRow+i, col, string(r), runeStyle)
 			col += w
 		}
 		// Type hint (dim) right-justified within the row.
@@ -594,7 +594,7 @@ func (e *editor) drawComplete(c *cellbuf, innerRow, innerCol, innerW, innerH int
 					if w == 0 {
 						continue
 					}
-					c.writeStyled(popupRow+i, hintCol, string(r), tStyle)
+					c.WriteStyled(popupRow+i, hintCol, string(r), tStyle)
 					hintCol += w
 				}
 			}

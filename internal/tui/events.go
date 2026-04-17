@@ -1,85 +1,41 @@
 package tui
 
-// InputMsg is any terminal input event. Key events remain the primary
-// shape; mouse/paste/focus are additive for layers that opt in.
-//
-// We use an interface with an unexported marker so only types in this
-// package can satisfy it -- external code can't accidentally spawn
-// new event variants.
-type InputMsg interface {
-	inputMsg()
-}
+import "github.com/Nulifyer/sqlgo/internal/tui/term"
 
-func (Key) inputMsg()       {}
-func (PasteMsg) inputMsg()  {}
-func (MouseMsg) inputMsg()  {}
-func (FocusMsg) inputMsg()  {}
-func (BlurMsg) inputMsg()   {}
-func (ResizeMsg) inputMsg() {}
+// All event types are thin aliases so existing tui/ code compiles without
+// changes. The real definitions (and the inputMsg marker) live in term/.
 
-// PasteMsg is a batched paste delivered by bracketed-paste mode. Layers
-// that want paste to behave differently from typed input (e.g. suppress
-// autocomplete, single-undo-snapshot the whole block) should consume
-// this. Layers that don't handle it get the usual per-byte key events
-// only if the terminal isn't in bracketed-paste mode -- with
-// pasteOn active, the bytes between CSI 200~ and CSI 201~ are captured
-// and delivered as one PasteMsg with no Key events in between.
-type PasteMsg struct {
-	Text string
-}
+type InputMsg = term.InputMsg
 
-// MouseButton identifies which pointer gesture produced a MouseMsg.
-// Wheel "buttons" are modeled the same way xterm encodes them (as
-// button codes 64/65) so the decoder doesn't need a separate enum.
-type MouseButton int
+type PasteMsg = term.PasteMsg
+
+type MouseButton = term.MouseButton
 
 const (
-	MouseButtonNone MouseButton = iota
-	MouseButtonLeft
-	MouseButtonMiddle
-	MouseButtonRight
-	MouseButtonWheelUp
-	MouseButtonWheelDown
-	MouseButtonWheelLeft
-	MouseButtonWheelRight
+	MouseButtonNone       = term.MouseButtonNone
+	MouseButtonLeft       = term.MouseButtonLeft
+	MouseButtonMiddle     = term.MouseButtonMiddle
+	MouseButtonRight      = term.MouseButtonRight
+	MouseButtonWheelUp    = term.MouseButtonWheelUp
+	MouseButtonWheelDown  = term.MouseButtonWheelDown
+	MouseButtonWheelLeft  = term.MouseButtonWheelLeft
+	MouseButtonWheelRight = term.MouseButtonWheelRight
 )
 
-// MouseAction separates press/release/motion. SGR mouse encoding
-// distinguishes press from release via the final byte (M vs m); legacy
-// X10 does not and so always reports Press.
-type MouseAction int
+type MouseAction = term.MouseAction
 
 const (
-	MouseActionPress MouseAction = iota
-	MouseActionRelease
-	MouseActionMotion
+	MouseActionPress   = term.MouseActionPress
+	MouseActionRelease = term.MouseActionRelease
+	MouseActionMotion  = term.MouseActionMotion
 )
 
-// MouseMsg is a pointer event. Coordinates are 1-based to match the
-// rest of the TUI (moveTo, cellbuf positions). Modifier bits mirror Key
-// for uniformity.
-type MouseMsg struct {
-	X, Y   int
-	Button MouseButton
-	Action MouseAction
-	Shift  bool
-	Alt    bool
-	Ctrl   bool
-}
+type MouseMsg = term.MouseMsg
 
-// FocusMsg fires when the terminal window gains focus (requires
-// pasteOn's sibling mode ?1004h to be enabled). BlurMsg fires on loss.
-// Neither carries a payload.
-type FocusMsg struct{}
-type BlurMsg struct{}
+type FocusMsg = term.FocusMsg
+type BlurMsg = term.BlurMsg
 
-// ResizeMsg is reserved for the future; the current loop polls the
-// terminal size each frame so it isn't emitted today. Included here so
-// the InputMsg taxonomy is complete and new layers can switch on it
-// without touching this file later.
-type ResizeMsg struct {
-	Width, Height int
-}
+type ResizeMsg = term.ResizeMsg
 
 // InputHandler is the optional extension on Layer for mouse, paste, and
 // focus events. Layers implementing it receive every non-Key event

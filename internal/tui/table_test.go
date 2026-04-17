@@ -190,9 +190,9 @@ func TestTableRendersUnicodeEndToEnd(t *testing.T) {
 	var out bytes.Buffer
 	scr := newScreen(&out, 40, 7)
 	buf := newCellbuf(40, 7)
-	tbl.draw(buf, rect{row: 1, col: 1, w: 40, h: 7})
-	scr.composite([]*cellbuf{buf})
-	if err := scr.flush(); err != nil {
+	tbl.draw(buf, rect{Row: 1, Col: 1, W: 40, H: 7})
+	scr.Composite([]*cellbuf{buf})
+	if err := scr.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 
@@ -240,9 +240,9 @@ func TestTableRendersUnicodeEndToEnd(t *testing.T) {
 	)
 	out.Reset()
 	buf2 := newCellbuf(40, 7)
-	tbl2.draw(buf2, rect{row: 1, col: 1, w: 40, h: 7})
-	scr.composite([]*cellbuf{buf2})
-	if err := scr.flush(); err != nil {
+	tbl2.draw(buf2, rect{Row: 1, Col: 1, W: 40, H: 7})
+	scr.Composite([]*cellbuf{buf2})
+	if err := scr.Flush(); err != nil {
 		t.Fatalf("flush2: %v", err)
 	}
 	plain2 := stripANSI(out.String())
@@ -587,4 +587,27 @@ func TestWrapHighlightSpanMatchesNonWrap(t *testing.T) {
 			}
 		}
 	}
+}
+
+// stripANSI returns s with every CSI escape sequence removed, used by
+// rendering tests that want to assert on visible characters.
+func stripANSI(s string) string {
+	var b bytes.Buffer
+	i := 0
+	for i < len(s) {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			i += 2
+			for i < len(s) {
+				c := s[i]
+				i++
+				if c >= 0x40 && c <= 0x7e {
+					break
+				}
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
 }

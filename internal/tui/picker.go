@@ -87,21 +87,21 @@ func (p *picker) draw(s *cellbuf, termW, termH int) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
 	// Blank the overlay's footprint so the main view behind it doesn't
 	// bleed through on cells this picker doesn't explicitly draw to.
-	s.fillRect(r)
+	s.FillRect(r)
 	drawFrame(s, r, "Connect", true)
 
 	innerCol := col + 2
 	cur := row + 1
 
 	if len(p.conns) == 0 {
-		s.writeAt(cur+1, innerCol, "No saved connections.")
-		s.writeAt(cur+3, innerCol, "Press 'a' to add a connection.")
-		s.writeAt(cur+4, innerCol, "Press Ctrl+Q to quit.")
+		s.WriteAt(cur+1, innerCol, "No saved connections.")
+		s.WriteAt(cur+3, innerCol, "Press 'a' to add a connection.")
+		s.WriteAt(cur+4, innerCol, "Press Ctrl+Q to quit.")
 	} else {
-		s.writeAt(cur, innerCol, "Select a connection:")
+		s.WriteAt(cur, innerCol, "Select a connection:")
 		listTop := cur + 2
 		maxRows := boxH - 5 - len(statusLines)
 		if len(statusLines) == 0 {
@@ -124,11 +124,11 @@ func (p *picker) draw(s *cellbuf, termW, termH int) {
 				line = line[:boxW-6]
 			}
 			if i == p.selected {
-				s.setFg(colorBorderFocused)
-				s.writeAt(listTop+i, innerCol, "▶ "+line)
-				s.resetStyle()
+				s.SetFg(colorBorderFocused)
+				s.WriteAt(listTop+i, innerCol, "▶ "+line)
+				s.ResetStyle()
 			} else {
-				s.writeAt(listTop+i, innerCol, "  "+line)
+				s.WriteAt(listTop+i, innerCol, "  "+line)
 			}
 		}
 	}
@@ -138,12 +138,12 @@ func (p *picker) draw(s *cellbuf, termW, termH int) {
 	// legible instead of getting truncated. Key hints live in the
 	// bottom footer via Hints().
 	if len(statusLines) > 0 {
-		s.setFg(colorBorderFocused)
-		startRow := r.row + r.h - 1 - len(statusLines)
+		s.SetFg(colorBorderFocused)
+		startRow := r.Row + r.H - 1 - len(statusLines)
 		for i, line := range statusLines {
-			s.writeAt(startRow+i, innerCol, line)
+			s.WriteAt(startRow+i, innerCol, line)
 		}
-		s.resetStyle()
+		s.ResetStyle()
 	}
 }
 

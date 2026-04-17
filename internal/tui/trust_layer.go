@@ -40,42 +40,42 @@ func (tl *trustLayer) Draw(a *app, c *cellbuf) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	c.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	c.FillRect(r)
 	drawFrame(c, r, "SSH host not trusted", true)
 
 	innerCol := col + 2
-	c.writeAt(row+1, innerCol, truncate(
+	c.WriteAt(row+1, innerCol, truncate(
 		fmt.Sprintf("Host %s:%d is not in your known_hosts file.", tl.err.Host, tl.err.Port),
 		boxW-4,
 	))
-	c.writeAt(row+2, innerCol, truncate("The server presented this key:", boxW-4))
-	c.writeAt(row+3, innerCol+2, truncate(
+	c.WriteAt(row+2, innerCol, truncate("The server presented this key:", boxW-4))
+	c.WriteAt(row+3, innerCol+2, truncate(
 		fmt.Sprintf("type:        %s", tl.err.Key.Type()),
 		boxW-6,
 	))
-	c.writeAt(row+4, innerCol+2, truncate(
+	c.WriteAt(row+4, innerCol+2, truncate(
 		fmt.Sprintf("fingerprint: %s", ssh.FingerprintSHA256(tl.err.Key)),
 		boxW-6,
 	))
-	c.writeAt(row+6, innerCol, truncate(
+	c.WriteAt(row+6, innerCol, truncate(
 		"Verify this fingerprint out-of-band before accepting.",
 		boxW-4,
 	))
-	c.writeAt(row+7, innerCol, truncate(
+	c.WriteAt(row+7, innerCol, truncate(
 		"If it does not match, press Esc or N and contact the host operator.",
 		boxW-4,
 	))
 
 	if tl.status != "" {
-		c.writeAt(row+boxH-3, innerCol, truncate("⚠ "+tl.status, boxW-4))
+		c.WriteAt(row+boxH-3, innerCol, truncate("⚠ "+tl.status, boxW-4))
 	}
 
 	prompt := "Trust this key? [y]=yes  [n/Esc]=no"
 	if tl.armed {
 		prompt = "Press Enter again or 'y' to CONFIRM, Esc to cancel"
 	}
-	c.writeAt(row+boxH-2, innerCol, truncate(prompt, boxW-4))
+	c.WriteAt(row+boxH-2, innerCol, truncate(prompt, boxW-4))
 }
 
 func (tl *trustLayer) HandleKey(a *app, k Key) {
@@ -126,7 +126,7 @@ func (tl *trustLayer) accept(a *app) {
 	if pl, ok := a.topLayer().(*pickerLayer); ok {
 		pl.setStatus("ssh host trusted; reconnecting…")
 		a.draw()
-		_ = a.scr.flush()
+		_ = a.scr.Flush()
 	}
 	a.connectTo(tl.target)
 }

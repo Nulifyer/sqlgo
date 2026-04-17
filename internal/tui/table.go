@@ -737,10 +737,10 @@ func (t *table) CellAt(r rect, screenRow, screenCol int) bool {
 	if t.wrap || len(t.cols) == 0 {
 		return false
 	}
-	innerRow := r.row + 1
-	innerCol := r.col + 1
-	innerW := r.w - 2
-	innerH := r.h - 2
+	innerRow := r.Row + 1
+	innerCol := r.Col + 1
+	innerW := r.W - 2
+	innerH := r.H - 2
 	if innerW <= 0 || innerH <= 0 {
 		return false
 	}
@@ -798,10 +798,10 @@ func (t *table) cellSpanLocked(col int) (int, int) {
 
 // draw renders the table inside r (caller has already drawn the border).
 func (t *table) draw(s *cellbuf, r rect) {
-	innerRow := r.row + 1
-	innerCol := r.col + 1
-	innerW := r.w - 2
-	innerH := r.h - 2
+	innerRow := r.Row + 1
+	innerCol := r.Col + 1
+	innerW := r.W - 2
+	innerH := r.H - 2
 	if innerW <= 0 || innerH <= 0 {
 		return
 	}
@@ -810,7 +810,7 @@ func (t *table) draw(s *cellbuf, r rect) {
 	defer t.mu.Unlock()
 
 	if len(t.cols) == 0 {
-		s.writeAt(innerRow, innerCol, truncate("(no results)", innerW))
+		s.WriteAt(innerRow, innerCol, truncate("(no results)", innerW))
 		return
 	}
 
@@ -824,13 +824,13 @@ func (t *table) draw(s *cellbuf, r rect) {
 
 	// Header row, with sort marker on the sorted column.
 	header := renderHeaderRow(t.cols, t.widths, t.sortCol, t.sortDesc)
-	s.setFg(colorTitleFocused)
-	s.writeAt(innerRow, innerCol, sliceRunes(header, t.scrollCol, innerW))
-	s.resetStyle()
+	s.SetFg(colorTitleFocused)
+	s.WriteAt(innerRow, innerCol, sliceRunes(header, t.scrollCol, innerW))
+	s.ResetStyle()
 
 	// Separator.
 	sep := renderSeparator(t.widths)
-	s.writeAt(innerRow+1, innerCol, sliceRunes(sep, t.scrollCol, innerW))
+	s.WriteAt(innerRow+1, innerCol, sliceRunes(sep, t.scrollCol, innerW))
 
 	if bodyH == 0 {
 		return
@@ -842,7 +842,7 @@ func (t *table) draw(s *cellbuf, r rect) {
 		if t.filter != "" {
 			msg = "(no matches for /" + t.filter + "/)"
 		}
-		s.writeAt(innerRow+2, innerCol, truncate(msg, innerW))
+		s.WriteAt(innerRow+2, innerCol, truncate(msg, innerW))
 		return
 	}
 
@@ -950,7 +950,7 @@ func drawRunsWithHighlight(s *cellbuf, row, col, innerW int, runes []runeRun, sc
 			if i >= hi0 && i < hi1 {
 				st = selected
 			}
-			s.writeStyled(row, col+written, " ", st)
+			s.WriteStyled(row, col+written, " ", st)
 			written++
 			continue
 		}
@@ -966,7 +966,7 @@ func drawRunsWithHighlight(s *cellbuf, row, col, innerW int, runes []runeRun, sc
 				st.Attrs |= attrUnderline
 			}
 		}
-		s.writeStyled(row, col+written, run.s, st)
+		s.WriteStyled(row, col+written, run.s, st)
 		written++
 	}
 }
@@ -985,7 +985,7 @@ func highlightSpan(widths []int, col int) (int, int) {
 	return lo, lo + widths[col]
 }
 
-// runeRun is a single visible slot in a rendered row: exactly one
+// runeRun is a single visible slot in a rendered Row: exactly one
 // terminal cell wide. The invariant "one entry = one visual column"
 // is what lets the draw loop use plain index arithmetic for
 // scrollCol and cursor-highlight spans.

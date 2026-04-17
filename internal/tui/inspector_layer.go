@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // inspectorLayer is the modal overlay that shows the full untruncated
@@ -32,12 +33,27 @@ func newInspectorLayer(colName, value string) *inspectorLayer {
 func sanitizeInspectorText(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	for _, r := range s {
+	for i := 0; i < len(s); {
+		r := rune(s[i])
+		// Fast path for ASCII (covers all control chars we care about).
+		if r < 0x80 {
+			i++
+		} else {
+			var size int
+			r, size = utf8.DecodeRuneInString(s[i:])
+			i += size
+		}
 		switch r {
 		case '\n':
 			b.WriteRune('\n')
 		case '\r':
-			b.WriteString(`\r`)
+			if i < len(s) && s[i] == '\n' {
+				// \r\n pair: emit one newline, skip the \n.
+				b.WriteRune('\n')
+				i++
+			} else {
+				b.WriteString(`\r`)
+			}
 		case '\t':
 			b.WriteString(`\t`)
 		default:
@@ -111,8 +127,8 @@ func (il *inspectorLayer) Draw(a *app, c *cellbuf) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	c.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	c.FillRect(r)
 
 	title := "Cell"
 	if il.colName != "" {
@@ -139,7 +155,7 @@ func (il *inspectorLayer) Draw(a *app, c *cellbuf) {
 		if idx >= len(il.lines) {
 			break
 		}
-		c.writeAt(innerRow+i, innerCol, truncate(il.lines[idx], innerW))
+		c.WriteAt(innerRow+i, innerCol, truncate(il.lines[idx], innerW))
 	}
 }
 

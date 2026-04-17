@@ -49,12 +49,12 @@ func (fl *filterLayer) Draw(a *app, c *cellbuf) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	c.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	c.FillRect(r)
 	drawFrame(c, r, "Filter results", true)
 
 	innerCol := col + 2
-	c.writeAt(row+1, innerCol, "Filter:")
+	c.WriteAt(row+1, innerCol, "Filter:")
 	valCol := innerCol + 8
 	maxVal := boxW - 8 - 4
 	if maxVal < 1 {
@@ -65,12 +65,12 @@ func (fl *filterLayer) Draw(a *app, c *cellbuf) {
 	if len(rs) > maxVal {
 		rs = rs[len(rs)-maxVal:]
 	}
-	c.writeAt(row+1, valCol, string(rs))
-	c.placeCursor(row+1, valCol+len(rs))
+	c.WriteAt(row+1, valCol, string(rs))
+	c.PlaceCursor(row+1, valCol+len(rs))
 
 	// Syntax hint line so the user can discover column / regex mode
 	// without having to read the docs.
-	c.writeAt(row+3, innerCol, truncate("syntax: text  |  col:text  |  /regex/", boxW-4))
+	c.WriteAt(row+3, innerCol, truncate("syntax: text  |  col:text  |  /regex/", boxW-4))
 
 	m := a.mainLayerPtr()
 	msg := ""
@@ -79,14 +79,14 @@ func (fl *filterLayer) Draw(a *app, c *cellbuf) {
 	} else {
 		msg = formatFilterStatus(m.table.RowCount(), m.table.Filter())
 	}
-	c.writeAt(row+4, innerCol, truncate(msg, boxW-4))
+	c.WriteAt(row+4, innerCol, truncate(msg, boxW-4))
 
 	// Any parse warning from SetFilter lives one line below the
 	// status. Dimmed so it doesn't compete with the match count.
 	if note := m.table.FilterNote(); note != "" {
-		c.setFg(colorBorderFocused)
-		c.writeAt(r.row+r.h-2, innerCol, truncate("⚠ "+note, boxW-4))
-		c.resetStyle()
+		c.SetFg(colorBorderFocused)
+		c.WriteAt(r.Row+r.H-2, innerCol, truncate("⚠ "+note, boxW-4))
+		c.ResetStyle()
 	}
 }
 

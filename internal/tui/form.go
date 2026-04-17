@@ -43,6 +43,15 @@ type formField struct {
 
 func (ff *formField) isCycler() bool { return len(ff.values) > 0 }
 
+// portString returns the string form of a default port, or "" when
+// the port is 0 (no default for that driver).
+func portString(p int) string {
+	if p == 0 {
+		return ""
+	}
+	return strconv.Itoa(p)
+}
+
 // Fixed field indices.
 const (
 	coreName = iota
@@ -277,7 +286,7 @@ func (f *connForm) setDriver(name string) {
 			f.fixed[coreHost].in.SetString("localhost")
 		}
 		if f.fixed[corePort].in.String() == "" {
-			f.fixed[corePort].in.SetString(strconv.Itoa(spec.defaultPort))
+			f.fixed[corePort].in.SetString(portString(spec.defaultPort))
 		}
 		if f.fixed[coreUser].in.String() == "" {
 			f.fixed[coreUser].in.SetString(spec.defaultUser)
@@ -314,9 +323,9 @@ func (f *connForm) cycleDriver(delta int) {
 	newSpec := engineSpecFor(f.driverNames[newIdx])
 	f.engine = buildEngineFields(newSpec, prior)
 	f.fixed[coreDriver].in.SetString(newSpec.driver)
-	priorPort := strconv.Itoa(priorSpec.defaultPort)
+	priorPort := portString(priorSpec.defaultPort)
 	if f.fixed[corePort].in.String() == priorPort || f.fixed[corePort].in.String() == "" || f.fixed[corePort].in.String() == "0" {
-		f.fixed[corePort].in.SetString(strconv.Itoa(newSpec.defaultPort))
+		f.fixed[corePort].in.SetString(portString(newSpec.defaultPort))
 	}
 	if f.fixed[coreUser].in.String() == priorSpec.defaultUser {
 		f.fixed[coreUser].in.SetString(newSpec.defaultUser)
@@ -501,8 +510,8 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	s.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	s.FillRect(r)
 	drawFrame(s, r, f.title, true)
 
 	innerCol := col + 2
@@ -534,12 +543,12 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 		}
 		label += ":"
 		if i == f.active {
-			s.setFg(colorBorderFocused)
+			s.SetFg(colorBorderFocused)
 		} else {
-			s.setFg(colorTitleUnfocused)
+			s.SetFg(colorTitleUnfocused)
 		}
-		s.writeAt(lineRow, innerCol, padRightString(label, labelW))
-		s.resetStyle()
+		s.WriteAt(lineRow, innerCol, padRightString(label, labelW))
+		s.ResetStyle()
 
 		val := field.in.String()
 		if field.mask {
@@ -595,14 +604,14 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 		} else if len(rs) > maxVal {
 			rs = rs[len(rs)-maxVal:]
 		}
-		s.writeAt(lineRow, vCol, string(rs))
+		s.WriteAt(lineRow, vCol, string(rs))
 
 		if i == f.active && editable {
 			cursorCol := vCol + cursorOffset
 			if cursorCol > vCol+maxVal {
 				cursorCol = vCol + maxVal
 			}
-			s.placeCursor(lineRow, cursorCol)
+			s.PlaceCursor(lineRow, cursorCol)
 		}
 		y++
 	}
@@ -612,12 +621,12 @@ func (f *connForm) draw(s *cellbuf, termW, termH int) {
 		if len(lines) > 4 {
 			lines = lines[:4]
 		}
-		s.setFg(colorBorderFocused)
-		startRow := r.row + r.h - 1 - len(lines)
+		s.SetFg(colorBorderFocused)
+		startRow := r.Row + r.H - 1 - len(lines)
 		for i, line := range lines {
-			s.writeAt(startRow+i, innerCol, line)
+			s.WriteAt(startRow+i, innerCol, line)
 		}
-		s.resetStyle()
+		s.ResetStyle()
 	}
 }
 
@@ -654,7 +663,7 @@ func (fl *formLayer) HandleKey(a *app, k Key) {
 		a.popLayer()
 		return
 	}
-	// Driver row: Enter opens the searchable picker instead of
+	// Driver Row: Enter opens the searchable picker instead of
 	// saving. Any non-chosen state forces this path so the form
 	// can't be submitted without a driver.
 	if fl.f.onDriverRow() && k.Kind == KeyEnter {
@@ -666,7 +675,7 @@ func (fl *formLayer) HandleKey(a *app, k Key) {
 					fl.f.setDriver("other")
 					if t, ok := db.GetTransport(transport); ok {
 						if fl.f.fixed[corePort].in.String() == "" || fl.f.fixed[corePort].in.String() == "0" {
-							fl.f.fixed[corePort].in.SetString(strconv.Itoa(t.DefaultPort))
+							fl.f.fixed[corePort].in.SetString(portString(t.DefaultPort))
 						}
 					}
 				})

@@ -35,8 +35,8 @@ func (gl *gotoLayer) Draw(a *app, c *cellbuf) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	c.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	c.FillRect(r)
 	drawFrame(c, r, "Go to line", true)
 
 	innerCol := col + 2
@@ -46,7 +46,7 @@ func (gl *gotoLayer) Draw(a *app, c *cellbuf) {
 		total = m.editor.buf.LineCount()
 	}
 	prompt := "Line (1-" + strconv.Itoa(total) + "):"
-	c.writeAt(row+1, innerCol, prompt)
+	c.WriteAt(row+1, innerCol, prompt)
 	valRow := row + 2
 	valCol := innerCol
 	maxVal := boxW - 4
@@ -58,14 +58,14 @@ func (gl *gotoLayer) Draw(a *app, c *cellbuf) {
 	if len(rs) > maxVal {
 		rs = rs[len(rs)-maxVal:]
 	}
-	c.writeAt(valRow, valCol, string(rs))
-	c.placeCursor(valRow, valCol+len(rs))
+	c.WriteAt(valRow, valCol, string(rs))
+	c.PlaceCursor(valRow, valCol+len(rs))
 
 	if gl.err != "" {
 		errStyle := Style{FG: ansiBrightRed, BG: ansiDefaultBG}
-		c.writeStyled(row+3, innerCol, truncate(gl.err, boxW-4), errStyle)
+		c.WriteStyled(row+3, innerCol, truncate(gl.err, boxW-4), errStyle)
 	}
-	c.writeAt(row+boxH-2, innerCol, truncate("Enter=go  Esc=cancel  (accepts line or line:col)", boxW-4))
+	c.WriteAt(row+boxH-2, innerCol, truncate("Enter=go  Esc=cancel  (accepts line or line:col)", boxW-4))
 }
 
 func (gl *gotoLayer) HandleKey(a *app, k Key) {

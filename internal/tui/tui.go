@@ -389,7 +389,7 @@ func Run(opts Options) error {
 		// Emit the off-sequences for whatever terminal modes the last
 		// applied View had on. Panic path skips this (handled inline by
 		// restoreTerminalOnPanic).
-		a.scr.teardownView()
+		a.scr.TeardownView()
 	}()
 
 	return a.loop()
@@ -427,16 +427,16 @@ func (a *app) loop() error {
 
 	for !a.quit {
 		if a.term.refreshSize() {
-			a.scr.resize(a.term.width, a.term.height)
+			a.scr.Resize(a.term.width, a.term.height)
 		}
 		// Apply declarative terminal modes (alt-screen, mouse, paste,
 		// title) before the cell-diff flush so the next diff lands in
 		// the right buffer.
-		if err := a.scr.applyView(a.effectiveView()); err != nil {
+		if err := a.scr.ApplyView(a.effectiveView()); err != nil {
 			return fmt.Errorf("apply view: %w", err)
 		}
 		a.draw()
-		if err := a.scr.flush(); err != nil {
+		if err := a.scr.Flush(); err != nil {
 			return fmt.Errorf("flush: %w", err)
 		}
 
@@ -469,11 +469,11 @@ func (a *app) loop() error {
 func (a *app) draw() {
 	bufs := make([]*cellbuf, len(a.layers))
 	for i, l := range a.layers {
-		b := a.scr.layerBuf(i)
+		b := a.scr.LayerBuf(i)
 		l.Draw(a, b)
 		bufs[i] = b
 	}
-	a.scr.composite(bufs)
+	a.scr.Composite(bufs)
 }
 
 // handleInput routes any InputMsg to the right handler. Key messages
@@ -588,7 +588,7 @@ func (a *app) connectTo(c config.Connection) {
 		if pl != nil {
 			pl.setStatus("ssh tunnel: dialing…")
 			a.draw()
-			_ = a.scr.flush()
+			_ = a.scr.Flush()
 		}
 		sshPass := c.SSH.Password
 		if sshPass == secret.Placeholder && a.secrets != nil {
@@ -765,6 +765,11 @@ func (a *app) disconnect() {
 			// so without this the session stays "running" forever and F5
 			// is locked on the next connection.
 			s.running = false
+			if s.runnerDone != nil {
+				close(s.runnerDone)
+				s.runnerDone = nil
+			}
+			s.runnerFrame = ""
 			s.cancel = nil
 		}
 	}
@@ -1007,10 +1012,19 @@ func (a *app) runQueryUnsafe() {
 	ctx, cancel := context.WithCancel(context.Background())
 	sess.cancel = cancel
 	sess.running = true
+	sess.runnerFrame = spinnerFrames[0]
+	sess.runnerDone = make(chan struct{})
 	sess.lastQuerySQL = sql
 	sess.lastQueryStart = time.Now()
 	sess.resetResults()
 	sess.status = "running query…"
+	go runSpinner(a, sess.runnerDone, func(a *app, frame string) {
+		m := a.mainLayerPtr()
+		if m.session != sess || !sess.running {
+			return
+		}
+		sess.runnerFrame = frame
+	})
 	start := sess.lastQueryStart
 
 	firstTab := sess.results[0]
@@ -1122,8 +1136,8 @@ func (a *app) handleQueryEvent(e queryEvent) {
 			return
 		}
 		// First set reuses the placeholder tab already in results; any
-		// subsequent set arrives as a new tab we append + activate so
-		// the user sees rows streaming into it live.
+		// subsequent set arrives as a new tab we append. The active
+		// tab stays on Result 1 so focus doesn't jump around.
 		found := false
 		for _, t := range sess.results {
 			if t == e.tab {
@@ -1160,6 +1174,11 @@ func (a *app) handleQueryEvent(e queryEvent) {
 		}
 	case evtDone:
 		sess.running = false
+		if sess.runnerDone != nil {
+			close(sess.runnerDone)
+			sess.runnerDone = nil
+		}
+		sess.runnerFrame = ""
 		sess.cancel = nil
 		if e.err != nil {
 			// Errors render in the active result tab's results pane via

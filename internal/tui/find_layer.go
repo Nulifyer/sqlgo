@@ -44,8 +44,8 @@ func (fl *findLayer) Draw(a *app, c *cellbuf) {
 	if col < 1 {
 		col = 1
 	}
-	r := rect{row: row, col: col, w: boxW, h: boxH}
-	c.fillRect(r)
+	r := rect{Row: row, Col: col, W: boxW, H: boxH}
+	c.FillRect(r)
 	drawFrame(c, r, "Find / Replace", true)
 
 	innerCol := col + 2
@@ -56,9 +56,9 @@ func (fl *findLayer) Draw(a *app, c *cellbuf) {
 		maxVal = 1
 	}
 
-	c.writeAt(row+1, innerCol, "Find:")
+	c.WriteAt(row+1, innerCol, "Find:")
 	fl.drawInputSlice(c, row+1, valCol, maxVal, fl.find, fl.activeField == findFieldFind)
-	c.writeAt(row+2, innerCol, "Replace:")
+	c.WriteAt(row+2, innerCol, "Replace:")
 	fl.drawInputSlice(c, row+2, valCol, maxVal, fl.replace, fl.activeField == findFieldReplace)
 
 	m := a.mainLayerPtr()
@@ -66,8 +66,8 @@ func (fl *findLayer) Draw(a *app, c *cellbuf) {
 	if statusText == "" {
 		statusText = fl.defaultStatus(m.editor)
 	}
-	c.writeAt(row+4, innerCol, truncate(statusText, boxW-4))
-	c.writeAt(row+5, innerCol, truncate("Enter=next  Shift+Tab=prev  Tab=field  Ctrl+R=all  Esc=close", boxW-4))
+	c.WriteAt(row+4, innerCol, truncate(statusText, boxW-4))
+	c.WriteAt(row+5, innerCol, truncate("Enter=next  Shift+Tab=prev  Tab=field  Ctrl+R=all  Esc=close", boxW-4))
 }
 
 // drawInputSlice paints a single-line input, tailing long values
@@ -79,7 +79,7 @@ func (fl *findLayer) drawInputSlice(c *cellbuf, row, col, maxVal int, in *input,
 	if len(rs) > maxVal {
 		start = len(rs) - maxVal
 	}
-	c.writeAt(row, col, string(rs[start:]))
+	c.WriteAt(row, col, string(rs[start:]))
 	if active {
 		curCol := col + (in.cur - start)
 		if curCol < col {
@@ -88,7 +88,7 @@ func (fl *findLayer) drawInputSlice(c *cellbuf, row, col, maxVal int, in *input,
 		if curCol > col+maxVal {
 			curCol = col + maxVal
 		}
-		c.placeCursor(row, curCol)
+		c.PlaceCursor(row, curCol)
 	}
 }
 
