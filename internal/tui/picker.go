@@ -319,8 +319,8 @@ func (pl *pickerLayer) Hints(a *app) string {
 	hasList := len(pl.p.conns) > 0
 	return joinHints(
 		"Ctrl+Q=quit",
-		hintIf(hasList, "Up/Dn=move"),
-		hintIf(hasList, "Enter=connect"),
+		hintIf(hasList, "↑/↓=move"),
+		hintIf(hasList, "↵=connect"),
 		"a=add",
 		hintIf(hasList, "e=edit"),
 		hintIf(hasList, "x=delete"),

@@ -47,7 +47,7 @@ func (gl *gotoLayer) Draw(a *app, c *cellbuf) {
 		errStyle := Style{FG: ansiBrightRed, BG: ansiDefaultBG}
 		c.WriteStyled(row+3, innerCol, truncate(gl.err, r.W-4), errStyle)
 	}
-	c.WriteAt(row+r.H-2, innerCol, truncate("Enter=go  Esc=cancel  (accepts line or line:col)", r.W-4))
+	c.WriteAt(row+r.H-2, innerCol, truncate("↵=go  Esc=cancel  (accepts line or line:col)", r.W-4))
 }
 
 func (gl *gotoLayer) HandleKey(a *app, k Key) {
@@ -94,7 +94,7 @@ func (gl *gotoLayer) HandleKey(a *app, k Key) {
 
 func (gl *gotoLayer) Hints(a *app) string {
 	_ = a
-	return joinHints("type=line[:col]", "Enter=go", "Esc=cancel")
+	return joinHints("type=line[:col]", "↵=go", "Esc=cancel")
 }
 
 // parseGotoTarget accepts "N" or "N:C". Whitespace tolerated.

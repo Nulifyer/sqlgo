@@ -564,13 +564,13 @@ func (fl *formLayer) Hints(a *app) string {
 	driver := ""
 	cycler := ""
 	if fl.f.onDriverRow() {
-		driver = "Enter=pick driver"
+		driver = "↵=pick driver"
 	} else if fl.f.onEngineCycler() {
-		cycler = "Lt/Rt=cycle"
+		cycler = "←/→=cycle"
 	}
 	return joinHints(
-		"Tab/Dn=next",
-		"Shift+Tab/Up=prev",
+		"⇥/↓=next",
+		"⇤/↑=prev",
 		driver,
 		cycler,
 		hintIf(canSave == nil && fl.f.driverChosen, "Ctrl+S=save"),

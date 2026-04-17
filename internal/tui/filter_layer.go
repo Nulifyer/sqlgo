@@ -112,7 +112,7 @@ func (fl *filterLayer) HandleKey(a *app, k Key) {
 
 func (fl *filterLayer) Hints(a *app) string {
 	_ = a
-	return joinHints("type=filter", "Enter=keep", "Esc=clear")
+	return joinHints("type=filter", "↵=keep", "Esc=clear")
 }
 
 // formatFilterStatus builds a human-readable summary for the filter

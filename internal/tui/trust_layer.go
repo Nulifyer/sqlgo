@@ -133,5 +133,5 @@ func (tl *trustLayer) accept(a *app) {
 
 func (tl *trustLayer) Hints(a *app) string {
 	_ = a
-	return joinHints("y=trust", "n/Esc=reject")
+	return joinHints("y=trust", "n/Esc=reject", "↵=arm/confirm")
 }

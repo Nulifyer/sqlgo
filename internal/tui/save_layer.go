@@ -217,25 +217,25 @@ func (sl *saveLayer) save(a *app) {
 func (sl *saveLayer) Hints(a *app) string {
 	_ = a
 	if sl.picker.Guard.Armed() {
-		return joinHints("Enter=overwrite", "edit=cancel", "Esc=close")
+		return joinHints("↵=overwrite", "edit=cancel", "Esc=close")
 	}
 	hasExt := len(sl.picker.Choices) > 1
 	switch sl.picker.Focus {
 	case widget.FocusDir:
-		return joinHints("type=dir", "Tab=next", "Enter=descend", "Esc=cancel")
+		return joinHints("type=dir", "⇥=next", "↵=descend", "Esc=cancel")
 	case widget.FocusList:
 		has := sl.picker.HasEntries()
 		return joinHints(
-			hintIf(has, "Up/Dn=move"),
-			"Tab=next",
-			"Enter=pick",
+			hintIf(has, "↑/↓=move"),
+			"⇥=next",
+			"↵=pick",
 			"Esc=cancel",
 		)
 	case widget.FocusInput:
-		return joinHints("type=name", "Tab=next", "Enter=save", "Esc=cancel")
+		return joinHints("type=name", "⇥=next", "↵=save", "Esc=cancel")
 	case widget.FocusExt:
 		_ = hasExt
-		return joinHints("Up/Dn=cycle", "Tab=next", "Esc=cancel")
+		return joinHints("↑/↓=cycle", "⇥=next", "Esc=cancel")
 	}
-	return joinHints("Tab=next", "Enter=save", "Esc=cancel")
+	return joinHints("⇥=next", "↵=save", "Esc=cancel")
 }

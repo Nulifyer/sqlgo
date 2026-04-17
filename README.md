@@ -44,27 +44,27 @@ No mouse required. No Electron. One binary.
 
 - Multi-line with **undo / redo** (`Ctrl+Z` / `Ctrl+Y`)
 - **Find / replace** (`Ctrl+F`)
-- **Autocomplete** on column names cached per-connection (`Ctrl+Space`)
-- **Multi-cursor** (`Ctrl+Alt+Up/Down`)
+- **Autocomplete** on column names cached per-connection (`Ctrl+␣`)
+- **Multi-cursor** (`Ctrl+Alt+↑/↓`)
 - **SQL formatter** (`Alt+F`)
 - **Bracketed paste** and standard cut / copy / paste
 
 ### 🌳 Schema Explorer
 
 - Browse schemas, tables, and views
-- `Enter` or `s` on a table drops a driver-aware `SELECT ... LIMIT 100` into the editor
+- `↵` or `s` on a table drops a driver-aware `SELECT ... LIMIT 100` into the editor
 - `R` refreshes the schema
 
 ### 📊 Results
 
-- **Arrow-key cell nav**, `PgUp/PgDn`, `Home/End`
+- **`↑/↓/←/→` cell nav**, `PgUp/PgDn`, `Home/End`
 - **Sort** -- `s` cycles sort on the focused column
-- **Filter** -- `/` for an inline row filter. Three syntaxes:
+- **Filter** -- `Ctrl+F` opens an inline row filter. Three syntaxes:
     - `foo` -- substring match across all columns
     - `col:foo` -- substring match against a specific column
     - `/regex/` -- regex match across all columns
 - **Word-wrap** toggle -- `w`
-- **Cell inspector** -- `Enter` opens an overlay for the focused cell
+- **Cell inspector** -- `↵` opens an overlay for the focused cell
 - **Clipboard** -- `y` copies cell, `Y` copies row, `Alt+A` copies the whole result set as TSV
 - **Export** -- CSV, TSV, JSON, and Markdown. Format is chosen from the output path extension.
 
@@ -135,73 +135,141 @@ Open the command menu with `Ctrl+K` for global actions (connect, disconnect, his
 | | `Alt+1` / `Alt+2` / `Alt+3` | Focus Explorer / Query / Results |
 | | `F1` | Help overlay |
 | | `F8` | Key-debug overlay |
+| | `F11` | Toggle fullscreen editor |
+| **Help overlay** | `↑` / `↓` / `PgUp` / `PgDn` | Scroll |
+| | `Home` / `End` | Scroll to top / bottom |
+| | `F1` / `Esc` | Close |
+| **Key debug** (`F8`) | any key / mouse | Verify matching bind in the checklist |
+| | `Ctrl+R` | Reset checklist |
+| | `F8` | Close |
+| | `Ctrl+Q` / `F1` | Reserved globals shown there, but not capturable inside the overlay |
+| **Query tabs** | `Ctrl+T` / `Ctrl+W` | New tab / close tab |
+| | `Ctrl+S` | Save current tab |
+| | `Ctrl+R` | Rename current tab |
+| | `Ctrl+PgUp` / `Ctrl+PgDn` | Previous / next tab |
+| | `Left-click tab` | Switch tab |
+| | `Double-click tab` | Rename tab |
+| | `Middle-click tab` | Close tab |
 | **Query editor** | `F5` | Run query |
 | | `F9` | EXPLAIN current query |
 | | `Ctrl+O` | Open SQL file |
 | | `Ctrl+S` / `Alt+S` | Save tab / save as |
-| | `Ctrl+R` | Rename tab |
 | | `Alt+D` | Set active database for this tab (SSMS-style) |
-| | `Ctrl+T` / `Ctrl+W` | New tab / close tab |
-| | `Ctrl+PgUp` / `Ctrl+PgDn` | Cycle query tabs |
-| | `F11` | Toggle fullscreen editor |
 | | `Alt+F` | Format SQL |
-| | `Ctrl+Z` / `Ctrl+Y` | Undo / Redo |
-| | `Ctrl+Space` | Autocomplete |
+| | `Ctrl+␣` | Autocomplete |
 | | `Ctrl+F` | Find / replace |
 | | `Ctrl+G` | Go to line |
+| | `Ctrl+L` | Clear editor |
+| | `Ctrl+Z` / `Ctrl+Y` | Undo / Redo |
 | | `Ctrl+A` / `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Select all / copy / cut / paste |
-| | `Ctrl+Alt+Up/Dn` | Add multi-cursor line |
-| | `Alt+Up/Dn` | Move line up / down |
-| | `Shift+Alt+Up/Dn` | Duplicate line up / down |
+| | `⇥` / `⇤` | Indent / dedent |
+| | `Ctrl+Alt+↑ / ↓` | Add multi-cursor line |
+| | `Alt+↑ / ↓` | Move line up / down |
+| | `Shift+Alt+↑ / ↓` | Duplicate line up / down |
+| | `Esc` | Collapse multi-cursor |
 | | `Ctrl+D` | Select word under cursor |
 | | `Ctrl+U` | Clear selection |
 | | `Home` | Smart home (toggle indent / col 0) |
-| | `Esc` | Collapse multi-cursor |
-| | `Ctrl+Left` / `Ctrl+Right` | Word-jump |
+| | `↑` / `↓` / `←` / `→` / `End` | Move caret |
+| | `Ctrl+←` / `Ctrl+→` | Word-jump |
+| | `Ctrl+Home` / `Ctrl+End` | Jump to buffer start / end |
 | | `Ctrl+Backspace` / `Ctrl+Delete` | Delete word left / right |
-| | `Shift+Arrow` / `Shift+Home/End` | Extend selection |
-| | `Ctrl+Shift+Left` / `Ctrl+Shift+Right` | Extend selection by word |
+| | `Shift+↑` / `Shift+↓` / `Shift+←` / `Shift+→` / `Shift+Home` / `Shift+End` | Extend selection |
+| | `Ctrl+Shift+←` / `Ctrl+Shift+→` | Extend selection by word |
 | | `Ctrl+Shift+Home` / `Ctrl+Shift+End` | Extend selection to buffer start / end |
-| | `Ctrl+L` | Clear editor |
-| **Explorer** | `Enter` | SELECT for tables / views; open DDL for routines / triggers |
+| **Find / replace** | `type` | Edit active field |
+| | `↵` | Next match or replace current |
+| | `⇥` | Toggle Find / Replace field |
+| | `⇤` | Previous match |
+| | `Ctrl+R` | Replace all |
+| | `Esc` | Close |
+| **Go to** | `type line[:col]` | Edit target |
+| | `↵` | Jump |
+| | `Esc` | Cancel |
+| **Rename tab** | `type name` | Edit title |
+| | `↵` | Save |
+| | `Esc` | Cancel |
+| **Explorer** | `Ctrl+F` | Search object names |
+| | `Esc` | Close search |
+| | `↑` / `↓` / `PgUp` / `PgDn` | Move cursor |
+| | `↵` | SELECT table / view; expand schema / group; edit DDL for routines / triggers |
 | | `s` | Generate `SELECT` for table / view |
 | | `e` | Open DDL for view / routine / trigger |
 | | `u` | Pin active database to cursor |
 | | `R` | Refresh schema |
+| **Active database picker** | `type` | Filter databases |
+| | `↑` / `↓` | Move |
+| | `↵` | Use selected database |
+| | `Esc` | Cancel |
 | **Results** | `Ctrl+C` | Cancel running query |
+| | `Ctrl+F` | Filter rows |
 | | `Ctrl+E` | Export results |
-| | `Arrows` / `PgUp/PgDn` / `Home/End` | Navigate cells |
-| | `Enter` | Inspect cell |
+| | `↑` / `↓` / `←` / `→` / `PgUp` / `PgDn` / `Home` / `End` | Navigate cells |
+| | `↵` | Inspect cell |
 | | `y` / `Y` / `Alt+A` | Copy cell / row / all (TSV) |
 | | `s` | Cycle sort on column |
-| | `/` | Filter rows |
 | | `w` | Toggle word-wrap |
+| | `Left-click result tab` | Switch result set |
 | | `Ctrl+PgUp` / `Ctrl+PgDn` | Cycle result-set tabs |
 | | `Shift+double-click` | Copy row |
-| **Cell inspector** | `Up`/`Dn`/`PgUp`/`PgDn` | Scroll |
+| **Results error view** | `↑` / `↓` / `PgUp` / `PgDn` | Scroll |
+| | `Home` / `End` | Scroll to top / bottom |
+| | `y` / `Y` / `Alt+A` | Copy error text |
+| **Results filter** | `type` | Edit filter |
+| | `↵` | Keep filtered results |
+| | `Esc` | Clear filter and close |
+| **Cell inspector** | `↑` / `↓` / `PgUp` / `PgDn` | Scroll |
 | | `Home` / `End` | Scroll to top / bottom |
 | | `y` | Copy cell |
-| **EXPLAIN overlay** | `Up`/`Dn`/`PgUp`/`PgDn` | Move selection |
+| | `Esc` | Close |
+| **EXPLAIN overlay** | `↑` / `↓` / `PgUp` / `PgDn` | Move selection |
 | | `Home` / `End` | First / last node |
-| | `Space` | Toggle collapse node |
+| | `␣` | Toggle collapse node |
 | | `r` | Toggle raw output |
-| **Query history** | `Up`/`Dn`/`PgUp`/`PgDn` | Move selection |
+| | `Esc` | Close |
+| **Open SQL** | `⇥` / `⇤` | Next / previous field |
+| | `↑` / `↓` / `PgUp` / `PgDn` | Move file list |
+| | `␣` | Mark file for multi-open |
+| | `↵` | Descend / pick / open |
+| | `Esc` | Cancel |
+| **Save As** | `⇥` / `⇤` | Next / previous field |
+| | `↑` / `↓` | Move list or cycle extension |
+| | `↵` | Descend / pick / save / overwrite |
+| | `Esc` | Cancel |
+| **Export results** | `⇥` / `⇤` | Next / previous field |
+| | `↑` / `↓` | Move list or cycle format |
+| | `↵` | Descend / pick / save / overwrite |
+| | `Esc` | Cancel / close |
+| **Query history** | `↑` / `↓` / `PgUp` / `PgDn` | Move selection |
 | | `type` | Search filter |
-| | `Enter` | Paste into editor |
+| | `↵` | Paste into editor |
 | | `d` | Delete entry |
 | | `X` | Clear all (two-press) |
-| | `Tab` | Toggle scope (this conn / all) |
-| **Connection form** | `Ctrl+T` | Test network |
+| | `⇥` | Toggle scope (this conn / all) |
+| | `Esc` | Close |
+| **Connection picker** | `↑` / `↓` | Move |
+| | `↵` | Connect |
+| | `a` / `e` / `x` | Add / edit / delete |
+| | `K` | Unlink keyring entry |
+| | `Esc` | Back |
+| **Connection form** | `⇥` / `↓` | Next field |
+| | `⇤` / `↑` | Previous field |
+| | `←` / `→` | Cycle selected choice |
+| | `↵` | Pick driver or submit |
+| | `Ctrl+T` | Test network |
 | | `Ctrl+L` | Test auth |
 | | `Ctrl+S` | Save |
-| **Connection picker** | `a` / `e` / `x` | Add / edit / delete |
-| | `K` | Unlink keyring entry |
-| **Safety prompts** | confirm run: `y` / `n` / `Esc` / `Tab` / `Enter` | Run destructive DML/DDL guard |
-| | SSH trust: `y` / `n` / `Esc` / `Enter` | TOFU host-key accept (Enter arms, then confirms) |
-| **Query tabs** | `Double-click tab` | Rename |
+| | `Esc` | Cancel |
+| **Driver / transport picker** | `type` | Filter |
+| | `↑` / `↓` | Move |
+| | `↵` | Select |
+| | `Esc` | Cancel |
+| **Safety prompts** | confirm run: `y` / `n` / `Esc` / `⇥` / `←` / `→` / `↵` | Run destructive DML/DDL guard |
+| | SSH trust: `y` / `n` / `Esc` / `↵` | TOFU host-key accept (`↵` arms, then confirms) |
 | **Command menu** (`Ctrl+K`) | `c` / `x` | Connect / Disconnect |
 | | `h` | Query history |
 | | `q` | Quit |
+| | `Esc` | Cancel |
 
 
 ## Scripting (non-TUI)

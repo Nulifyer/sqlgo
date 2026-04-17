@@ -126,13 +126,14 @@ func (cl *confirmRunLayer) Draw(a *app, c *cellbuf) {
 
 	hintRow := promptRow + 2
 	c.WriteStyled(hintRow, innerCol,
-		truncate("(y=yes, n/Esc=no, Tab/←→ switch, Enter=confirm)", boxW-4),
+		truncate("(y=yes, n/Esc=no, ⇥/←/→ switch, ↵=confirm)", boxW-4),
 		Style{FG: ansiBrightBlack, BG: ansiDefaultBG})
 }
 
 // runeWidth returns the number of grid cells s occupies. The confirm
-// layer uses plain ASCII plus the ⚠ glyph, all of which are single-cell
-// in the terminals sqlgo targets, so a rune count is sufficient.
+// layer uses simple single-cell UTF-8 hint glyphs plus ASCII, all of
+// which are single-cell in the terminals sqlgo targets, so a rune
+// count is sufficient.
 func runeWidth(s string) int {
 	n := 0
 	for range s {
@@ -177,5 +178,5 @@ func (cl *confirmRunLayer) commit(a *app) {
 
 func (cl *confirmRunLayer) Hints(a *app) string {
 	_ = a
-	return joinHints("y=run", "n/Esc=cancel", "Tab=switch", "Enter=confirm")
+	return joinHints("y=run", "n/Esc=cancel", "⇥/←/→=switch", "↵=confirm")
 }

@@ -326,18 +326,18 @@ func (ol *openLayer) Hints(a *app) string {
 	_ = a
 	switch ol.picker.Focus {
 	case widget.FocusDir:
-		return joinHints("type=dir", "Tab=next", "Enter=descend", "Esc=cancel")
+		return joinHints("type=dir", "⇥=next", "↵=descend", "Esc=cancel")
 	case widget.FocusList:
 		has := ol.picker.HasEntries()
 		return joinHints(
-			hintIf(has, "Up/Dn/PgUp/PgDn=move"),
-			hintIf(has, "Space=mark"),
-			"Tab=next",
-			"Enter=open",
+			hintIf(has, "↑/↓/PgUp/PgDn=move"),
+			hintIf(has, "␣=mark"),
+			"⇥=next",
+			"↵=open",
 			"Esc=cancel",
 		)
 	case widget.FocusInput:
-		return joinHints("type=filter", "Tab=next", "Enter=open", "Esc=cancel")
+		return joinHints("type=filter", "⇥=next", "↵=open", "Esc=cancel")
 	}
-	return joinHints("Tab=next", "Enter=open", "Esc=cancel")
+	return joinHints("⇥=next", "↵=open", "Esc=cancel")
 }

@@ -362,11 +362,11 @@ func (h *historyLayer) Hints(a *app) string {
 	hasEntries := len(h.entries) > 0
 	return joinHints(
 		"type=search",
-		hintIf(hasEntries, "Up/Dn/PgUp/PgDn=move"),
-		hintIf(hasEntries, "Enter=use"),
+		hintIf(hasEntries, "↑/↓/PgUp/PgDn=move"),
+		hintIf(hasEntries, "↵=use"),
 		hintIf(hasEntries, "d=delete"),
 		"X=clear",
-		"Tab=scope",
+		"⇥=scope",
 		"Esc=close",
 	)
 }

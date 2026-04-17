@@ -35,7 +35,7 @@ func (rl *renameLayer) Draw(a *app, c *cellbuf) {
 	}
 	drawInput(c, rl.input, r.Row+1, valCol, maxVal)
 
-	c.WriteAt(r.Row+3, innerCol, truncate("Enter=save  Esc=cancel", r.W-4))
+	c.WriteAt(r.Row+3, innerCol, truncate("↵=save  Esc=cancel", r.W-4))
 }
 
 func (rl *renameLayer) HandleKey(a *app, k Key) {
@@ -59,5 +59,5 @@ func (rl *renameLayer) HandleKey(a *app, k Key) {
 
 func (rl *renameLayer) Hints(a *app) string {
 	_ = a
-	return joinHints("type=name", "Enter=save", "Esc=cancel")
+	return joinHints("type=name", "↵=save", "Esc=cancel")
 }

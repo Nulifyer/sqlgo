@@ -207,7 +207,7 @@ func (d *debugLayer) drawChecklist(c *cellbuf, row, col, w, h int) {
 		}
 	}
 
-	footer := fmt.Sprintf("%d/%d verified  Ctrl+R=reset", countDone(d.binds), len(d.binds))
+	footer := fmt.Sprintf("%d/%d verified  Ctrl+R=reset  reserved: Ctrl+Q/F1/F8", countDone(d.binds), len(d.binds))
 	c.WriteStyled(row+h-1, col+1, truncate(footer, w-2), dimStyle)
 }
 
@@ -317,6 +317,11 @@ func buildDebugBinds() []debugBind {
 			return k.Rune == r || k.Rune == toggleCase(r)
 		}}
 	}
+	re := func(group, label string, r rune, ctrl, alt bool) debugBind {
+		return debugBind{group: group, label: label, match: func(k Key) bool {
+			return k.Kind == KeyRune && k.Ctrl == ctrl && k.Alt == alt && k.Rune == r
+		}}
+	}
 	mb := func(group, label string, btn MouseButton, action MouseAction) debugBind {
 		return debugBind{group: group, label: label, mouseBind: func(m MouseMsg) bool {
 			return m.Button == btn && m.Action == action
@@ -325,38 +330,38 @@ func buildDebugBinds() []debugBind {
 
 	return []debugBind{
 		// Movement
-		kb("Movement", "Up", KeyUp, false, false, false),
-		kb("Movement", "Down", KeyDown, false, false, false),
-		kb("Movement", "Left", KeyLeft, false, false, false),
-		kb("Movement", "Right", KeyRight, false, false, false),
+		kb("Movement", "↑", KeyUp, false, false, false),
+		kb("Movement", "↓", KeyDown, false, false, false),
+		kb("Movement", "←", KeyLeft, false, false, false),
+		kb("Movement", "→", KeyRight, false, false, false),
 		kb("Movement", "Home", KeyHome, false, false, false),
 		kb("Movement", "End", KeyEnd, false, false, false),
 		kb("Movement", "PgUp", KeyPgUp, false, false, false),
 		kb("Movement", "PgDn", KeyPgDn, false, false, false),
 
 		// Edit
-		kb("Edit", "Enter", KeyEnter, false, false, false),
-		kb("Edit", "Tab", KeyTab, false, false, false),
-		kb("Edit", "Shift+Tab", KeyBackTab, false, false, false),
+		kb("Edit", "↵", KeyEnter, false, false, false),
+		kb("Edit", "⇥", KeyTab, false, false, false),
+		kb("Edit", "⇤", KeyBackTab, false, false, false),
 		kb("Edit", "Backspace", KeyBackspace, false, false, false),
 		kb("Edit", "Delete", KeyDelete, false, false, false),
 		kb("Edit", "Esc", KeyEsc, false, false, false),
 
 		// Selection
-		kb("Selection", "Shift+Up", KeyUp, false, false, true),
-		kb("Selection", "Shift+Down", KeyDown, false, false, true),
-		kb("Selection", "Shift+Left", KeyLeft, false, false, true),
-		kb("Selection", "Shift+Right", KeyRight, false, false, true),
+		kb("Selection", "Shift+↑", KeyUp, false, false, true),
+		kb("Selection", "Shift+↓", KeyDown, false, false, true),
+		kb("Selection", "Shift+←", KeyLeft, false, false, true),
+		kb("Selection", "Shift+→", KeyRight, false, false, true),
 		kb("Selection", "Shift+Home", KeyHome, false, false, true),
 		kb("Selection", "Shift+End", KeyEnd, false, false, true),
-		kb("Selection", "Ctrl+Shift+Left", KeyLeft, true, false, true),
-		kb("Selection", "Ctrl+Shift+Right", KeyRight, true, false, true),
+		kb("Selection", "Ctrl+Shift+←", KeyLeft, true, false, true),
+		kb("Selection", "Ctrl+Shift+→", KeyRight, true, false, true),
 		kb("Selection", "Ctrl+Shift+Home", KeyHome, true, false, true),
 		kb("Selection", "Ctrl+Shift+End", KeyEnd, true, false, true),
 
 		// Word / buffer jumps
-		kb("Word/Buffer", "Ctrl+Left", KeyLeft, true, false, false),
-		kb("Word/Buffer", "Ctrl+Right", KeyRight, true, false, false),
+		kb("Word/Buffer", "Ctrl+←", KeyLeft, true, false, false),
+		kb("Word/Buffer", "Ctrl+→", KeyRight, true, false, false),
 		kb("Word/Buffer", "Ctrl+Home", KeyHome, true, false, false),
 		kb("Word/Buffer", "Ctrl+End", KeyEnd, true, false, false),
 		kb("Word/Buffer", "Ctrl+Backspace", KeyBackspace, true, false, false),
@@ -385,7 +390,7 @@ func buildDebugBinds() []debugBind {
 		rb("Actions", "Ctrl+O", 'o', true, false),
 		rb("Actions", "Ctrl+R", 'r', true, false),
 		rb("Actions", "Ctrl+S", 's', true, false),
-		rb("Actions", "Ctrl+Space", ' ', true, false),
+		rb("Actions", "Ctrl+␣", ' ', true, false),
 
 		// Menu / focus
 		rb("Menu/Focus", "Ctrl+K", 'k', true, false),
@@ -398,13 +403,35 @@ func buildDebugBinds() []debugBind {
 		rb("Menu/Focus", "Alt+D", 'd', false, true),
 		rb("Menu/Focus", "Alt+A", 'a', false, true),
 
+		// App runes
+		re("App runes", "s", 's', false, false),
+		re("App runes", "e", 'e', false, false),
+		re("App runes", "u", 'u', false, false),
+		re("App runes", "w", 'w', false, false),
+		re("App runes", "y", 'y', false, false),
+		re("App runes", "Y", 'Y', false, false),
+		re("App runes", "R", 'R', false, false),
+		re("App runes", "r", 'r', false, false),
+		re("App runes", "␣", ' ', false, false),
+
+		// Menus / dialogs
+		re("Menus/Dialogs", "a", 'a', false, false),
+		re("Menus/Dialogs", "c", 'c', false, false),
+		re("Menus/Dialogs", "d", 'd', false, false),
+		re("Menus/Dialogs", "h", 'h', false, false),
+		re("Menus/Dialogs", "n", 'n', false, false),
+		re("Menus/Dialogs", "q", 'q', false, false),
+		re("Menus/Dialogs", "x", 'x', false, false),
+		re("Menus/Dialogs", "X", 'X', false, false),
+		re("Menus/Dialogs", "K", 'K', false, false),
+
 		// Line ops
-		kb("Line ops", "Alt+Up", KeyUp, false, true, false),
-		kb("Line ops", "Alt+Down", KeyDown, false, true, false),
-		kb("Line ops", "Shift+Alt+Up", KeyUp, false, true, true),
-		kb("Line ops", "Shift+Alt+Down", KeyDown, false, true, true),
-		kb("Line ops", "Ctrl+Alt+Up", KeyUp, true, true, false),
-		kb("Line ops", "Ctrl+Alt+Down", KeyDown, true, true, false),
+		kb("Line ops", "Alt+↑", KeyUp, false, true, false),
+		kb("Line ops", "Alt+↓", KeyDown, false, true, false),
+		kb("Line ops", "Shift+Alt+↑", KeyUp, false, true, true),
+		kb("Line ops", "Shift+Alt+↓", KeyDown, false, true, true),
+		kb("Line ops", "Ctrl+Alt+↑", KeyUp, true, true, false),
+		kb("Line ops", "Ctrl+Alt+↓", KeyDown, true, true, false),
 
 		// Function keys
 		kb("Function", "F5", KeyF5, false, false, false),

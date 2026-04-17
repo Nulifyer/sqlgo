@@ -108,7 +108,7 @@ func (el *explainLayer) Draw(a *app, c *cellbuf) {
 	// Status / hint line at the bottom.
 	status := el.status
 	if status == "" {
-		status = "Up/Dn=move  Space=collapse  r=raw  Esc=close"
+		status = "↑/↓=move  ␣=collapse  r=raw  Esc=close"
 	}
 	c.WriteAt(row+boxH-2, innerCol, truncate(status, innerW))
 }
@@ -236,5 +236,5 @@ func (el *explainLayer) toggleCollapsed() {
 
 func (el *explainLayer) Hints(a *app) string {
 	_ = a
-	return joinHints("Up/Dn=move", "Space=collapse", "r=raw", "Esc=close")
+	return joinHints("↑/↓/PgUp/PgDn=move", "Home/End=first/last", "␣=collapse", "r=raw", "Esc=close")
 }

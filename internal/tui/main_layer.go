@@ -1772,15 +1772,15 @@ func (m *mainLayer) explorerHints(_ *app) string {
 	if !searchFocused {
 		switch m.explorer.SelectedKind() {
 		case itemTable:
-			enterHint = "Enter=SELECT"
+			enterHint = "↵=SELECT"
 		case itemView:
-			enterHint = "Enter=SELECT"
+			enterHint = "↵=SELECT"
 			eHint = "e=edit"
 		case itemProcedure, itemFunction, itemTrigger:
-			enterHint = "Enter=edit"
+			enterHint = "↵=edit"
 			eHint = "e=edit"
 		case itemSchema, itemSubgroup:
-			enterHint = "Enter=expand"
+			enterHint = "↵=expand"
 		}
 	}
 	return joinHints(
@@ -1830,6 +1830,7 @@ func (m *mainLayer) resultsHints(a *app) string {
 		return joinHints(
 			"F1=help",
 			"Ctrl+Q=quit",
+			"Home/End=top/bottom",
 			"y=copy error",
 			"Ctrl+K=menu",
 		)
@@ -1838,8 +1839,9 @@ func (m *mainLayer) resultsHints(a *app) string {
 	return joinHints(
 		"F1=help",
 		"Ctrl+Q=quit",
+		hintIf(m.table.HasColumns(), "Ctrl+F=filter"),
 		hintIf(m.running, "Ctrl+C=cancel"),
-		hintIf(hasRows, "Enter=inspect"),
+		hintIf(hasRows, "↵=inspect"),
 		hintIf(hasRows, "y=copy"),
 		hintIf(m.table.HasColumns(), "Ctrl+E=export"),
 		"Ctrl+K=menu",

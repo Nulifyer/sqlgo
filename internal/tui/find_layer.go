@@ -67,7 +67,7 @@ func (fl *findLayer) Draw(a *app, c *cellbuf) {
 		statusText = fl.defaultStatus(m.editor)
 	}
 	c.WriteAt(row+4, innerCol, truncate(statusText, boxW-4))
-	c.WriteAt(row+5, innerCol, truncate("Enter=next  Shift+Tab=prev  Tab=field  Ctrl+R=all  Esc=close", boxW-4))
+	c.WriteAt(row+5, innerCol, truncate("↵=next  ⇤=prev  ⇥=field  Ctrl+R=all  Esc=close", boxW-4))
 }
 
 // drawInputSlice paints a single-line input, tailing long values
@@ -168,9 +168,9 @@ func (fl *findLayer) Hints(a *app) string {
 	_ = a
 	return joinHints(
 		"type=edit field",
-		"Enter=next/replace",
-		"Shift+Tab=prev",
-		"Tab=field",
+		"↵=next/replace",
+		"⇤=prev",
+		"⇥=field",
 		"Ctrl+R=all",
 		"Esc=close",
 	)

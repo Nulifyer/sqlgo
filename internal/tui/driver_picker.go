@@ -105,8 +105,8 @@ func (l *driverPickerLayer) Hints(a *app) string {
 	_ = a
 	return joinHints(
 		"type=filter",
-		"Up/Dn=move",
-		"Enter=select",
+		"↑/↓=move",
+		"↵=select",
 		"Esc=cancel",
 	)
 }

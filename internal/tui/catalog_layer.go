@@ -154,7 +154,7 @@ func (cl *catalogLayer) apply(a *app) {
 
 func (cl *catalogLayer) Hints(a *app) string {
 	_ = a
-	return joinHints("type=filter", "Up/Dn=move", "Enter=use", "Esc=cancel")
+	return joinHints("type=filter", "↑/↓=move", "↵=use", "Esc=cancel")
 }
 
 // openCatalogLayer gathers the DB list from the explorer cache when

@@ -207,5 +207,5 @@ func (il *inspectorLayer) HandleKey(a *app, k Key) {
 
 func (il *inspectorLayer) Hints(a *app) string {
 	_ = a
-	return joinHints("Up/Dn/PgUp/PgDn=scroll", "y=copy", "Esc=close")
+	return joinHints("↑/↓/PgUp/PgDn=scroll", "Home/End=top/bottom", "y=copy", "Esc=close")
 }
