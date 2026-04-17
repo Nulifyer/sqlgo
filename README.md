@@ -228,7 +228,7 @@ Common flags (shared by `exec` and `export`):
 | `--format FMT` | `csv` / `tsv` / `json` / `jsonl` / `markdown` / `table` |
 | `-o PATH` / `--output PATH` | output file (format inferred from extension unless `--format` set) |
 | `--max-rows N` | stop after N rows (exit 5) |
-| `--timeout DUR` | abort each statement after DUR |
+| `--timeout DUR` | abort the query batch after DUR |
 | `--allow-unsafe` | permit destructive DML/DDL (UPDATE/DELETE without WHERE, TRUNCATE, DROP) |
 | `--continue-on-error` | keep running remaining statements on failure |
 | `--record-history` | append to the history store (off by default for CLI) |
@@ -251,7 +251,7 @@ DSN schemes: `postgres://`, `mysql://`, `mssql://` (or `sqlserver://`), `sqlite:
 | `import` | `-i FILE` / `--input FILE` (default stdin) |
 | `export` | `-o FILE` / `--output FILE` (default stdout) |
 
-Passwords default to the OS keyring. When the keyring is unavailable the password is stored in plaintext in the store with a warning on stderr; pass `--keyring=false` to force plaintext. `--ssh-password-stdin` reads *after* the db password when both `--password-stdin` and `--ssh-password-stdin` are set; use `$SQLGO_SSH_PASSWORD` as the env equivalent.
+Passwords default to the OS keyring. When the keyring is unavailable the password is stored in plaintext in the store with a warning on stderr; pass `--keyring=false` to force plaintext. `--ssh-password-stdin` reads a second newline-delimited value from stdin when both `--password-stdin` and `--ssh-password-stdin` are set; use `$SQLGO_SSH_PASSWORD` as the env equivalent.
 
 ### `history` subcommands
 
@@ -286,6 +286,8 @@ sqlgo conns test prod
 sqlgo conns export -o conns.json
 sqlgo conns import -i conns.json
 ```
+
+`conns export` preserves keyring-backed passwords as placeholders, so it is useful for moving connection metadata but not for making a portable secret backup.
 
 Exit codes:
 
@@ -337,6 +339,14 @@ Contents:
 - `sqlgo.db` -- SQLite store holding saved connections and query history (WAL mode)
 
 Passwords go to the OS keyring when one is available (macOS Keychain, Windows Credential Manager, libsecret on Linux). SSH passwords are stored under their own keyring entry.
+
+## Contributor Verification
+
+FTS5-backed history search is part of the supported build, so contributor and CI verification should use the tagged test command:
+
+```sh
+go test -tags sqlite_fts5 ./...
+```
 
 ### Environment Variables
 

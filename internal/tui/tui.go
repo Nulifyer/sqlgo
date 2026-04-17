@@ -13,6 +13,7 @@ import (
 
 	"github.com/Nulifyer/sqlgo/internal/clipboard"
 	"github.com/Nulifyer/sqlgo/internal/config"
+	"github.com/Nulifyer/sqlgo/internal/connectutil"
 	"github.com/Nulifyer/sqlgo/internal/db"
 	_ "github.com/Nulifyer/sqlgo/internal/db/aliases"
 	_ "github.com/Nulifyer/sqlgo/internal/db/athena"
@@ -175,14 +176,6 @@ func (a *app) resolvePassword(c config.Connection) (string, error) {
 	return pass, nil
 }
 
-// sshKeyringAccount is the account name used when storing the SSH
-// tunnel password for a connection in the keyring. We suffix the
-// connection name so the db password and the ssh password can live
-// as two separate entries under the same sqlgo service.
-func sshKeyringAccount(connName string) string {
-	return connName + ":ssh"
-}
-
 // persistConnection upserts a connection via the store and, when the
 // OS keyring is available, also rewrites the row to use the sqlgo
 // keyring placeholder so the plaintext password never lands on disk.
@@ -214,7 +207,7 @@ func (a *app) persistConnection(ctx context.Context, oldName string, c config.Co
 			// a keyring. Empty SSH passwords and placeholder values
 			// (edit path with no change) are left alone.
 			if rowCopy.SSH.Password != "" && rowCopy.SSH.Password != secret.Placeholder {
-				if err := a.secrets.Set(sshKeyringAccount(c.Name), rowCopy.SSH.Password); err == nil {
+				if err := a.secrets.Set(connectutil.SSHKeyringAccount(c.Name), rowCopy.SSH.Password); err == nil {
 					rowCopy.SSH.Password = secret.Placeholder
 				}
 			}
@@ -223,13 +216,13 @@ func (a *app) persistConnection(ctx context.Context, oldName string, c config.Co
 				// Store write failed after secret write: try to undo
 				// both secret writes so we don't leak orphan entries.
 				_ = a.secrets.Delete(c.Name)
-				_ = a.secrets.Delete(sshKeyringAccount(c.Name))
+				_ = a.secrets.Delete(connectutil.SSHKeyringAccount(c.Name))
 				return false, sErr
 			}
 			// If this was a rename, delete the old keyring entries.
 			if oldName != "" && oldName != c.Name {
 				_ = a.secrets.Delete(oldName)
-				_ = a.secrets.Delete(sshKeyringAccount(oldName))
+				_ = a.secrets.Delete(connectutil.SSHKeyringAccount(oldName))
 			}
 			return true, nil
 		}
@@ -252,7 +245,7 @@ func (a *app) deleteConnection(ctx context.Context, name string) error {
 	}
 	if a.secrets != nil {
 		_ = a.secrets.Delete(name)
-		_ = a.secrets.Delete(sshKeyringAccount(name))
+		_ = a.secrets.Delete(connectutil.SSHKeyringAccount(name))
 	}
 	return nil
 }
@@ -271,7 +264,7 @@ func (a *app) unlinkSecret(ctx context.Context, name string) error {
 	}
 	// Best-effort delete -- neither entry necessarily exists.
 	_ = a.secrets.Delete(name)
-	_ = a.secrets.Delete(sshKeyringAccount(name))
+	_ = a.secrets.Delete(connectutil.SSHKeyringAccount(name))
 
 	// Clear any placeholder in the store row so the connection
 	// doesn't end up pointing at a secret that was just deleted.
@@ -532,110 +525,20 @@ func (a *app) handleKey(k Key) {
 // leave us disconnected.
 func (a *app) connectTo(c config.Connection) {
 	pl, _ := a.topLayer().(*pickerLayer)
-
-	pass, err := a.resolvePassword(c)
+	runtime := connectutil.DefaultRuntimeDeps(a.secrets)
+	resolved, err := connectutil.ResolveSavedConnection(c, runtime)
 	if err != nil {
 		if pl != nil {
 			pl.setStatus(err.Error())
 		}
 		return
 	}
-	cfg := db.Config{
-		Host:     c.Host,
-		Port:     c.Port,
-		User:     c.User,
-		Password: pass,
-		Database: c.Database,
-		Options:  c.Options,
-	}
-
-	useOpenWith := c.Profile != "" && c.Transport != ""
-	var d db.Driver
-	var profile db.Profile
-	var transport db.Transport
-	if useOpenWith {
-		var ok bool
-		profile, ok = db.GetProfile(c.Profile)
-		if !ok {
-			if pl != nil {
-				pl.setStatus("unknown profile: " + c.Profile)
-			}
-			return
-		}
-		transport, ok = db.GetTransport(c.Transport)
-		if !ok {
-			if pl != nil {
-				pl.setStatus("unknown transport: " + c.Transport)
-			}
-			return
-		}
-	} else {
-		var err error
-		d, err = db.Get(c.Driver)
-		if err != nil {
-			if pl != nil {
-				pl.setStatus(err.Error())
-			}
-			return
-		}
-	}
-
-	// Optional SSH jump. Open the tunnel first, then rewrite the dial
-	// target to the loopback address it exposes. On any error the
-	// tunnel is torn down before we return so partially-constructed
-	// state never escapes this function.
-	var tunnel *sshtunnel.Tunnel
-	if c.SSH.Host != "" {
+	if resolved.Tunnel != nil {
 		if pl != nil {
 			pl.setStatus("ssh tunnel: dialing…")
 			a.draw()
 			_ = a.scr.Flush()
 		}
-		sshPass := c.SSH.Password
-		if sshPass == secret.Placeholder && a.secrets != nil {
-			if resolved, err := a.secrets.Get(sshKeyringAccount(c.Name)); err == nil {
-				sshPass = resolved
-			} else {
-				if pl != nil {
-					pl.setStatus("ssh keyring get: " + err.Error())
-				}
-				return
-			}
-		}
-		tcfg := sshtunnel.Config{
-			SSHHost:     c.SSH.Host,
-			SSHPort:     c.SSH.Port,
-			SSHUser:     c.SSH.User,
-			SSHPassword: sshPass,
-			SSHKeyPath:  c.SSH.KeyPath,
-			TargetHost:  c.Host,
-			TargetPort:  c.Port,
-		}
-		t, err := sshtunnel.Open(tcfg)
-		if err != nil {
-			// TOFU: unknown host → push trust overlay; accept
-			// retries connectTo with the same target.
-			var unknown *sshtunnel.UnknownHostError
-			if errors.As(err, &unknown) {
-				a.pushLayer(newTrustLayer(c, unknown))
-				return
-			}
-			// Key mismatch is fatal -- no override path.
-			var mismatch *sshtunnel.HostKeyMismatchError
-			if errors.As(err, &mismatch) {
-				if pl != nil {
-					pl.setStatus(mismatch.Error())
-				}
-				return
-			}
-			if pl != nil {
-				pl.setStatus("ssh tunnel: " + err.Error())
-			}
-			return
-		}
-		tunnel = t
-		cfg.Host = t.LocalHost
-		cfg.Port = t.LocalPort
 	}
 
 	// File-driver CSV/JSONL ingestion can take many seconds on large
@@ -655,16 +558,10 @@ func (a *app) connectTo(c config.Connection) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 		defer cancel()
-		var conn db.Conn
-		var err error
-		if useOpenWith {
-			conn, err = db.OpenWith(ctx, profile, transport, cfg)
-		} else {
-			conn, err = d.Open(ctx, cfg)
-		}
+		conn, tunnel, err := connectutil.OpenResolvedConnection(ctx, resolved, runtime)
 		close(done)
 		a.asyncCh <- func(a *app) {
-			a.finishConnect(c, cfg, conn, tunnel, err)
+			a.finishConnect(c, conn, tunnel, err)
 		}
 	}()
 }
@@ -691,12 +588,23 @@ func runSpinner(a *app, done <-chan struct{}, apply func(a *app, frame string)) 
 // the same commit/teardown logic the original synchronous connectTo
 // used, but now has to tolerate the picker having been dismissed or
 // swapped in the meantime.
-func (a *app) finishConnect(c config.Connection, cfg db.Config, conn db.Conn, tunnel *sshtunnel.Tunnel, err error) {
-	_ = cfg
+func (a *app) finishConnect(c config.Connection, conn db.Conn, tunnel *sshtunnel.Tunnel, err error) {
 	pl, _ := a.topLayer().(*pickerLayer)
 	if err != nil {
 		if tunnel != nil {
 			_ = tunnel.Close()
+		}
+		var unknown *sshtunnel.UnknownHostError
+		if errors.As(err, &unknown) {
+			a.pushLayer(newTrustLayer(c, unknown))
+			return
+		}
+		var mismatch *sshtunnel.HostKeyMismatchError
+		if errors.As(err, &mismatch) {
+			if pl != nil {
+				pl.setStatus(mismatch.Error())
+			}
+			return
 		}
 		if pl != nil {
 			pl.setStatus("connect failed: " + err.Error())

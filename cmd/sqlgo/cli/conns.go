@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/config"
+	"github.com/Nulifyer/sqlgo/internal/connectutil"
 	"github.com/Nulifyer/sqlgo/internal/db"
 	"github.com/Nulifyer/sqlgo/internal/output"
 	"github.com/Nulifyer/sqlgo/internal/secret"
@@ -64,7 +65,7 @@ subcommands:
   rm      NAME                 delete a saved connection
   test    NAME                 dial the connection and ping
   import  [-i FILE]            import connections from JSON (stdin if -i absent)
-  export  [-o FILE]            export all connections as JSON (stdout if -o absent)
+  export  [-o FILE]            export all connections as JSON; keyring-backed secrets stay as placeholders
 `)
 }
 
@@ -100,7 +101,7 @@ func connsList(argv []string, stdout, stderr io.Writer) ExitCode {
 			return ExitUsage
 		}
 		fmtSel = f
-	} else if !isTerminal(stdout) {
+	} else if !terminalDetector(stdout) {
 		fmtSel = output.TSV
 	}
 
@@ -323,15 +324,18 @@ func connsAdd(argv []string, stdin io.Reader, stderr io.Writer, update bool) Exi
 
 	// Password handling. Only consume stdin when the caller asked for it;
 	// silent stdin-read would surprise anyone piping SQL in later.
-	pw, pwSet, err := resolvePassword(passwordStdin, "SQLGO_PASSWORD", stdin)
+	pw, pwSet, sshPW, sshPWSet, err := resolveConnectionPasswords(passwordStdin, sshPasswordStdin, stdin)
 	if err != nil {
-		stderrf(stderr, "read password: %v", err)
+		stderrf(stderr, "%v", err)
 		return ExitUsage
 	}
+	secrets := secretStoreFactory()
+	var cleanupAccounts []string
 	if pwSet {
 		if useKeyring {
-			if err := secret.System().Set(name, pw); err == nil {
+			if err := secrets.Set(name, pw); err == nil {
 				c.Password = secret.Placeholder
+				cleanupAccounts = append(cleanupAccounts, name)
 			} else {
 				// Refuse the silent fallback: anyone who asked for keyring
 				// storage deserves to know it failed, not to discover months
@@ -345,13 +349,22 @@ func connsAdd(argv []string, stdin io.Reader, stderr io.Writer, update bool) Exi
 		}
 	}
 
-	if sshPasswordStdin {
-		sshPW, _, err := resolvePassword(true, "SQLGO_SSH_PASSWORD", stdin)
-		if err != nil {
-			stderrf(stderr, "read ssh password: %v", err)
-			return ExitUsage
+	if sshPWSet {
+		if useKeyring {
+			account := connectutil.SSHKeyringAccount(name)
+			if err := secrets.Set(account, sshPW); err == nil {
+				c.SSH.Password = secret.Placeholder
+				cleanupAccounts = append(cleanupAccounts, account)
+			} else {
+				for _, created := range cleanupAccounts {
+					_ = secrets.Delete(created)
+				}
+				stderrf(stderr, "keyring unavailable: %v\nrerun with --keyring=false to store in plaintext", err)
+				return ExitConn
+			}
+		} else {
+			c.SSH.Password = sshPW
 		}
-		c.SSH.Password = sshPW
 	}
 
 	oldName := ""
@@ -359,6 +372,9 @@ func connsAdd(argv []string, stdin io.Reader, stderr io.Writer, update bool) Exi
 		oldName = existing.Name
 	}
 	if err := st.SaveConnection(ctx, oldName, c); err != nil {
+		for _, created := range cleanupAccounts {
+			_ = secrets.Delete(created)
+		}
 		stderrf(stderr, "%v", err)
 		return ExitConn
 	}
@@ -403,7 +419,9 @@ func connsRm(argv []string, stderr io.Writer) ExitCode {
 	}
 	// Best-effort keyring cleanup; missing entries are already a no-op in
 	// the keyring package.
-	_ = secret.System().Delete(name)
+	secrets := secretStoreFactory()
+	_ = secrets.Delete(name)
+	_ = secrets.Delete(connectutil.SSHKeyringAccount(name))
 	fmt.Fprintf(stderr, "sqlgo: removed %q\n", name)
 	return ExitOK
 }
@@ -446,17 +464,11 @@ func connsTest(argv []string, stdin io.Reader, stderr io.Writer) ExitCode {
 		return ExitConn
 	}
 
-	cfg := db.Config{
-		Host: c.Host, Port: c.Port, User: c.User,
-		Password: c.Password, Database: c.Database, Options: c.Options,
-	}
-	if c.Password == secret.Placeholder {
-		real, err := secret.Resolve(secret.System(), c.Name, c.Password)
-		if err != nil {
-			stderrf(stderr, "password for %q: %v", c.Name, err)
-			return ExitConn
-		}
-		cfg.Password = real
+	runtime := runtimeDepsFactory()
+	resolved, err := connectutil.ResolveSavedConnection(c, runtime)
+	if err != nil {
+		stderrf(stderr, "%v", err)
+		return ExitConn
 	}
 	if passwordStdin {
 		pw, err := readPasswordLine(stdin)
@@ -464,22 +476,19 @@ func connsTest(argv []string, stdin io.Reader, stderr io.Writer) ExitCode {
 			stderrf(stderr, "read password: %v", err)
 			return ExitUsage
 		}
-		cfg.Password = pw
+		resolved.Config.Password = pw
 	} else if v, ok := os.LookupEnv("SQLGO_PASSWORD"); ok {
-		cfg.Password = v
+		resolved.Config.Password = v
 	}
-
-	drv, err := db.Get(c.Driver)
-	if err != nil {
-		stderrf(stderr, "%v", err)
-		return ExitConn
-	}
-	conn, err := drv.Open(ctx, cfg)
+	conn, tunnel, err := connectutil.OpenResolvedConnection(ctx, resolved, runtime)
 	if err != nil {
 		stderrf(stderr, "connect: %v", err)
 		return ExitConn
 	}
 	defer conn.Close()
+	if tunnel != nil {
+		defer tunnel.Close()
+	}
 	if err := conn.Ping(ctx); err != nil {
 		stderrf(stderr, "ping: %v", err)
 		return ExitConn
@@ -614,6 +623,47 @@ func resolvePassword(fromStdin bool, envName string, stdin io.Reader) (string, b
 		return v, true, nil
 	}
 	return "", false, nil
+}
+
+func resolveConnectionPasswords(dbFromStdin, sshFromStdin bool, stdin io.Reader) (dbPW string, dbSet bool, sshPW string, sshSet bool, err error) {
+	if dbFromStdin && sshFromStdin {
+		lines, err := readPasswordLines(stdin, 2)
+		if err != nil {
+			return "", false, "", false, fmt.Errorf("read passwords: %w", err)
+		}
+		if len(lines) < 2 {
+			return "", false, "", false, errors.New("read passwords: expected two newline-delimited values on stdin")
+		}
+		return lines[0], true, lines[1], true, nil
+	}
+	dbPW, dbSet, err = resolvePassword(dbFromStdin, "SQLGO_PASSWORD", stdin)
+	if err != nil {
+		return "", false, "", false, fmt.Errorf("read password: %w", err)
+	}
+	sshPW, sshSet, err = resolvePassword(sshFromStdin, "SQLGO_SSH_PASSWORD", stdin)
+	if err != nil {
+		return "", false, "", false, fmt.Errorf("read ssh password: %w", err)
+	}
+	return dbPW, dbSet, sshPW, sshSet, nil
+}
+
+func readPasswordLines(r io.Reader, want int) ([]string, error) {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	s := strings.TrimRight(string(b), "\r\n")
+	if s == "" {
+		return nil, nil
+	}
+	lines := strings.Split(s, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], "\r")
+	}
+	if want > 0 && len(lines) > want {
+		lines = lines[:want]
+	}
+	return lines, nil
 }
 
 func maskPassword(p string) string {

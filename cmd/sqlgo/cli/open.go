@@ -107,7 +107,7 @@ func runOpen(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 			return ExitUsage
 		}
 		sql = s
-	} else if !isTerminal(stdin) {
+	} else if !terminalDetector(stdin) {
 		// Piped stdin without -q/-f still counts as headless so
 		// `cat q.sql | sqlgo open data.csv` works.
 		b, err := io.ReadAll(stdin)
@@ -143,7 +143,7 @@ func runOpen(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 	}
 
 	defFmt := output.TSV
-	if isTerminal(stdout) && outPath == "" {
+	if terminalDetector(stdout) && outPath == "" {
 		defFmt = output.Table
 	}
 	fmtSel := defFmt

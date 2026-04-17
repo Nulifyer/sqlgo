@@ -23,6 +23,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Run tests
+        run: go test -tags sqlite_fts5 ./...
+
       # goreleaser-cross bundles cgo cross toolchains (linux, windows
       # via mingw, darwin via osxcross) so mattn/go-sqlite3 builds for
       # every target. Pinned to a specific tag.

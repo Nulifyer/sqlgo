@@ -3,6 +3,7 @@ package tui
 import (
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 )
@@ -646,15 +647,17 @@ func (e *explorer) rebuild() {
 }
 
 // applySearchFilter drops items that don't match the current search
-// query or aren't on the ancestry chain of a match. Label-matching is
-// case-insensitive substring. When a parent (DB/schema/subgroup) itself
-// matches, all of its descendants are kept too -- e.g. typing "Tables"
-// keeps the Tables subgroup plus every table under it.
+// query or aren't on the ancestry chain of a match. Matching is
+// case-insensitive and separator-normalized, so spaces in the query can
+// match identifiers with underscores or other punctuation. When a parent
+// (DB/schema/subgroup) itself matches, all of its descendants are kept
+// too -- e.g. typing "Tables" keeps the Tables subgroup plus every table
+// under it.
 func (e *explorer) applySearchFilter() {
 	if !e.searchActive || e.searchInput == nil {
 		return
 	}
-	q := strings.ToLower(strings.TrimSpace(e.searchInput.String()))
+	q := normalizeExplorerSearchText(e.searchInput.String())
 	if q == "" {
 		return
 	}
@@ -663,7 +666,7 @@ func (e *explorer) applySearchFilter() {
 	// First pass: row kept if it or any live ancestor matches.
 	dbMatch, schemaMatch, subMatch := false, false, false
 	for i, it := range e.items {
-		lm := strings.Contains(strings.ToLower(it.label), q)
+		lm := strings.Contains(normalizeExplorerSearchText(it.label), q)
 		switch it.kind {
 		case itemDatabase:
 			dbMatch = lm
@@ -715,6 +718,26 @@ func (e *explorer) applySearchFilter() {
 		}
 	}
 	e.items = out
+}
+
+func normalizeExplorerSearchText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	prevSpace := true
+	for _, r := range s {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(unicode.ToLower(r))
+			prevSpace = false
+		default:
+			if prevSpace {
+				continue
+			}
+			b.WriteByte(' ')
+			prevSpace = true
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // emitSchemaTier flattens info into schema/subgroup/leaf rows under

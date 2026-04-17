@@ -10,8 +10,9 @@ import (
 )
 
 // ExportJSON writes every saved connection to w as JSON. Users can pipe
-// this to a file, hand-edit it, and pipe it back through ImportJSON as a
-// portable backup format.
+// this to a file, hand-edit it, and pipe it back through ImportJSON.
+// Keyring-backed secrets stay as placeholders, so the export is config
+// metadata, not a portable secret backup.
 func (s *Store) ExportJSON(ctx context.Context, w io.Writer) error {
 	conns, err := s.ListConnections(ctx)
 	if err != nil {

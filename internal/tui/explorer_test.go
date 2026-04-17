@@ -359,3 +359,31 @@ func TestQualifiedNameFlatSchema(t *testing.T) {
 		})
 	}
 }
+
+func TestExplorerSearchMatchesSpacesAgainstUnderscores(t *testing.T) {
+	t.Parallel()
+	info := &db.SchemaInfo{
+		Tables: []db.TableRef{
+			{Schema: "dbo", Name: "VECTOR_HITCOUNT", Kind: db.TableKindTable},
+			{Schema: "dbo", Name: "vector_total", Kind: db.TableKindTable},
+		},
+	}
+	e := newExplorer()
+	e.SetSchema(info, db.SchemaDepthSchemas)
+	e.searchActive = true
+	e.searchInput = newInput("vector hit")
+	e.rebuild()
+
+	foundLeaf := false
+	for _, it := range e.items {
+		if it.kind == itemTable && it.label == "VECTOR_HITCOUNT" {
+			foundLeaf = true
+		}
+		if it.kind == itemTable && it.label == "vector_total" {
+			t.Fatalf("unexpected non-match leaf kept during search: %+v", it)
+		}
+	}
+	if !foundLeaf {
+		t.Fatalf("VECTOR_HITCOUNT not found in filtered items: %+v", e.items)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // HistoryEntry is one recorded query execution. Fields mirror the columns
@@ -154,11 +155,10 @@ func (s *Store) ListRecentHistory(ctx context.Context, connectionName string, li
 // ListRecentHistory. Pass an empty connectionName to search across every
 // connection.
 //
-// The FTS5 MATCH syntax is passed through verbatim, with one convenience:
-// if the query doesn't already contain FTS operators, each whitespace-
-// separated token is treated as a prefix match (token*) so partial words
-// find results. Callers that want exact-word matching should include
-// quotes in the query themselves.
+// Explicit phrase / boolean queries are passed through verbatim. Plain-text
+// input is tokenized conservatively and rewritten as a prefix query so
+// punctuation-heavy strings like "foo-bar" and "a@b.c" don't become raw
+// FTS syntax errors.
 func (s *Store) SearchHistory(ctx context.Context, connectionName, q string, limit int) ([]HistoryEntry, error) {
 	q = strings.TrimSpace(q)
 	if q == "" {
@@ -168,6 +168,9 @@ func (s *Store) SearchHistory(ctx context.Context, connectionName, q string, lim
 		limit = 50
 	}
 	fts := expandFTSQuery(q)
+	if fts == "" {
+		return []HistoryEntry{}, nil
+	}
 
 	var (
 		rows *sql.Rows
@@ -198,15 +201,19 @@ func (s *Store) SearchHistory(ctx context.Context, connectionName, q string, lim
 	return scanHistory(rows)
 }
 
-// expandFTSQuery turns a plain user query into an FTS5 expression. If the
-// user already typed FTS operators (quotes, AND/OR/NOT, *, ()) we pass it
-// through untouched. Otherwise each whitespace token is turned into a
-// prefix match so "sel usr" finds "SELECT FROM users".
+// expandFTSQuery turns plain user text into a safe FTS5 expression. Raw
+// pass-through is reserved for clearly advanced input: explicit phrases or
+// standalone boolean operators. Everything else is tokenized as plain text
+// and rewritten into prefix matches so common punctuation never trips the
+// SQLite parser.
 func expandFTSQuery(q string) string {
-	if strings.ContainsAny(q, `"()*:`) || containsFTSOp(q) {
+	if strings.ContainsRune(q, '"') || containsFTSOp(q) {
 		return q
 	}
-	fields := strings.Fields(q)
+	fields := tokenizePlainFTSQuery(q)
+	if len(fields) == 0 {
+		return ""
+	}
 	for i, f := range fields {
 		fields[i] = f + "*"
 	}
@@ -214,13 +221,19 @@ func expandFTSQuery(q string) string {
 }
 
 func containsFTSOp(q string) bool {
-	upper := strings.ToUpper(q)
-	for _, op := range []string{" AND ", " OR ", " NOT "} {
-		if strings.Contains(upper, op) {
+	for _, field := range strings.Fields(q) {
+		switch strings.ToUpper(field) {
+		case "AND", "OR", "NOT":
 			return true
 		}
 	}
 	return false
+}
+
+func tokenizePlainFTSQuery(q string) []string {
+	return strings.FieldsFunc(q, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
+	})
 }
 
 func scanHistory(rows *sql.Rows) ([]HistoryEntry, error) {

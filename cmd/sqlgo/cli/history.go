@@ -163,7 +163,7 @@ func writeHistory(entries []store.HistoryEntry, format string, stdout, stderr io
 			return ExitUsage
 		}
 		fmtSel = f
-	} else if !isTerminal(stdout) {
+	} else if !terminalDetector(stdout) {
 		fmtSel = output.TSV
 	}
 	cols := []db.Column{

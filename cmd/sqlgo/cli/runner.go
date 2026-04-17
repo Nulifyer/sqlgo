@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/config"
+	"github.com/Nulifyer/sqlgo/internal/connectutil"
 	"github.com/Nulifyer/sqlgo/internal/db"
 	"github.com/Nulifyer/sqlgo/internal/output"
-	"github.com/Nulifyer/sqlgo/internal/secret"
 	"github.com/Nulifyer/sqlgo/internal/sqltok"
 	"github.com/Nulifyer/sqlgo/internal/store"
 )
@@ -33,6 +33,7 @@ type runOptions struct {
 	timeout         time.Duration
 	maxRows         int
 
+	openConn func(ctx context.Context) (db.Conn, io.Closer, error)
 	out      io.Writer
 	outClose func() error // non-nil when out is a file we opened
 	stderr   io.Writer
@@ -56,6 +57,8 @@ func buildRunOptions(flags *commonFlags, stdin io.Reader, stdout, stderr io.Writ
 		stderr:          stderr,
 	}
 
+	runtime := runtimeDepsFactory()
+
 	// Connection resolution.
 	if flags.DSN != "" {
 		drv, cfg, err := parseDSN(flags.DSN)
@@ -64,6 +67,14 @@ func buildRunOptions(flags *commonFlags, stdin io.Reader, stdout, stderr io.Writ
 		}
 		opts.driver = drv
 		opts.cfg = cfg
+		opts.openConn = func(ctx context.Context) (db.Conn, io.Closer, error) {
+			driver, err := runtime.GetDriver(drv)
+			if err != nil {
+				return nil, nil, err
+			}
+			conn, err := driver.Open(ctx, cfg)
+			return conn, nil, err
+		}
 	} else {
 		st, err := openStore(context.Background())
 		if err != nil {
@@ -77,22 +88,22 @@ func buildRunOptions(flags *commonFlags, stdin io.Reader, stdout, stderr io.Writ
 			}
 			return nil, ExitConn, err
 		}
+		resolved, err := connectutil.ResolveSavedConnection(c, runtime)
+		if err != nil {
+			return nil, ExitConn, err
+		}
 		opts.saved = &c
 		opts.driver = c.Driver
-		opts.cfg = db.Config{
-			Host:     c.Host,
-			Port:     c.Port,
-			User:     c.User,
-			Password: c.Password,
-			Database: c.Database,
-			Options:  c.Options,
-		}
-		if c.Password == secret.Placeholder {
-			real, err := secret.Resolve(secret.System(), c.Name, c.Password)
+		opts.cfg = resolved.Config
+		opts.openConn = func(ctx context.Context) (db.Conn, io.Closer, error) {
+			conn, tunnel, err := connectutil.OpenResolvedConnection(ctx, resolved, runtime)
 			if err != nil {
-				return nil, ExitConn, fmt.Errorf("password for %q: %w", c.Name, err)
+				return nil, nil, err
 			}
-			opts.cfg.Password = real
+			if tunnel == nil {
+				return conn, nil, nil
+			}
+			return conn, tunnel, nil
 		}
 	}
 
@@ -107,6 +118,33 @@ func buildRunOptions(flags *commonFlags, stdin io.Reader, stdout, stderr io.Writ
 		opts.cfg.Password = pw
 	} else if v, ok := os.LookupEnv("SQLGO_PASSWORD"); ok {
 		opts.cfg.Password = v
+	}
+	if opts.openConn == nil {
+		return nil, ExitConn, errors.New("connection open path not configured")
+	}
+	cfg := opts.cfg
+	opts.openConn = func(ctx context.Context) (db.Conn, io.Closer, error) {
+		if flags.DSN == "" && opts.saved != nil {
+			resolved, err := connectutil.ResolveSavedConnection(*opts.saved, runtime)
+			if err != nil {
+				return nil, nil, err
+			}
+			resolved.Config.Password = cfg.Password
+			conn, tunnel, err := connectutil.OpenResolvedConnection(ctx, resolved, runtime)
+			if err != nil {
+				return nil, nil, err
+			}
+			if tunnel == nil {
+				return conn, nil, nil
+			}
+			return conn, tunnel, nil
+		}
+		driver, err := runtime.GetDriver(opts.driver)
+		if err != nil {
+			return nil, nil, err
+		}
+		conn, err := driver.Open(ctx, cfg)
+		return conn, nil, err
 	}
 
 	// SQL source.
@@ -131,7 +169,7 @@ func buildRunOptions(flags *commonFlags, stdin io.Reader, stdout, stderr io.Writ
 		if f, ok := output.FormatFromPath(flags.Output); ok {
 			format = f
 		}
-	} else if !isTerminal(stdout) {
+	} else if !terminalDetector(stdout) {
 		format = output.TSV
 	}
 	opts.format = format
@@ -150,10 +188,10 @@ func buildRunOptions(flags *commonFlags, stdin io.Reader, stdout, stderr io.Writ
 	return opts, ExitOK, nil
 }
 
-// run opens the connection, splits sql into statements, and dispatches
-// each statement either to the row printer (SELECT-ish) or Exec (DDL,
-// DML with no rows). It honors the unsafe-mutation gate before any
-// statement runs so a destructive batch aborts early.
+// run opens the connection, executes the full SQL batch through Query,
+// and streams each result set to the selected writer. It honors the
+// unsafe-mutation gate before any work starts so a destructive batch
+// aborts early.
 func run(ctx context.Context, opts *runOptions) ExitCode {
 	started := time.Now()
 	defer func() {
@@ -173,20 +211,17 @@ func run(ctx context.Context, opts *runOptions) ExitCode {
 		return ExitUnsafeRefused
 	}
 
-	drv, err := db.Get(opts.driver)
-	if err != nil {
-		stderrf(opts.stderr, "%v", err)
-		return ExitConn
-	}
-
 	dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	conn, err := drv.Open(dialCtx, opts.cfg)
+	conn, connClose, err := opts.openConn(dialCtx)
 	if err != nil {
 		stderrf(opts.stderr, "connect: %v", err)
 		return ExitConn
 	}
 	defer conn.Close()
+	if connClose != nil {
+		defer connClose.Close()
+	}
 
 	// Feed the driver the whole batch via Query; NextResultSet handles
 	// multi-statement. This matches what the TUI does, so the CLI's
@@ -316,8 +351,8 @@ func readPasswordLine(r io.Reader) (string, error) {
 
 // openStore opens the connection/history store. Split out so the conns
 // and history verbs can share the open path once they land.
-func openStore(ctx context.Context) (*store.Store, error) {
-	return store.Open(ctx)
+func openStore(ctx context.Context) (cliStore, error) {
+	return openStoreFn(ctx)
 }
 
 // recordHistory writes a single batch entry to the history store. Best

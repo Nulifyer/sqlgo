@@ -85,8 +85,17 @@ func DataDir() (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(root, appName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	mode := os.FileMode(0o755)
+	if runtime.GOOS != "windows" {
+		mode = 0o700
+	}
+	if err := os.MkdirAll(dir, mode); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(dir, mode); err != nil {
+			return "", fmt.Errorf("chmod %s: %w", dir, err)
+		}
 	}
 	return dir, nil
 }

@@ -30,7 +30,7 @@ func runExec(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 	}
 
 	defFmt := output.TSV
-	if isTerminal(stdout) && flags.Output == "" {
+	if terminalDetector(stdout) && flags.Output == "" {
 		defFmt = output.Table
 	}
 	opts, code, err := buildRunOptions(flags, stdin, stdout, stderr, defFmt)

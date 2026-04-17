@@ -244,6 +244,55 @@ func TestSearchHistoryFTS(t *testing.T) {
 	}
 }
 
+func TestSearchHistoryPlainTextPunctuationDoesNotError(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	for _, sql := range []string{
+		`SELECT foo_bar FROM widgets WHERE note = 'foo-bar'`,
+		`UPDATE customers SET email = 'a@b.c'`,
+		`SELECT json_extract(payload, '$.x:y') FROM events`,
+	} {
+		if err := s.RecordHistory(ctx, sampleHistoryEntry("local", sql, 0)); err != nil {
+			t.Fatalf("record: %v", err)
+		}
+	}
+
+	for _, q := range []string{"foo-bar", "a@b.c", "x:y", "..."} {
+		got, err := s.SearchHistory(ctx, "local", q, 10)
+		if err != nil {
+			t.Fatalf("search %q: %v", q, err)
+		}
+		if q == "..." && len(got) != 0 {
+			t.Fatalf("search %q len = %d, want 0", q, len(got))
+		}
+	}
+}
+
+func TestSearchHistoryBooleanOpsStillPassThrough(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	for _, sql := range []string{
+		`SELECT * FROM users`,
+		`SELECT * FROM orders`,
+	} {
+		if err := s.RecordHistory(ctx, sampleHistoryEntry("local", sql, 0)); err != nil {
+			t.Fatalf("record: %v", err)
+		}
+	}
+
+	got, err := s.SearchHistory(ctx, "local", `users OR orders`, 10)
+	if err != nil {
+		t.Fatalf("boolean search: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("boolean search len = %d, want 2", len(got))
+	}
+}
+
 func containsText(s, sub string) bool {
 	return len(s) >= len(sub) && indexOf(s, sub) >= 0
 }

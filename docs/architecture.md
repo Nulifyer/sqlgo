@@ -193,7 +193,7 @@ keyword is what gets classified, not `WITH`.
 ## Testing layout
 
 - Unit tests sit next to their package and run under
-  `go test ./...` on a clean checkout.
+  `go test -tags sqlite_fts5 ./...` on a clean checkout.
 - Driver integration tests that need a live server sit behind a
   `//go:build integration` tag (see
   [postgres_integration_test.go](../internal/db/postgres/postgres_integration_test.go)).

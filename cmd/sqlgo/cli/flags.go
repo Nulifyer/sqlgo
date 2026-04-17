@@ -60,7 +60,7 @@ func (f *commonFlags) registerCommon(fs *flag.FlagSet) {
 	fs.BoolVar(&f.AllowUnsafe, "allow-unsafe", false, "permit destructive statements (UPDATE/DELETE without WHERE, TRUNCATE, DROP)")
 	fs.BoolVar(&f.ContinueOnError, "continue-on-error", false, "keep running subsequent statements after a failure")
 	fs.BoolVar(&f.RecordHistory, "record-history", false, "append executed statements to the history store")
-	fs.DurationVar(&f.Timeout, "timeout", 0, "abort each statement after this duration (0 = no timeout)")
+	fs.DurationVar(&f.Timeout, "timeout", 0, "abort the query batch after this duration (0 = no timeout)")
 	fs.IntVar(&f.MaxRows, "max-rows", 0, "stop reading after this many rows (0 = unlimited)")
 	fs.BoolVar(&f.PasswordStdin, "password-stdin", false, "read the connection password from stdin (before any query)")
 }
@@ -89,7 +89,7 @@ func (f *commonFlags) resolveQuery(stdin io.Reader) (string, error) {
 	// Auto-pick stdin when no explicit source was given and stdin is
 	// not a tty. Callers that want to force-error on missing source
 	// should check the empty-string return.
-	if !isTerminal(stdin) {
+	if !terminalDetector(stdin) {
 		b, err := io.ReadAll(stdin)
 		if err != nil {
 			return "", fmt.Errorf("read stdin: %w", err)

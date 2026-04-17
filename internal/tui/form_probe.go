@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Nulifyer/sqlgo/internal/config"
+	"github.com/Nulifyer/sqlgo/internal/connectutil"
 	"github.com/Nulifyer/sqlgo/internal/db"
 	"github.com/Nulifyer/sqlgo/internal/secret"
 	"github.com/Nulifyer/sqlgo/internal/sshtunnel"
@@ -168,7 +169,7 @@ func (fl *formLayer) startTestAuth(a *app) {
 		}
 	}
 	if c.SSH.Password == secret.Placeholder && a.secrets != nil {
-		if resolved, err := a.secrets.Get(sshKeyringAccount(c.Name)); err == nil {
+		if resolved, err := a.secrets.Get(connectutil.SSHKeyringAccount(c.Name)); err == nil {
 			c.SSH.Password = resolved
 		} else {
 			f.status = "auth: ssh keyring get: " + err.Error()
