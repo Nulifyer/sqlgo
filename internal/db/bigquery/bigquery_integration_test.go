@@ -47,15 +47,16 @@ func TestIntegrationBigQuery(t *testing.T) {
 	}
 	defer conn.Close()
 
-	dbtest.ExerciseDriver(t, conn, cfg.Database,
-		"CREATE TABLE sqlgo_it_bigquery (id INT64, label STRING)",
+	dbtest.ExerciseDriverWithRef(t, conn, cfg.Database,
+		"CREATE TABLE `sqlgo_test.sqlgo_it_bigquery` (id INT64, label STRING)",
 		"sqlgo_it_bigquery",
+		"`sqlgo_test.sqlgo_it_bigquery`",
 	)
 
 	t.Run("view_definition", func(t *testing.T) {
 		dbtest.ExerciseDefinition(t, conn, "view",
-			"CREATE VIEW sqlgo_it_bigquery_view AS SELECT 42 AS sqlgo_marker",
-			"DROP VIEW sqlgo_it_bigquery_view",
+			"CREATE VIEW `sqlgo_test.sqlgo_it_bigquery_view` AS SELECT 42 AS sqlgo_marker",
+			"DROP VIEW `sqlgo_test.sqlgo_it_bigquery_view`",
 			cfg.Database, "sqlgo_it_bigquery_view", "sqlgo_marker",
 		)
 	})

@@ -331,7 +331,7 @@ func (c *conn) Definition(ctx context.Context, kind, schema, name string) (strin
 	case "view":
 		body := strings.TrimSpace(md.ViewQuery)
 		if body == "" {
-			return "", fmt.Errorf("bigquery: no view body for %s.%s", schema, name)
+			return "", fmt.Errorf("bigquery: no view body for %s.%s: %w", schema, name, db.ErrDefinitionUnsupported)
 		}
 		qualified := "`" + c.project + "`.`" + schema + "`.`" + name + "`"
 		return fmt.Sprintf("CREATE OR REPLACE VIEW %s AS\n%s;", qualified,

@@ -232,7 +232,7 @@ seed_sybase() {
     # isql needs SYBASE env to find its localization files; neither login
     # shell nor /etc/profile.d sets it, so source SYBASE.sh explicitly.
     wait_for "sybase" podman exec sqlgo-sybase \
-        bash -c ". /opt/sybase/SYBASE.sh && printf 'select 1\ngo\n' | /opt/sybase/OCS-16_0/bin/isql -U sa -P myPassword -S MYSYBASE" \
+        bash -c ". /opt/sybase/SYBASE.sh && printf 'select 1\nGO\n' | /opt/sybase/OCS-16_0/bin/isql -U sa -P myPassword -S MYSYBASE" \
         || return 0
 
     log "sybase: ensuring sqlgo_a/sqlgo_b + sample tables"
@@ -240,41 +240,45 @@ seed_sybase() {
 -- Entrypoint sizes master at 60MB and consumes 48MB for testdb. Expand
 -- to fit two more 24MB user DBs (model minimum size).
 disk resize name='master', size='180m'
-go
+GO
 if not exists (select 1 from master..sysdatabases where name='sqlgo_a')
   create database sqlgo_a on master='24m'
-go
+GO
 if not exists (select 1 from master..sysdatabases where name='sqlgo_b')
   create database sqlgo_b on master='24m'
-go
+GO
 sp_dboption sqlgo_a, 'select into/bulkcopy', true
-go
+GO
 sp_dboption sqlgo_b, 'select into/bulkcopy', true
-go
+GO
 use sqlgo_a
-go
+GO
 if not exists (select 1 from sysusers where name='tester')
   exec sp_adduser tester
-go
-if not exists (select 1 from sysobjects where name='widgets' and type='U')
-  create table widgets (id int primary key, name varchar(50))
-go
-if not exists (select 1 from widgets) insert widgets values (1,'alpha-A')
-go
-if not exists (select 1 from widgets where id=2) insert widgets values (2,'beta-A')
-go
+GO
+if exists (select 1 from sysobjects where name='widgets' and type='U')
+  drop table widgets
+GO
+create table widgets (id int primary key, name varchar(50))
+GO
+insert widgets values (1,'alpha-A')
+GO
+insert widgets values (2,'beta-A')
+GO
 use sqlgo_b
-go
+GO
 if not exists (select 1 from sysusers where name='tester')
   exec sp_adduser tester
-go
-if not exists (select 1 from sysobjects where name='gadgets' and type='U')
-  create table gadgets (id int primary key, label varchar(50))
-go
-if not exists (select 1 from gadgets) insert gadgets values (1,'gizmo-B')
-go
-if not exists (select 1 from gadgets where id=2) insert gadgets values (2,'widget-B')
-go
+GO
+if exists (select 1 from sysobjects where name='gadgets' and type='U')
+  drop table gadgets
+GO
+create table gadgets (id int primary key, label varchar(50))
+GO
+insert gadgets values (1,'gizmo-B')
+GO
+insert gadgets values (2,'widget-B')
+GO
 SQL" >/dev/null 2>&1 || warn "sybase seed may have partially failed (check sa creds / isql path)"
     log "sybase: done"
 }

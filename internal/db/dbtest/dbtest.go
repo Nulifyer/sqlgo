@@ -21,6 +21,13 @@ import (
 // schema name (public / dbo / dbname / main). createTable is a
 // dialect-specific CREATE for a 2-column (id, label) fixture.
 func ExerciseDriver(t *testing.T, conn db.Conn, tableSchema, createTable, tableName string) {
+	ExerciseDriverWithRef(t, conn, tableSchema, createTable, tableName, tableName)
+}
+
+// ExerciseDriverWithRef is ExerciseDriver for engines that need a
+// qualified SQL object reference while still reporting plain object
+// names from Schema() and Columns().
+func ExerciseDriverWithRef(t *testing.T, conn db.Conn, tableSchema, createTable, tableName, tableRef string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -30,18 +37,18 @@ func ExerciseDriver(t *testing.T, conn db.Conn, tableSchema, createTable, tableN
 	}
 
 	// Drop-then-create; dialects disagree on IF NOT EXISTS.
-	_ = conn.Exec(ctx, "DROP TABLE "+tableName)
+	_ = conn.Exec(ctx, "DROP TABLE "+tableRef)
 	if err := conn.Exec(ctx, createTable); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
 	defer func() {
-		_ = conn.Exec(context.Background(), "DROP TABLE "+tableName)
+		_ = conn.Exec(context.Background(), "DROP TABLE "+tableRef)
 	}()
 
-	if err := conn.Exec(ctx, "INSERT INTO "+tableName+" (id, label) VALUES (1, 'one')"); err != nil {
+	if err := conn.Exec(ctx, "INSERT INTO "+tableRef+" (id, label) VALUES (1, 'one')"); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if err := conn.Exec(ctx, "INSERT INTO "+tableName+" (id, label) VALUES (2, 'two')"); err != nil {
+	if err := conn.Exec(ctx, "INSERT INTO "+tableRef+" (id, label) VALUES (2, 'two')"); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
@@ -73,7 +80,7 @@ func ExerciseDriver(t *testing.T, conn db.Conn, tableSchema, createTable, tableN
 		t.Errorf("cols = %+v, want [id, label] (case-insensitive)", cols)
 	}
 
-	rows, err := conn.Query(ctx, "SELECT id, label FROM "+tableName+" ORDER BY id")
+	rows, err := conn.Query(ctx, "SELECT id, label FROM "+tableRef+" ORDER BY id")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
