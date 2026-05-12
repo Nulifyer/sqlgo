@@ -174,7 +174,7 @@ func (sl *saveLayer) save(a *app) {
 		sl.status = "filename is required"
 		return
 	}
-	full := sl.picker.Path()
+	full := a.documents.NormalizePath(sl.picker.Path())
 
 	m := a.mainLayerPtr()
 	if sl.tabIdx < 0 || sl.tabIdx >= len(m.sessions) {
@@ -183,7 +183,7 @@ func (sl *saveLayer) save(a *app) {
 	}
 	sess := m.sessions[sl.tabIdx]
 
-	if idx := m.findTabByPath(full); idx >= 0 && idx != sl.tabIdx {
+	if idx := a.documents.FindOpenTab(m.sessions, full); idx >= 0 && idx != sl.tabIdx {
 		sl.status = fmt.Sprintf("another tab already has %s open", filepath.Base(full))
 		return
 	}
@@ -201,17 +201,14 @@ func (sl *saveLayer) save(a *app) {
 		}
 	}
 
-	text := sess.editor.buf.Text()
-	if err := os.WriteFile(full, []byte(text), 0644); err != nil {
+	doc, err := a.documents.Save(sess, full)
+	if err != nil {
 		sl.status = "write failed: " + err.Error()
 		return
 	}
-	sess.sourcePath = full
-	sess.savedText = text
-	sess.title = filepath.Base(full)
 	recordDir(a, store.LastDirSave, filepath.Dir(full))
 	a.popLayer()
-	m.status = fmt.Sprintf("saved %d bytes to %s", len(text), full)
+	m.status = fmt.Sprintf("saved %d bytes to %s", doc.Size, doc.Path)
 }
 
 func (sl *saveLayer) Hints(a *app) string {

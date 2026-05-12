@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"strings"
 	"time"
 
@@ -395,13 +394,12 @@ func (m *mainLayer) saveActive(a *app) {
 		a.pushLayer(newSaveLayer(a, m.activeTab, seed, []string{".sql"}))
 		return
 	}
-	text := sess.editor.buf.Text()
-	if err := os.WriteFile(sess.sourcePath, []byte(text), 0644); err != nil {
+	doc, err := a.documents.Save(sess, sess.sourcePath)
+	if err != nil {
 		m.status = "save failed: " + err.Error()
 		return
 	}
-	sess.savedText = text
-	m.status = fmt.Sprintf("saved %d bytes to %s", len(text), sess.sourcePath)
+	m.status = fmt.Sprintf("saved %d bytes to %s", doc.Size, doc.Path)
 }
 
 // saveAsActive pushes a Save As dialog seeded from the active tab's
@@ -485,22 +483,6 @@ func (m *mainLayer) runExplainPlan(a *app) {
 			a.pushLayer(newExplainLayer(tree))
 		}
 	}()
-}
-
-// findTabByPath returns the index of a session whose sourcePath matches
-// the given absolute path, or -1 if no tab has that file open. Used by
-// the open dialog to switch to an already-open file instead of
-// duplicating the tab (and dropping any unsaved edits).
-func (m *mainLayer) findTabByPath(abs string) int {
-	if abs == "" {
-		return -1
-	}
-	for i, s := range m.sessions {
-		if s.sourcePath == abs {
-			return i
-		}
-	}
-	return -1
 }
 
 // newTab appends a fresh session and activates it. The embedded *session

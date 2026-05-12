@@ -5,6 +5,7 @@ package term
 import (
 	"io"
 	"os"
+	"strings"
 	"time"
 	"unicode/utf16"
 	"unsafe"
@@ -36,9 +37,27 @@ type conInReader struct {
 	buf  []byte
 }
 
+// pasteEventThreshold is the minimum number of key-down events that
+// must be queued simultaneously before we treat the burst as a paste.
+// Normal typing rarely queues more than 1-2 events; a paste dumps all
+// characters at once. 8 avoids false positives from fast typing or
+// held-key repeat while still catching short multi-line pastes.
+const pasteEventThreshold = 8
+
 func (c *conInReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
+	}
+	if len(c.buf) == 0 {
+		// ReadConsoleW often does not relay the terminal's ESC[200~
+		// brackets. When the console queue already looks paste-like,
+		// drain that queue directly and synthesize bracketed paste
+		// markers so KeyReader receives one PasteMsg.
+		if c.pendingKeyCount() >= pasteEventThreshold {
+			if synth := c.readPasteBatch(); len(synth) > 0 {
+				c.buf = synth
+			}
+		}
 	}
 	if len(c.buf) == 0 {
 		var read uint32
@@ -54,6 +73,119 @@ func (c *conInReader) Read(p []byte) (int, error) {
 	n := copy(p, c.buf)
 	c.buf = c.buf[n:]
 	return n, nil
+}
+
+// pendingKeyCount returns the number of key-down events with
+// printable/control characters currently queued. Native bracketed
+// paste starters are treated as paste batches even before the normal
+// heuristic threshold is reached, so a queued ESC[200~ opener does not
+// fall back to the timing-sensitive ReadConsoleW byte path.
+func (c *conInReader) pendingKeyCount() int {
+	var total uint32
+	if err := windows.GetNumberOfConsoleInputEvents(c.h, &total); err != nil || total == 0 {
+		return 0
+	}
+	peekBuf := make([]inputRecord, min(int(total), 256))
+	var read uint32
+	r1, _, _ := procPeekConsoleInputW.Call(
+		uintptr(c.h),
+		uintptr(unsafe.Pointer(&peekBuf[0])),
+		uintptr(len(peekBuf)),
+		uintptr(unsafe.Pointer(&read)),
+	)
+	if r1 == 0 {
+		return 0
+	}
+	count := 0
+	var prefix strings.Builder
+	prefix.Grow(len(bracketedPasteStart))
+	firstPrintable := true
+	startsWithEsc := false
+	for i := uint32(0); i < read; i++ {
+		if peekBuf[i].EventType != keyEvent {
+			continue
+		}
+		kr := (*keyEventRecord)(unsafe.Pointer(&peekBuf[i].Event[0]))
+		if kr.KeyDown == 0 || kr.UnicodeChar == 0 {
+			continue
+		}
+		if firstPrintable {
+			startsWithEsc = kr.UnicodeChar == 0x1B
+			firstPrintable = false
+		}
+		if prefix.Len() < len(bracketedPasteStart) {
+			prefix.WriteRune(rune(kr.UnicodeChar))
+			if prefix.String() == bracketedPasteStart {
+				return pasteEventThreshold
+			}
+		}
+		count++
+	}
+	if total < uint32(pasteEventThreshold) {
+		return 0
+	}
+	if startsWithEsc {
+		return 0
+	}
+	return count
+}
+
+// readPasteBatch drains pending console input and returns a bracketed
+// paste sequence. Native ESC[200~ batches are passed through as-is;
+// every other burst is wrapped once.
+func (c *conInReader) readPasteBatch() []byte {
+	recBuf := make([]inputRecord, 256)
+	var runes []rune
+	for {
+		var n uint32
+		if err := windows.GetNumberOfConsoleInputEvents(c.h, &n); err != nil || n == 0 {
+			break
+		}
+		toRead := min(int(n), len(recBuf))
+		var read uint32
+		r1, _, _ := procReadConsoleInputW.Call(
+			uintptr(c.h),
+			uintptr(unsafe.Pointer(&recBuf[0])),
+			uintptr(toRead),
+			uintptr(unsafe.Pointer(&read)),
+		)
+		if r1 == 0 || read == 0 {
+			break
+		}
+		for i := uint32(0); i < read; i++ {
+			if recBuf[i].EventType != keyEvent {
+				continue
+			}
+			kr := (*keyEventRecord)(unsafe.Pointer(&recBuf[i].Event[0]))
+			if kr.KeyDown == 0 || kr.UnicodeChar == 0 {
+				continue
+			}
+			ch := rune(kr.UnicodeChar)
+			rep := kr.RepeatCount
+			if rep == 0 {
+				rep = 1
+			}
+			for j := uint16(0); j < rep; j++ {
+				runes = append(runes, ch)
+			}
+		}
+	}
+	if len(runes) == 0 {
+		return nil
+	}
+	return wrapPasteBatch(string(runes))
+}
+
+const (
+	bracketedPasteStart = "\x1b[200~"
+	bracketedPasteEnd   = "\x1b[201~"
+)
+
+func wrapPasteBatch(content string) []byte {
+	if strings.HasPrefix(content, bracketedPasteStart) {
+		return []byte(content)
+	}
+	return []byte(bracketedPasteStart + content + bracketedPasteEnd)
 }
 
 // StdinPeekReadable reports whether a key event is pending on the
@@ -166,4 +298,5 @@ type keyEventRecord struct {
 var (
 	modKernel32           = windows.NewLazySystemDLL("kernel32.dll")
 	procPeekConsoleInputW = modKernel32.NewProc("PeekConsoleInputW")
+	procReadConsoleInputW = modKernel32.NewProc("ReadConsoleInputW")
 )

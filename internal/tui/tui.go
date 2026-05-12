@@ -42,6 +42,7 @@ import (
 	"github.com/Nulifyer/sqlgo/internal/sqltok"
 	"github.com/Nulifyer/sqlgo/internal/sshtunnel"
 	"github.com/Nulifyer/sqlgo/internal/store"
+	tuiterm "github.com/Nulifyer/sqlgo/internal/tui/term"
 	"github.com/Nulifyer/sqlgo/internal/tui/widget"
 )
 
@@ -110,6 +111,10 @@ type app struct {
 	// app so copy/paste code paths in the results panel, editor, and
 	// future widgets all go through the same mapErr sentinel handling.
 	clipboard clipboard.Clipboard
+
+	// documents owns file-backed query-tab invariants shared by open /
+	// save flows.
+	documents documentService
 
 	// secrets is the OS keyring abstraction. When the backend is
 	// available we move new passwords off disk into it on save; when
@@ -392,7 +397,7 @@ func Run(opts Options) error {
 }
 
 func (a *app) loop() error {
-	keys := newKeyReader(stdinReader())
+	keys := newKeyReader(tuiterm.StdinReader())
 	msgCh := make(chan InputMsg, inputChanBuf)
 	keyErrCh := make(chan error, 1)
 	go func() {

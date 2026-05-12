@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -211,33 +210,28 @@ func (ol *openLayer) load(a *app) {
 		ol.status = "path is required"
 		return
 	}
-	abs, err := filepath.Abs(path)
-	if err == nil {
-		path = filepath.Clean(abs)
-	}
+	path = a.documents.NormalizePath(path)
 	m := a.mainLayerPtr()
-	if idx := m.findTabByPath(path); idx >= 0 {
+	if idx := a.documents.FindOpenTab(m.sessions, path); idx >= 0 {
 		m.switchTab(idx)
 		recordDir(a, store.LastDirOpen, filepath.Dir(path))
 		a.popLayer()
 		m.status = fmt.Sprintf("switched to open tab for %s", filepath.Base(path))
 		return
 	}
-	data, err := os.ReadFile(path)
+	doc, err := a.documents.Load(path)
 	if err != nil {
 		ol.status = "read failed: " + err.Error()
 		return
 	}
-	text := string(data)
 	sess := m.ensureActiveTab()
-	sess.editor.buf.SetText(text)
-	sess.editor.ClearErrorLocation()
-	sess.sourcePath = path
-	sess.savedText = text
-	sess.title = filepath.Base(path)
+	if err := a.documents.ApplyLoaded(sess, doc); err != nil {
+		ol.status = "read failed: " + err.Error()
+		return
+	}
 	recordDir(a, store.LastDirOpen, filepath.Dir(path))
 	a.popLayer()
-	m.status = fmt.Sprintf("loaded %d bytes from %s", len(data), path)
+	m.status = fmt.Sprintf("loaded %d bytes from %s", doc.Size, path)
 }
 
 // loadMarked opens each marked path in its own new editor tab. Files
@@ -249,24 +243,24 @@ func (ol *openLayer) loadMarked(a *app, marked []string) {
 	var lastErr, lastLoadedPath string
 	lastIdx := -1
 	for _, abs := range marked {
-		if idx := m.findTabByPath(abs); idx >= 0 {
+		abs = a.documents.NormalizePath(abs)
+		if idx := a.documents.FindOpenTab(m.sessions, abs); idx >= 0 {
 			reused++
 			lastIdx = idx
 			continue
 		}
-		data, err := os.ReadFile(abs)
+		doc, err := a.documents.Load(abs)
 		if err != nil {
 			skipped++
 			lastErr = err.Error()
 			continue
 		}
 		m.newTab()
-		text := string(data)
-		m.editor.buf.SetText(text)
-		m.editor.ClearErrorLocation()
-		m.session.sourcePath = abs
-		m.session.savedText = text
-		m.session.title = filepath.Base(abs)
+		if err := a.documents.ApplyLoaded(m.session, doc); err != nil {
+			skipped++
+			lastErr = err.Error()
+			continue
+		}
 		loaded++
 		lastIdx = m.activeTab
 		lastLoadedPath = abs
