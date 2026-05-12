@@ -170,38 +170,72 @@ func writeMarkdown(w io.Writer, cols []db.Column, rows [][]string) error {
 	if len(cols) == 0 {
 		return nil
 	}
-	bw := &strings.Builder{}
-
-	bw.WriteString("|")
-	for _, c := range cols {
-		bw.WriteString(" ")
-		bw.WriteString(escapeMarkdownCell(c.Name))
-		bw.WriteString(" |")
+	headers := make([]string, len(cols))
+	widths := make([]int, len(cols))
+	for i, c := range cols {
+		headers[i] = escapeMarkdownCell(c.Name)
+		widths[i] = markdownCellWidth(headers[i])
 	}
-	bw.WriteString("\n|")
-	for range cols {
-		bw.WriteString(" --- |")
+
+	escapedRows := make([][]string, len(rows))
+	for rowIdx, row := range rows {
+		escaped := make([]string, len(cols))
+		for colIdx := range cols {
+			cell := ""
+			if colIdx < len(row) {
+				cell = row[colIdx]
+			}
+			escaped[colIdx] = escapeMarkdownCell(cell)
+			if n := markdownCellWidth(escaped[colIdx]); n > widths[colIdx] {
+				widths[colIdx] = n
+			}
+		}
+		escapedRows[rowIdx] = escaped
+	}
+
+	for i := range widths {
+		if widths[i] < 3 {
+			widths[i] = 3
+		}
+	}
+
+	bw := &strings.Builder{}
+	writeMarkdownRow(bw, headers, widths)
+	bw.WriteString("|")
+	for _, width := range widths {
+		bw.WriteString(" ")
+		bw.WriteString(strings.Repeat("-", width))
+		bw.WriteString(" |")
 	}
 	bw.WriteString("\n")
 
-	for _, row := range rows {
-		bw.WriteString("|")
-		for i := range cols {
-			cell := ""
-			if i < len(row) {
-				cell = row[i]
-			}
-			bw.WriteString(" ")
-			bw.WriteString(escapeMarkdownCell(cell))
-			bw.WriteString(" |")
-		}
-		bw.WriteString("\n")
+	for _, row := range escapedRows {
+		writeMarkdownRow(bw, row, widths)
 	}
 
 	if _, err := io.WriteString(w, bw.String()); err != nil {
 		return fmt.Errorf("output markdown: %w", err)
 	}
 	return nil
+}
+
+func writeMarkdownRow(b *strings.Builder, cells []string, widths []int) {
+	b.WriteString("|")
+	for i, width := range widths {
+		cell := ""
+		if i < len(cells) {
+			cell = cells[i]
+		}
+		b.WriteString(" ")
+		b.WriteString(cell)
+		b.WriteString(strings.Repeat(" ", width-markdownCellWidth(cell)))
+		b.WriteString(" |")
+	}
+	b.WriteString("\n")
+}
+
+func markdownCellWidth(s string) int {
+	return runeLen(s)
 }
 
 // writeMarkdownQuery emits the originating SQL inside a ```sql fenced

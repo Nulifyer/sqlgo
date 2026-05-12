@@ -1,6 +1,11 @@
 package tui
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/Nulifyer/sqlgo/internal/clipboard"
+	"github.com/Nulifyer/sqlgo/internal/db"
+)
 
 func TestNewMainLayerStartsWithoutVisibleTabs(t *testing.T) {
 	t.Parallel()
@@ -129,5 +134,27 @@ func TestCtrlCDoesNotCancelFromQueryFocus(t *testing.T) {
 	}
 	if got := sess.status; got != "" {
 		t.Fatalf("status = %q, want empty", got)
+	}
+}
+
+func TestCopyAllResultsIncludesHeaders(t *testing.T) {
+	t.Parallel()
+	m := newMainLayer()
+	clip := clipboard.NewMemory()
+	a := &app{clipboard: clip}
+	feedRows(m.table,
+		[]db.Column{{Name: "id"}, {Name: "name"}},
+		[][]any{{int64(1), "alice"}},
+	)
+
+	m.copyAllResults(a)
+
+	got, err := clip.Paste()
+	if err != nil {
+		t.Fatalf("clipboard paste: %v", err)
+	}
+	const want = "id\tname\n1\talice\n"
+	if got != want {
+		t.Fatalf("copied TSV = %q, want %q", got, want)
 	}
 }

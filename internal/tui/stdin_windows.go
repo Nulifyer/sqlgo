@@ -5,6 +5,7 @@ package tui
 import (
 	"io"
 	"os"
+	"strings"
 	"time"
 	"unicode/utf16"
 	"unsafe"
@@ -77,13 +78,13 @@ func (c *conInReader) Read(p []byte) (int, error) {
 }
 
 // pendingKeyCount returns the number of key-down events with
-// printable/control characters currently queued. Returns 0 early if
-// the first key event is ESC (0x1B) -- that indicates a VT sequence
-// (possibly a native bracketed paste start) which ReadConsoleW should
-// handle directly.
+// printable/control characters currently queued. Native bracketed
+// paste starters are treated as paste batches even before the normal
+// heuristic threshold is reached, so a queued ESC[200~ opener does not
+// fall back to the timing-sensitive ReadConsoleW byte path.
 func (c *conInReader) pendingKeyCount() int {
 	var total uint32
-	if err := windows.GetNumberOfConsoleInputEvents(c.h, &total); err != nil || total < uint32(pasteEventThreshold) {
+	if err := windows.GetNumberOfConsoleInputEvents(c.h, &total); err != nil || total == 0 {
 		return 0
 	}
 	peekBuf := make([]inputRecord, min(int(total), 256))
@@ -98,6 +99,10 @@ func (c *conInReader) pendingKeyCount() int {
 		return 0
 	}
 	count := 0
+	var prefix strings.Builder
+	prefix.Grow(len(bracketedPasteStart))
+	firstPrintable := true
+	startsWithEsc := false
 	for i := uint32(0); i < read; i++ {
 		if peekBuf[i].EventType != keyEvent {
 			continue
@@ -106,12 +111,23 @@ func (c *conInReader) pendingKeyCount() int {
 		if kr.KeyDown == 0 || kr.UnicodeChar == 0 {
 			continue
 		}
-		// First character is ESC -> likely a VT sequence or
-		// native bracketed paste. Let ReadConsoleW handle it.
-		if count == 0 && kr.UnicodeChar == 0x1B {
-			return 0
+		if firstPrintable {
+			startsWithEsc = kr.UnicodeChar == 0x1B
+			firstPrintable = false
+		}
+		if prefix.Len() < len(bracketedPasteStart) {
+			prefix.WriteRune(rune(kr.UnicodeChar))
+			if prefix.String() == bracketedPasteStart {
+				return pasteEventThreshold
+			}
 		}
 		count++
+	}
+	if total < uint32(pasteEventThreshold) {
+		return 0
+	}
+	if startsWithEsc {
+		return 0
 	}
 	return count
 }
@@ -119,8 +135,8 @@ func (c *conInReader) pendingKeyCount() int {
 // readPasteBatch drains all pending input records via
 // ReadConsoleInputW, extracts the character content from key-down
 // events, and returns it wrapped in bracketed paste sequences
-// (ESC[200~ ... ESC[201~). If the content already starts with
-// ESC[200~ it is returned as-is to avoid double-wrapping.
+// (ESC[200~ ... ESC[201~). If the content already starts with the
+// exact ESC[200~ opener it is returned as-is to avoid double-wrapping.
 func (c *conInReader) readPasteBatch() []byte {
 	recBuf := make([]inputRecord, 256)
 	var runes []rune
@@ -161,12 +177,19 @@ func (c *conInReader) readPasteBatch() []byte {
 	if len(runes) == 0 {
 		return nil
 	}
-	content := string(runes)
-	// Native bracketed paste already present: pass through.
-	if len(content) > 6 && content[0] == '\x1b' && content[1] == '[' {
+	return wrapPasteBatch(string(runes))
+}
+
+const (
+	bracketedPasteStart = "\x1b[200~"
+	bracketedPasteEnd   = "\x1b[201~"
+)
+
+func wrapPasteBatch(content string) []byte {
+	if strings.HasPrefix(content, bracketedPasteStart) {
 		return []byte(content)
 	}
-	return []byte("\x1b[200~" + content + "\x1b[201~")
+	return []byte(bracketedPasteStart + content + bracketedPasteEnd)
 }
 
 // stdinPeekReadable reports whether a key event is pending on the

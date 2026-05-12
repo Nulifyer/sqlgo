@@ -599,11 +599,12 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 		markedLine, errStartCol, errEndCol, errBlankCol := e.errorMarkerForLine(lineIdx, line, tokens)
 
 		// Walk runes from scrollCol onward. colOut advances by
-		// runewidth so wide glyphs take 2 columns.
+		// visual editor width so wide glyphs and escaped control
+		// bytes both occupy the space the user can actually see.
 		colOut := 0
 		for vc := e.scrollCol; vc < len(line); vc++ {
 			r := line[vc]
-			rw := runeDisplayWidth(r)
+			text, rw := editorDisplayRune(r)
 			if rw == 0 {
 				continue
 			}
@@ -636,7 +637,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 				colOut++
 				break
 			}
-			s.WriteStyled(innerRow+i, bodyCol+colOut, string(r), st)
+			s.WriteStyled(innerRow+i, bodyCol+colOut, text, st)
 			colOut += rw
 		}
 
@@ -667,7 +668,10 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 
 	if cursorVisible {
 		row, col := e.buf.Cursor()
-		s.PlaceCursor(innerRow+(row-e.scrollRow), bodyCol+(col-e.scrollCol))
+		line := e.buf.Line(row)
+		if cursorOut, ok := screenColForRune(line, e.scrollCol, col); ok {
+			s.PlaceCursor(innerRow+(row-e.scrollRow), bodyCol+cursorOut)
+		}
 		// Paint a reverse-video block at each extra cursor so
 		// the user can see where their column-add cursors sit.
 		// The real terminal caret stays on the primary.
@@ -676,17 +680,20 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			if cp.row < e.scrollRow || cp.row >= e.scrollRow+innerH {
 				continue
 			}
-			if cp.col < e.scrollCol || cp.col-e.scrollCol >= bodyW {
+			line := e.buf.Line(cp.row)
+			cursorOut, ok := screenColForRune(line, e.scrollCol, cp.col)
+			if !ok || cursorOut >= bodyW {
 				continue
 			}
-			sc := bodyCol + (cp.col - e.scrollCol)
+			sc := bodyCol + cursorOut
 			sr := innerRow + (cp.row - e.scrollRow)
 			// Paint a space with the caret style; if there's a
 			// real character there, use it verbatim.
 			ch := " "
-			line := e.buf.Line(cp.row)
-			if cp.col < len(line) && isPrintable(line[cp.col]) {
-				ch = string(line[cp.col])
+			if cp.col < len(line) {
+				if text, width := editorDisplayRune(line[cp.col]); width > 0 {
+					ch = text
+				}
 			}
 			s.WriteStyled(sr, sc, ch, caretStyle)
 		}
@@ -697,11 +704,26 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 	}
 }
 
-// isPrintable reports whether a rune should be drawn verbatim
-// under an extra-cursor caret marker. Control chars render as
-// a blank.
-func isPrintable(r rune) bool {
-	return r >= 0x20 && r != 0x7f
+// editorDisplayRune returns the exact visible text used for one buffer
+// rune plus its editor-column width. Control bytes stay in the buffer
+// unchanged, but are painted in caret notation so they cannot hide in
+// plain sight while editing.
+func editorDisplayRune(r rune) (string, int) {
+	switch {
+	case r == '\t':
+		return `\t`, 2
+	case r < 0x20:
+		return "^" + string(rune('@')+r), 2
+	case r == 0x7f:
+		return "^?", 2
+	default:
+		return string(r), runeDisplayWidth(r)
+	}
+}
+
+func editorRuneDisplayWidth(r rune) int {
+	_, width := editorDisplayRune(r)
+	return width
 }
 
 func applyEditorErrorStyle(st Style) Style {
@@ -765,7 +787,7 @@ func screenColForRune(line []rune, scrollCol, runeCol int) (int, bool) {
 		limit = len(line)
 	}
 	for vc := scrollCol; vc < limit; vc++ {
-		if rw := runeDisplayWidth(line[vc]); rw > 0 {
+		if rw := editorRuneDisplayWidth(line[vc]); rw > 0 {
 			colOut += rw
 		}
 	}
@@ -1012,7 +1034,7 @@ func (e *editor) caretFromScreen(r rect, screenRow, screenCol int) (int, int, bo
 		col = len(line)
 	}
 	for col < len(line) {
-		w := runeDisplayWidth(line[col])
+		w := editorRuneDisplayWidth(line[col])
 		if w == 0 {
 			col++
 			continue
@@ -1130,8 +1152,15 @@ func (e *editor) ensureCursorVisible(innerW, innerH int) {
 	}
 	if col < e.scrollCol {
 		e.scrollCol = col
-	} else if col >= e.scrollCol+innerW {
-		e.scrollCol = col - innerW + 1
+	} else {
+		line := e.buf.Line(row)
+		for e.scrollCol < col {
+			cursorOut, ok := screenColForRune(line, e.scrollCol, col)
+			if !ok || cursorOut < innerW {
+				break
+			}
+			e.scrollCol++
+		}
 	}
 	if e.scrollRow < 0 {
 		e.scrollRow = 0

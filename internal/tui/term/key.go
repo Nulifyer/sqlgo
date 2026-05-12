@@ -233,10 +233,35 @@ func (kr *KeyReader) readPaste() (InputMsg, error) {
 			return PasteMsg{Text: string(buf)}, nil
 		}
 		// Safety cap: 16 MB. A paste longer than that is almost
-		// certainly a wedged terminal; drop the partial and return an
-		// empty PasteMsg so the loop doesn't block forever.
+		// certainly a wedged terminal; drop the partial, drain through
+		// the closing marker, and return an empty PasteMsg. Draining is
+		// important: otherwise the unread tail is parsed as ordinary
+		// keys and paste control bytes leak into editor input.
 		if len(buf) > 16*1024*1024 {
+			if err := kr.discardPasteUntilEnd(buf, endSeq); err != nil {
+				return nil, err
+			}
 			return PasteMsg{}, nil
+		}
+	}
+}
+
+func (kr *KeyReader) discardPasteUntilEnd(buf []byte, endSeq string) error {
+	window := append([]byte(nil), buf...)
+	if keep := len(endSeq) - 1; len(window) > keep {
+		window = window[len(window)-keep:]
+	}
+	for {
+		b, err := kr.r.ReadByte()
+		if err != nil {
+			return err
+		}
+		window = append(window, b)
+		if len(window) > len(endSeq) {
+			window = window[len(window)-len(endSeq):]
+		}
+		if len(window) == len(endSeq) && string(window) == endSeq {
+			return nil
 		}
 	}
 }

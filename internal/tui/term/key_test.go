@@ -2,6 +2,7 @@ package term
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +33,27 @@ func TestBracketedPasteSingleMessage(t *testing.T) {
 	}
 	if p.Text != payload {
 		t.Errorf("paste text = %q, want %q", p.Text, payload)
+	}
+}
+
+func TestOversizedBracketedPasteDrainsBeforeNextKey(t *testing.T) {
+	payload := strings.Repeat("x", 16*1024*1024+1)
+	raw := "\x1b[200~" + payload + "\x1b[201~z"
+	got := readAll(t, raw, 2)
+
+	p, ok := got[0].(PasteMsg)
+	if !ok {
+		t.Fatalf("want PasteMsg, got %T", got[0])
+	}
+	if p.Text != "" {
+		t.Fatalf("oversized paste text = %d bytes, want dropped", len(p.Text))
+	}
+	k, ok := got[1].(Key)
+	if !ok {
+		t.Fatalf("want Key after drained paste, got %T", got[1])
+	}
+	if k.Kind != KeyRune || k.Rune != 'z' {
+		t.Fatalf("next key = %+v, want rune 'z'", k)
 	}
 }
 

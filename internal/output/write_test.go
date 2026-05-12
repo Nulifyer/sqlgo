@@ -125,11 +125,15 @@ func TestWriteMarkdown(t *testing.T) {
 	if lines := strings.Count(out, "\n"); lines != 5 {
 		t.Errorf("line count = %d, want 5\n%s", lines, out)
 	}
-	if !strings.Contains(out, "| id | name |") {
-		t.Errorf("missing header row: %s", out)
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if got, want := lines[0], "| id  | name           |"; got != want {
+		t.Errorf("header row = %q, want %q", got, want)
 	}
-	if !strings.Contains(out, "| --- | --- |") {
-		t.Errorf("missing separator row: %s", out)
+	if got, want := lines[1], "| --- | -------------- |"; got != want {
+		t.Errorf("separator row = %q, want %q", got, want)
+	}
+	if got, want := lines[2], "| 1   | alice          |"; got != want {
+		t.Errorf("first row = %q, want %q", got, want)
 	}
 	if !strings.Contains(out, `bo\|b`) {
 		t.Errorf("pipe not escaped: %s", out)
@@ -146,7 +150,7 @@ func TestWriteMarkdownEmptyRows(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "| id | name |") || !strings.Contains(out, "| --- | --- |") {
-		t.Errorf("header-only output missing expected structure:\n%s", out)
+	if got, want := out, "| id  | name |\n| --- | ---- |\n"; got != want {
+		t.Errorf("header-only markdown = %q, want %q", got, want)
 	}
 }
