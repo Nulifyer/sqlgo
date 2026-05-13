@@ -262,7 +262,7 @@ func (d *debugLayer) HandleKey(a *app, k Key) {
 
 func (d *debugLayer) View(a *app) View {
 	_ = a
-	return View{AltScreen: true, MouseEnabled: true}
+	return View{AltScreen: true, MouseEnabled: true, PasteEnabled: true}
 }
 
 func (d *debugLayer) HandleInput(a *app, msg InputMsg) bool {
@@ -401,7 +401,8 @@ func buildDebugBinds() []debugBind {
 		rb("Menu/Focus", "Alt+F", 'f', false, true),
 		rb("Menu/Focus", "Alt+S", 's', false, true),
 		rb("Menu/Focus", "Alt+D", 'd', false, true),
-		rb("Menu/Focus", "Alt+A", 'a', false, true),
+		re("Menu/Focus", "Alt+A", 'a', false, true),
+		re("Menu/Focus", "Alt+Shift+A", 'A', false, true),
 
 		// App runes
 		re("App runes", "s", 's', false, false),

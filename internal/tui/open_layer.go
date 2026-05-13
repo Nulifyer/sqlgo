@@ -293,10 +293,19 @@ func (ol *openLayer) loadMarked(a *app, marked []string) {
 // HandleInput delegates mouse events to the picker, then applies the
 // click-tracker so a double-click triggers a load.
 func (ol *openLayer) HandleInput(a *app, msg InputMsg) bool {
-	mm, ok := msg.(MouseMsg)
-	if !ok {
-		return false
+	switch v := msg.(type) {
+	case PasteMsg:
+		if ol.picker.PasteText(v.Text) {
+			ol.refreshStatus()
+		}
+		return true
+	case MouseMsg:
+		return ol.handleMouseInput(a, v)
 	}
+	return false
+}
+
+func (ol *openLayer) handleMouseInput(a *app, mm MouseMsg) bool {
 	idx, consumed := ol.picker.HandleMouse(mm)
 	if !consumed {
 		return false
@@ -313,7 +322,7 @@ func (ol *openLayer) HandleInput(a *app, msg InputMsg) bool {
 }
 
 func (ol *openLayer) View(a *app) View {
-	return View{AltScreen: true, MouseEnabled: true}
+	return View{AltScreen: true, MouseEnabled: true, PasteEnabled: true}
 }
 
 func (ol *openLayer) Hints(a *app) string {

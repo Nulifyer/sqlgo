@@ -57,6 +57,15 @@ func (rl *renameLayer) HandleKey(a *app, k Key) {
 	rl.input.Handle(k)
 }
 
+func (rl *renameLayer) HandleInput(a *app, msg InputMsg) bool {
+	p, ok := msg.(PasteMsg)
+	if !ok {
+		return false
+	}
+	rl.input.PasteText(p.Text)
+	return true
+}
+
 func (rl *renameLayer) Hints(a *app) string {
 	_ = a
 	return joinHints("type=name", "↵=save", "Esc=cancel")

@@ -7,6 +7,8 @@ import (
 	"github.com/Nulifyer/sqlgo/internal/sqltok"
 )
 
+const editorTabStop = 4
+
 // gutterWidth is the column count reserved at the left edge of the
 // editor for line numbers. Scales to fit the largest line number plus
 // a one-column separator; floors at 3 (two-digit count + space).
@@ -598,13 +600,16 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 		startState := lineStartStates[i]
 		markedLine, errStartCol, errEndCol, errBlankCol := e.errorMarkerForLine(lineIdx, line, tokens)
 
-		// Walk runes from scrollCol onward. colOut advances by
-		// visual editor width so wide glyphs and escaped control
-		// bytes both occupy the space the user can actually see.
-		colOut := 0
+		// Walk runes from scrollCol onward. colOut advances by visual
+		// editor width so wide glyphs, tabs, and escaped control bytes
+		// all occupy the space the user can actually see.
+		scrollOut := visualColumnForRune(line, e.scrollCol)
+		visualCol := scrollOut
+		drawnOut := 0
 		for vc := e.scrollCol; vc < len(line); vc++ {
 			r := line[vc]
-			text, rw := editorDisplayRune(r)
+			colOut := visualCol - scrollOut
+			text, rw := editorDisplayRuneAt(r, visualCol)
 			if rw == 0 {
 				continue
 			}
@@ -634,12 +639,14 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			// paint a space instead so no half-glyph leaks.
 			if rw == 2 && colOut+2 > bodyW {
 				s.WriteStyled(innerRow+i, bodyCol+colOut, " ", st)
-				colOut++
+				drawnOut = colOut + 1
 				break
 			}
 			s.WriteStyled(innerRow+i, bodyCol+colOut, text, st)
-			colOut += rw
+			drawnOut = colOut + rw
+			visualCol += rw
 		}
+		colOut := drawnOut
 
 		// Extend the selection highlight across trailing empty space
 		// on wrapped or short lines so a multi-line block selection
@@ -691,7 +698,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			// real character there, use it verbatim.
 			ch := " "
 			if cp.col < len(line) {
-				if text, width := editorDisplayRune(line[cp.col]); width > 0 {
+				if text, width := editorDisplayRuneAt(line[cp.col], visualColumnForRune(line, cp.col)); width > 0 {
 					ch = text
 				}
 			}
@@ -709,9 +716,17 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 // unchanged, but are painted in caret notation so they cannot hide in
 // plain sight while editing.
 func editorDisplayRune(r rune) (string, int) {
+	return editorDisplayRuneAt(r, 0)
+}
+
+func editorDisplayRuneAt(r rune, visualCol int) (string, int) {
 	switch {
 	case r == '\t':
-		return `\t`, 2
+		w := editorTabStop - (visualCol % editorTabStop)
+		if w <= 0 {
+			w = editorTabStop
+		}
+		return strings.Repeat(" ", w), w
 	case r < 0x20:
 		return "^" + string(rune('@')+r), 2
 	case r == 0x7f:
@@ -722,7 +737,12 @@ func editorDisplayRune(r rune) (string, int) {
 }
 
 func editorRuneDisplayWidth(r rune) int {
-	_, width := editorDisplayRune(r)
+	_, width := editorDisplayRuneAt(r, 0)
+	return width
+}
+
+func editorRuneDisplayWidthAt(r rune, visualCol int) int {
+	_, width := editorDisplayRuneAt(r, visualCol)
 	return width
 }
 
@@ -781,20 +801,27 @@ func screenColForRune(line []rune, scrollCol, runeCol int) (int, bool) {
 	if runeCol < scrollCol {
 		return 0, false
 	}
-	colOut := 0
-	limit := runeCol
-	if limit > len(line) {
-		limit = len(line)
+	scrollOut := visualColumnForRune(line, scrollCol)
+	if runeCol <= len(line) {
+		return visualColumnForRune(line, runeCol) - scrollOut, true
 	}
-	for vc := scrollCol; vc < limit; vc++ {
-		if rw := editorRuneDisplayWidth(line[vc]); rw > 0 {
+	return visualColumnForRune(line, len(line)) + (runeCol - len(line)) - scrollOut, true
+}
+
+func visualColumnForRune(line []rune, runeCol int) int {
+	if runeCol > len(line) {
+		runeCol = len(line)
+	}
+	if runeCol < 0 {
+		runeCol = 0
+	}
+	colOut := 0
+	for i := 0; i < runeCol; i++ {
+		if rw := editorRuneDisplayWidthAt(line[i], colOut); rw > 0 {
 			colOut += rw
 		}
 	}
-	if runeCol > len(line) {
-		colOut += runeCol - len(line)
-	}
-	return colOut, true
+	return colOut
 }
 
 // styleForCol returns the syntax-highlight style for the column offset
@@ -1028,21 +1055,22 @@ func (e *editor) caretFromScreen(r rect, screenRow, screenCol int) (int, int, bo
 	if target >= bodyW {
 		target = bodyW - 1
 	}
-	colOut := 0
 	col := e.scrollCol
 	if col > len(line) {
 		col = len(line)
 	}
+	targetAbs := visualColumnForRune(line, e.scrollCol) + target
+	visualCol := visualColumnForRune(line, col)
 	for col < len(line) {
-		w := editorRuneDisplayWidth(line[col])
+		w := editorRuneDisplayWidthAt(line[col], visualCol)
 		if w == 0 {
 			col++
 			continue
 		}
-		if colOut+w > target {
+		if visualCol+w > targetAbs {
 			break
 		}
-		colOut += w
+		visualCol += w
 		col++
 	}
 	return row, col, true
@@ -1154,10 +1182,18 @@ func (e *editor) ensureCursorVisible(innerW, innerH int) {
 		e.scrollCol = col
 	} else {
 		line := e.buf.Line(row)
+		cursorVisual := visualColumnForRune(line, col)
+		scrollVisual := visualColumnForRune(line, e.scrollCol)
 		for e.scrollCol < col {
-			cursorOut, ok := screenColForRune(line, e.scrollCol, col)
-			if !ok || cursorOut < innerW {
+			if cursorVisual-scrollVisual < innerW {
 				break
+			}
+			if e.scrollCol < len(line) {
+				if rw := editorRuneDisplayWidthAt(line[e.scrollCol], scrollVisual); rw > 0 {
+					scrollVisual += rw
+				}
+			} else {
+				scrollVisual++
 			}
 			e.scrollCol++
 		}

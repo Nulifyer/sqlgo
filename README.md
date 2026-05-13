@@ -65,7 +65,7 @@ No mouse required. No Electron. One binary.
     - `/regex/` -- regex match across all columns
 - **Word-wrap** toggle -- `w`
 - **Cell inspector** -- `↵` opens an overlay for the focused cell
-- **Clipboard** -- `y` copies cell, `Y` copies row, `Alt+A` copies the whole result set as TSV
+- **Clipboard** -- `y` copies cell, `Y` copies row, `Alt+A` copies all as TSV, `Alt+Shift+A` copies all as Markdown
 - **Export** -- CSV, TSV, JSON, and Markdown. Format is chosen from the output path extension.
 
 ### ⚡ Power Features
@@ -206,7 +206,7 @@ Open the command menu with `Ctrl+K` for global actions (connect, disconnect, his
 | | `Ctrl+E` | Export results |
 | | `↑` / `↓` / `←` / `→` / `PgUp` / `PgDn` / `Home` / `End` | Navigate cells |
 | | `↵` | Inspect cell |
-| | `y` / `Y` / `Alt+A` | Copy cell / row / all (TSV) |
+| | `y` / `Y` / `Alt+A` / `Alt+Shift+A` | Copy cell / row / all TSV / all Markdown |
 | | `s` | Cycle sort on column |
 | | `w` | Toggle word-wrap |
 | | `Left-click result tab` | Switch result set |

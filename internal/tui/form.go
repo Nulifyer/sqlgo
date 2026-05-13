@@ -557,6 +557,17 @@ func (fl *formLayer) HandleKey(a *app, k Key) {
 	}
 }
 
+func (fl *formLayer) HandleInput(a *app, msg InputMsg) bool {
+	p, ok := msg.(PasteMsg)
+	if !ok {
+		return false
+	}
+	wf := widget.Form{Fields: fl.f.allFields(), Active: fl.f.active}
+	consumed := wf.PasteText(p.Text)
+	fl.f.active = wf.Active
+	return consumed
+}
+
 // Hints: Save only shown when toConnection parses.
 func (fl *formLayer) Hints(a *app) string {
 	_ = a

@@ -203,7 +203,7 @@ func TestEditorDrawShowsControlRunes(t *testing.T) {
 	e := seedEditor("a\tb\x1bc\x7f")
 
 	buf, innerRow, bodyCol := drawEditorForTest(t, e)
-	want := []rune{'a', '\\', 't', 'b', '^', '[', 'c', '^', '?'}
+	want := []rune{'a', ' ', ' ', ' ', 'b', '^', '[', 'c', '^', '?'}
 	for off, r := range want {
 		if got := mustCellAt(t, buf, innerRow, bodyCol+off).R; got != r {
 			t.Fatalf("cell %d = %q, want %q", off, got, r)
@@ -215,7 +215,7 @@ func TestScreenColForRuneCountsVisibleControlWidth(t *testing.T) {
 	t.Parallel()
 	line := []rune("a\tb")
 
-	if got, ok := screenColForRune(line, 0, 2); !ok || got != 3 {
-		t.Fatalf("screen col after tab = (%d,%v), want (3,true)", got, ok)
+	if got, ok := screenColForRune(line, 0, 2); !ok || got != 4 {
+		t.Fatalf("screen col after tab = (%d,%v), want (4,true)", got, ok)
 	}
 }

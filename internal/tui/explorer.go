@@ -221,6 +221,21 @@ func (e *explorer) HandleSearchKey(k Key) bool {
 	return true
 }
 
+func (e *explorer) HandleSearchPaste(text string) bool {
+	if !e.searchActive || !e.searchFocused {
+		return false
+	}
+	if e.searchInput == nil {
+		e.searchInput = newInput("")
+	}
+	if e.searchInput.PasteText(text) {
+		e.cursor = 0
+		e.scroll = 0
+		e.rebuild()
+	}
+	return true
+}
+
 // isExpanded returns the effective expansion state for key: during
 // search everything is treated as expanded so matches deep in a
 // collapsed subtree still surface.

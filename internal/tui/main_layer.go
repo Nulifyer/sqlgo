@@ -103,10 +103,14 @@ func (m *mainLayer) View(a *app) View {
 func (m *mainLayer) HandleInput(a *app, msg InputMsg) bool {
 	switch v := msg.(type) {
 	case PasteMsg:
-		if m.focus == FocusQuery && v.Text != "" {
+		if m.focus == FocusExplorer && m.explorer.HandleSearchPaste(v.Text) {
+			return true
+		}
+		text := sanitizeEditorPasteText(v.Text)
+		if m.focus == FocusQuery && text != "" {
 			hadDetachedFrame := len(m.sessions) == 0
 			beforeRev := m.editor.buf.Revision()
-			m.editor.buf.InsertText(v.Text)
+			m.editor.buf.InsertText(text)
 			if m.editor.buf.Revision() != beforeRev {
 				m.editor.ClearErrorLocation()
 			}
@@ -116,6 +120,7 @@ func (m *mainLayer) HandleInput(a *app, msg InputMsg) bool {
 			m.promoteActiveIfPreview()
 			return true
 		}
+		return m.focus == FocusQuery
 	case MouseMsg:
 		return m.handleMouse(a, v)
 	}
@@ -623,13 +628,15 @@ func queryTabStripRect(q rect) rect {
 // Wraps the title in " " for spacing and brackets the active tab so it
 // still reads on terminals without color. A trailing "+" hint tab is
 // rendered separately by drawQueryTabs.
-func queryTabLabel(s *session, active bool) string {
+func queryTabLabel(s *session, active, needsDatabase bool) string {
 	title := s.title
 	if s.IsDirty() {
 		title = "● " + title
 	}
 	if s.activeCatalog != "" {
 		title = title + " (" + s.activeCatalog + ")"
+	} else if needsDatabase {
+		title = title + " (!)"
 	}
 	lbl := fmt.Sprintf(" %s ", title)
 	if active {
@@ -648,7 +655,7 @@ func (m *mainLayer) queryTabHits(r rect) []queryTabHit {
 	hits := make([]queryTabHit, 0, len(m.sessions))
 	col := r.Col
 	for i, s := range m.sessions {
-		lbl := queryTabLabel(s, i == m.activeTab)
+		lbl := queryTabLabel(s, i == m.activeTab, m.sessionNeedsDatabase(s))
 		remaining := r.Col + r.W - col
 		if remaining < 3 {
 			break
@@ -676,7 +683,7 @@ func (m *mainLayer) drawQueryTabs(c *cellbuf, r rect) {
 	}
 	for _, h := range m.queryTabHits(r) {
 		s := m.sessions[h.idx]
-		lbl := queryTabLabel(s, h.idx == m.activeTab)
+		lbl := queryTabLabel(s, h.idx == m.activeTab, m.sessionNeedsDatabase(s))
 		if len(lbl) > h.endCol-h.startCol+1 {
 			lbl = lbl[:h.endCol-h.startCol+1]
 		}
@@ -1284,14 +1291,20 @@ func (m *mainLayer) handleResultsKey(a *app, k Key) {
 		}
 		return
 	}
-	// Alt+A copies the entire visible (filtered + sorted) result set
-	// as TSV -- sibling of the cell-level 'y' and row-level 'Y'
-	// yanks. Alt-prefixed rather than Ctrl because Ctrl+Y is VDSUSP
-	// on BSD/macOS and can be swallowed by shell job control before
-	// reaching the raw tty.
-	if k.Alt && k.Kind == KeyRune && (k.Rune == 'a' || k.Rune == 'A') {
-		m.copyAllResults(a)
-		return
+	// Alt+A copies the entire visible (filtered + sorted) result set.
+	// Lowercase A keeps the spreadsheet-friendly TSV path; uppercase A
+	// (Alt+Shift+A in terminals) copies Markdown without the source query.
+	// Alt-prefixed rather than Ctrl because Ctrl+Y is VDSUSP on BSD/macOS
+	// and can be swallowed by shell job control before reaching the raw tty.
+	if k.Alt && k.Kind == KeyRune {
+		switch k.Rune {
+		case 'a':
+			m.copyAllResultsTSV(a)
+			return
+		case 'A':
+			m.copyAllResultsMarkdown(a)
+			return
+		}
 	}
 	if k.Kind != KeyRune || k.Ctrl || k.Alt {
 		return
@@ -1338,17 +1351,17 @@ func (m *mainLayer) handleResultsKey(a *app, k Key) {
 	}
 }
 
-// copyAllResults serializes the entire visible result buffer (after
-// filter + sort) as TSV and places it on the system clipboard. Sibling
-// of the cell-level 'y' and row-level 'Y' yanks; uses the shared
-// output.Write so the clipboard payload matches what the TSV
-// export-to-file path would produce.
-func (m *mainLayer) copyAllResults(a *app) {
+// copyAllResultsTSV serializes the entire visible result buffer (after
+// filter + sort) as clipboard-safe TSV and places it on the system
+// clipboard. Clipboard TSV must stay one physical line per row, so tabs
+// and line breaks inside cell text are flattened before serialization.
+func (m *mainLayer) copyAllResultsTSV(a *app) {
 	if !m.table.HasColumns() {
 		m.status = "nothing to copy"
 		return
 	}
 	cols, rows := m.table.Snapshot()
+	cols, rows = sanitizeClipboardTSV(cols, rows)
 	var buf bytes.Buffer
 	if err := output.Write(&buf, cols, rows, output.TSV); err != nil {
 		m.status = "copy all: " + err.Error()
@@ -1359,6 +1372,48 @@ func (m *mainLayer) copyAllResults(a *app) {
 		return
 	}
 	m.status = fmt.Sprintf("copied %d row(s) as TSV", len(rows))
+}
+
+func (m *mainLayer) copyAllResultsMarkdown(a *app) {
+	if !m.table.HasColumns() {
+		m.status = "nothing to copy"
+		return
+	}
+	cols, rows := m.table.Snapshot()
+	var buf bytes.Buffer
+	if err := output.Write(&buf, cols, rows, output.Markdown); err != nil {
+		m.status = "copy markdown: " + err.Error()
+		return
+	}
+	if err := a.clipboard.Copy(buf.String()); err != nil {
+		m.status = "copy markdown: " + err.Error()
+		return
+	}
+	m.status = fmt.Sprintf("copied %d row(s) as Markdown", len(rows))
+}
+
+func sanitizeClipboardTSV(cols []db.Column, rows [][]string) ([]db.Column, [][]string) {
+	outCols := make([]db.Column, len(cols))
+	for i, col := range cols {
+		outCols[i] = col
+		outCols[i].Name = sanitizeClipboardTSVCell(col.Name)
+	}
+	outRows := make([][]string, len(rows))
+	for i, row := range rows {
+		outRows[i] = make([]string, len(row))
+		for j, cell := range row {
+			outRows[i][j] = sanitizeClipboardTSVCell(cell)
+		}
+	}
+	return outCols, outRows
+}
+
+func sanitizeClipboardTSVCell(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\t", " ")
+	return s
 }
 
 // inErrorView reports whether the Results pane is currently showing the
@@ -1688,8 +1743,18 @@ func (m *mainLayer) explorerTitle(a *app) string {
 	title := "● " + a.activeConn.Name
 	if m.session != nil && m.session.activeCatalog != "" {
 		title += " [" + m.session.activeCatalog + "]"
+	} else if m.sessionNeedsDatabase(m.session) {
+		title += " [select DB]"
 	}
 	return title
+}
+
+func (m *mainLayer) sessionNeedsDatabase(s *session) bool {
+	return s != nil &&
+		s.activeCatalog == "" &&
+		m.explorer != nil &&
+		m.explorer.dbMode &&
+		len(m.explorer.databases) > 1
 }
 
 // statusText builds the footer line. Layout:
@@ -1796,6 +1861,7 @@ func (m *mainLayer) queryHints(a *app) string {
 	return joinHints(
 		"F1=help",
 		"Ctrl+Q=quit",
+		hintIf(m.sessionNeedsDatabase(m.session), "Alt+D=select DB"),
 		hintIf(connected && !running, "F5=run"),
 		hintIf(hasText, "Alt+F=format"),
 		hintIf(hasText || hasSource, "Ctrl+S=save"),
@@ -1825,6 +1891,8 @@ func (m *mainLayer) resultsHints(a *app) string {
 		hintIf(m.running, "Ctrl+C=cancel"),
 		hintIf(hasRows, "↵=inspect"),
 		hintIf(hasRows, "y=copy"),
+		hintIf(m.table.HasColumns(), "Alt+A=copy TSV"),
+		hintIf(m.table.HasColumns(), "Alt+Shift+A=copy MD"),
 		hintIf(m.table.HasColumns(), "Ctrl+E=export"),
 		"Ctrl+K=menu",
 	)

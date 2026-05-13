@@ -168,6 +168,17 @@ func (sl *saveLayer) HandleKey(a *app, k Key) {
 	}
 }
 
+func (sl *saveLayer) HandleInput(a *app, msg InputMsg) bool {
+	p, ok := msg.(PasteMsg)
+	if !ok {
+		return false
+	}
+	if sl.picker.PasteText(p.Text) {
+		sl.status = ""
+	}
+	return true
+}
+
 func (sl *saveLayer) save(a *app) {
 	name := strings.TrimSpace(sl.picker.NameInput.String())
 	if name == "" {

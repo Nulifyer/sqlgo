@@ -122,6 +122,15 @@ func (l *transportPickerLayer) HandleKey(a *app, k Key) {
 	l.picker.HandleQuery(k)
 }
 
+func (l *transportPickerLayer) HandleInput(a *app, msg InputMsg) bool {
+	p, ok := msg.(PasteMsg)
+	if !ok {
+		return false
+	}
+	l.picker.PasteQuery(p.Text)
+	return true
+}
+
 func (l *transportPickerLayer) Hints(a *app) string {
 	_ = a
 	return joinHints(

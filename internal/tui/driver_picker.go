@@ -101,6 +101,15 @@ func (l *driverPickerLayer) HandleKey(a *app, k Key) {
 	l.picker.HandleQuery(k)
 }
 
+func (l *driverPickerLayer) HandleInput(a *app, msg InputMsg) bool {
+	p, ok := msg.(PasteMsg)
+	if !ok {
+		return false
+	}
+	l.picker.PasteQuery(p.Text)
+	return true
+}
+
 func (l *driverPickerLayer) Hints(a *app) string {
 	_ = a
 	return joinHints(

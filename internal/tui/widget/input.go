@@ -37,6 +37,21 @@ func (i *Input) Insert(r rune) {
 	i.cur++
 }
 
+// PasteText inserts sanitized clipboard text into a single-line input.
+// Tabs and line breaks become a single space per run; other C0/C1
+// controls and DEL are dropped so they cannot leak into rendering.
+func (i *Input) PasteText(s string) bool {
+	rs := sanitizeInputPaste(s)
+	if len(rs) == 0 {
+		return false
+	}
+	i.runes = append(i.runes, make([]rune, len(rs))...)
+	copy(i.runes[i.cur+len(rs):], i.runes[i.cur:])
+	copy(i.runes[i.cur:], rs)
+	i.cur += len(rs)
+	return true
+}
+
 func (i *Input) Backspace() {
 	if i.cur == 0 {
 		return
@@ -98,6 +113,31 @@ func (i *Input) Handle(k term.Key) bool {
 		return true
 	}
 	return false
+}
+
+func sanitizeInputPaste(s string) []rune {
+	out := make([]rune, 0, len(s))
+	lastSpace := false
+	for _, r := range s {
+		switch r {
+		case '\t', '\n', '\r':
+			if !lastSpace {
+				out = append(out, ' ')
+				lastSpace = true
+			}
+			continue
+		}
+		if isPasteControl(r) {
+			continue
+		}
+		out = append(out, r)
+		lastSpace = r == ' '
+	}
+	return out
+}
+
+func isPasteControl(r rune) bool {
+	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
 }
 
 // DrawInput renders in's value at (row, col) within maxW runes,

@@ -35,6 +35,9 @@ func TestHelpContentUsesIconVocabulary(t *testing.T) {
 	if !helpHasEntry(lines, "Ctrl+F", "filter rows") {
 		t.Fatal("helpContent missing Results Ctrl+F filter binding")
 	}
+	if !helpHasEntry(lines, "Alt+Shift+A", "Markdown") {
+		t.Fatal("helpContent missing Alt+Shift+A Markdown copy binding")
+	}
 	if !helpHasEntry(lines, "Ctrl+␣", "autocomplete") {
 		t.Fatal("helpContent missing Ctrl+␣ autocomplete binding")
 	}
@@ -67,6 +70,36 @@ func TestHelpContentUsesIconVocabulary(t *testing.T) {
 	}
 }
 
+func TestHelpFilterKeepsSectionContext(t *testing.T) {
+	t.Parallel()
+
+	lines := filterHelpLines(helpContent(), "copy row")
+	if !helpHasSection(lines, "Results") {
+		t.Fatal("filtered help missing Results section")
+	}
+	if !helpHasEntry(lines, "y / Y", "copy cell / row") {
+		t.Fatal("filtered help missing matching row-copy binding")
+	}
+	if helpHasSection(lines, "Global") {
+		t.Fatal("filtered help kept unrelated Global section")
+	}
+}
+
+func TestHelpFilterSectionMatchShowsWholeSection(t *testing.T) {
+	t.Parallel()
+
+	lines := filterHelpLines(helpContent(), "query tabs")
+	if !helpHasSection(lines, "Query tabs") {
+		t.Fatal("filtered help missing matching Query tabs section")
+	}
+	if !helpHasEntry(lines, "Ctrl+T", "new tab") {
+		t.Fatal("section match did not keep Query tabs bindings")
+	}
+	if helpHasEntry(lines, "F5", "run query") {
+		t.Fatal("section match kept unrelated Query editor binding")
+	}
+}
+
 func TestDebugBindCatalogUsesIconVocabulary(t *testing.T) {
 	t.Parallel()
 
@@ -81,6 +114,7 @@ func TestDebugBindCatalogUsesIconVocabulary(t *testing.T) {
 		"Ctrl+K",
 		"Ctrl+␣",
 		"Alt+A",
+		"Alt+Shift+A",
 		"↵",
 		"⇥",
 		"⇤",
@@ -242,6 +276,7 @@ func TestREADMEUsesIconVocabulary(t *testing.T) {
 		"`↵` | Jump",
 		"`↵` | Save",
 		"`↵` | Inspect cell",
+		"`Alt+Shift+A`",
 		"`␣` | Toggle collapse node",
 		"`⇥` / `⇤` | Next / previous field",
 		"confirm run: `y` / `n` / `Esc` / `⇥` / `←` / `→` / `↵`",

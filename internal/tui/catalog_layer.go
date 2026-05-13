@@ -125,6 +125,19 @@ func (cl *catalogLayer) HandleKey(a *app, k Key) {
 	cl.refilter()
 }
 
+func (cl *catalogLayer) HandleInput(a *app, msg InputMsg) bool {
+	p, ok := msg.(PasteMsg)
+	if !ok {
+		return false
+	}
+	if cl.search.PasteText(p.Text) {
+		cl.list.Selected = 0
+		cl.list.Scroll = 0
+		cl.refilter()
+	}
+	return true
+}
+
 func (cl *catalogLayer) apply(a *app) {
 	if cl.list.Selected < 0 || cl.list.Selected >= len(cl.entries) {
 		return

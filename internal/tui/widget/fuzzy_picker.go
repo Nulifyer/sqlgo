@@ -138,3 +138,14 @@ func (fp *FuzzyPicker) HandleQuery(k term.Key) bool {
 	fp.Refilter()
 	return true
 }
+
+// PasteQuery inserts sanitized clipboard text into the query and refilters.
+func (fp *FuzzyPicker) PasteQuery(s string) bool {
+	if !fp.Query.PasteText(s) {
+		return false
+	}
+	fp.List.Selected = 0
+	fp.List.Scroll = 0
+	fp.Refilter()
+	return true
+}

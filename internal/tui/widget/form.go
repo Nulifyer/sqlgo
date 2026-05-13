@@ -131,6 +131,17 @@ func (f *Form) HandleKey(k term.Key) (submit bool) {
 	return false
 }
 
+// PasteText inserts sanitized clipboard text into the active editable
+// input field. Cyclers, display-only rows, and picker-trigger rows ignore
+// paste because free text would not map to their constrained values.
+func (f *Form) PasteText(s string) bool {
+	ff := f.ActiveField()
+	if ff == nil || ff.IsCycler() || ff.SwallowInput || ff.Display != nil {
+		return false
+	}
+	return ff.Input.PasteText(s)
+}
+
 // FormDrawOpts configures Form.Draw. Colors are passed in because the
 // widget package is theme-agnostic -- the caller supplies its palette.
 //

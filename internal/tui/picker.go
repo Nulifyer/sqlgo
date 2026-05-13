@@ -305,7 +305,7 @@ func (pl *pickerLayer) HandleInput(a *app, msg InputMsg) bool {
 
 // View enables mouse reporting while the picker is on top.
 func (pl *pickerLayer) View(a *app) View {
-	return View{AltScreen: true, MouseEnabled: true}
+	return View{AltScreen: true, MouseEnabled: true, PasteEnabled: true}
 }
 
 // setStatus lets the app poke feedback (e.g. "connecting...") at the

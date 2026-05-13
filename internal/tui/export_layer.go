@@ -178,6 +178,20 @@ func (el *exportLayer) HandleKey(a *app, k Key) {
 	}
 }
 
+func (el *exportLayer) HandleInput(a *app, msg InputMsg) bool {
+	if el.busy {
+		return false
+	}
+	p, ok := msg.(PasteMsg)
+	if !ok {
+		return false
+	}
+	if el.picker.PasteText(p.Text) {
+		el.status = ""
+	}
+	return true
+}
+
 func (el *exportLayer) save(a *app) {
 	m := a.mainLayerPtr()
 	if !m.table.HasColumns() {

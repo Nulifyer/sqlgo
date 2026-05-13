@@ -331,17 +331,29 @@ func (h *historyLayer) useSelected(a *app) {
 
 // View enables mouse reporting while history is on top.
 func (h *historyLayer) View(a *app) View {
-	return View{AltScreen: true, MouseEnabled: true}
+	return View{AltScreen: true, MouseEnabled: true, PasteEnabled: true}
 }
 
 // HandleInput routes mouse events: wheel scrolls the selection; left
 // click selects the row under the pointer; double-click applies it
 // (pastes SQL into the editor and closes).
 func (h *historyLayer) HandleInput(a *app, msg InputMsg) bool {
-	mm, ok := msg.(MouseMsg)
-	if !ok {
-		return false
+	switch v := msg.(type) {
+	case PasteMsg:
+		h.clearArmed = false
+		if h.search.PasteText(v.Text) {
+			h.list.Selected = 0
+			h.list.Scroll = 0
+			h.reload(a)
+		}
+		return true
+	case MouseMsg:
+		return h.handleMouseInput(a, v)
 	}
+	return false
+}
+
+func (h *historyLayer) handleMouseInput(a *app, mm MouseMsg) bool {
 	clicked, consumed := h.list.HandleMouse(mm)
 	if !consumed {
 		return false

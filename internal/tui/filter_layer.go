@@ -110,6 +110,18 @@ func (fl *filterLayer) HandleKey(a *app, k Key) {
 	}()
 }
 
+func (fl *filterLayer) HandleInput(a *app, msg InputMsg) bool {
+	p, ok := msg.(PasteMsg)
+	if !ok {
+		return false
+	}
+	if fl.input.PasteText(p.Text) {
+		fl.gen++
+		a.mainLayerPtr().table.SetFilter(fl.input.String())
+	}
+	return true
+}
+
 func (fl *filterLayer) Hints(a *app) string {
 	_ = a
 	return joinHints("type=filter", "↵=keep", "Esc=clear")

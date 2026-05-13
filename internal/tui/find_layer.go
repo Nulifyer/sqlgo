@@ -164,6 +164,27 @@ func (fl *findLayer) HandleKey(a *app, k Key) {
 	}
 }
 
+func (fl *findLayer) HandleInput(a *app, msg InputMsg) bool {
+	p, ok := msg.(PasteMsg)
+	if !ok {
+		return false
+	}
+	var target *input
+	if fl.activeField == findFieldFind {
+		target = fl.find
+	} else {
+		target = fl.replace
+	}
+	if !target.PasteText(p.Text) {
+		return true
+	}
+	fl.status = ""
+	if fl.activeField == findFieldFind {
+		a.mainLayerPtr().editor.SetSearch(fl.find.String())
+	}
+	return true
+}
+
 func (fl *findLayer) Hints(a *app) string {
 	_ = a
 	return joinHints(

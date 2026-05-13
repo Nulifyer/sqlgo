@@ -504,6 +504,33 @@ func (fp *FilePicker) HandleKey(k term.Key) FilePickerKeyResult {
 	return FilePickerKeyResult{}
 }
 
+// PasteText inserts sanitized clipboard text into the active editable
+// text field, if focus is currently on one.
+func (fp *FilePicker) PasteText(s string) bool {
+	switch fp.Focus {
+	case FocusDir:
+		before := fp.DirInput.String()
+		if fp.DirInput.PasteText(s) {
+			if fp.DirInput.String() != before {
+				fp.NotifyDirChange()
+			}
+			return true
+		}
+	case FocusInput:
+		before := fp.NameInput.String()
+		if fp.NameInput.PasteText(s) {
+			if fp.NameInput.String() != before {
+				fp.Guard.Reset()
+				if fp.Mode != ModeSaveTarget {
+					fp.Refilter()
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
 func (fp *FilePicker) focusOrder() []FilePickerFocus {
 	order := []FilePickerFocus{FocusDir, FocusList, FocusInput}
 	if len(fp.Choices) > 1 {

@@ -1,12 +1,20 @@
 package tui
 
+import (
+	"strings"
+
+	"github.com/Nulifyer/sqlgo/internal/search/fzfmatch"
+)
+
 // helpLayer is a modal overlay listing every keybind, grouped by
 // context (global / Query / Explorer / Results / Command menu). It is
 // opened by F1 from anywhere and closed by F1 or Esc. The contents
 // are a static table; when a binding changes it must be updated here
 // too.
 type helpLayer struct {
+	all    []helpLine
 	lines  []helpLine
+	search *input
 	scroll int
 }
 
@@ -18,7 +26,19 @@ type helpLine struct {
 }
 
 func newHelpLayer() *helpLayer {
-	return &helpLayer{lines: helpContent()}
+	hl := &helpLayer{all: helpContent(), search: newInput("")}
+	hl.refilter()
+	return hl
+}
+
+func (hl *helpLayer) refilter() {
+	hl.lines = filterHelpLines(hl.all, hl.search.String())
+	if hl.scroll >= len(hl.lines) {
+		hl.scroll = len(hl.lines) - 1
+	}
+	if hl.scroll < 0 {
+		hl.scroll = 0
+	}
 }
 
 func helpContent() []helpLine {
@@ -36,6 +56,9 @@ func helpContent() []helpLine {
 		blank,
 
 		section("Help overlay"),
+		bind("type", "search help"),
+		bind("Backspace / Delete", "edit search"),
+		bind("Ctrl+L", "clear search"),
 		bind("↑ / ↓ / PgUp / PgDn", "scroll"),
 		bind("Home / End", "scroll to top / bottom"),
 		bind("F1 / Esc", "close"),
@@ -140,6 +163,7 @@ func helpContent() []helpLine {
 		bind("↵", "inspect cell"),
 		bind("y / Y", "copy cell / row"),
 		bind("Alt+A", "copy all (TSV)"),
+		bind("Alt+Shift+A", "copy all (Markdown)"),
 		bind("s", "cycle sort"),
 		bind("w", "toggle wrap"),
 		bind("Left-click result tab", "switch result set"),
@@ -273,9 +297,25 @@ func (hl *helpLayer) Draw(a *app, c *cellbuf) {
 
 	innerCol := col + 3
 	innerW := boxW - 6
-	// Leave top padding (1), footer separator (1) and footer line (1).
-	bodyTop := row + 2
-	bodyH := boxH - 4
+
+	searchRow := row + 1
+	c.SetFg(colorTitleUnfocused)
+	c.WriteAt(searchRow, innerCol, "Search:")
+	c.ResetStyle()
+	searchCol := innerCol + 8
+	searchW := innerW - 8
+	if searchW < 1 {
+		searchW = 1
+	}
+	drawInput(c, hl.search, searchRow, searchCol, searchW)
+
+	dimStyle := Style{FG: ansiBrightBlack, BG: ansiDefaultBG}
+	c.WriteStyled(row+2, innerCol, truncate(repeatRune('-', innerW), innerW), dimStyle)
+
+	// Leave search row (1), separator (1), footer separator (1) and
+	// footer line (1), plus padding around the frame.
+	bodyTop := row + 3
+	bodyH := boxH - 6
 	if bodyH < 1 {
 		return
 	}
@@ -299,36 +339,39 @@ func (hl *helpLayer) Draw(a *app, c *cellbuf) {
 
 	headerStyle := Style{FG: ansiBrightCyan, BG: ansiDefaultBG, Attrs: attrBold}
 	keyStyle := Style{FG: ansiBrightYellow, BG: ansiDefaultBG}
-	dimStyle := Style{FG: ansiBrightBlack, BG: ansiDefaultBG}
 
-	for i := 0; i < bodyH; i++ {
-		idx := hl.scroll + i
-		if idx >= len(hl.lines) {
-			break
-		}
-		line := hl.lines[idx]
-		y := bodyTop + i
-		if line.key == "" && line.desc == "" {
-			continue
-		}
-		if line.key == "" {
-			// Section header: bold cyan title, then a dim underline of
-			// dashes the width of the title for a subtle separator.
-			c.WriteStyled(y, innerCol, truncate(line.desc, innerW), headerStyle)
-			continue
-		}
-		c.WriteStyled(y, innerCol, truncate(line.key, keyColW), keyStyle)
-		descCol := innerCol + keyColW + gap
-		descW := innerW - keyColW - gap
-		if descW > 0 {
-			c.WriteStyled(y, descCol, truncate(line.desc, descW), dimStyle)
+	if len(hl.lines) == 0 {
+		c.WriteStyled(bodyTop, innerCol, "(no matches)", dimStyle)
+	} else {
+		for i := 0; i < bodyH; i++ {
+			idx := hl.scroll + i
+			if idx >= len(hl.lines) {
+				break
+			}
+			line := hl.lines[idx]
+			y := bodyTop + i
+			if line.key == "" && line.desc == "" {
+				continue
+			}
+			if line.key == "" {
+				// Section header: bold cyan title, then a dim underline of
+				// dashes the width of the title for a subtle separator.
+				c.WriteStyled(y, innerCol, truncate(line.desc, innerW), headerStyle)
+				continue
+			}
+			c.WriteStyled(y, innerCol, truncate(line.key, keyColW), keyStyle)
+			descCol := innerCol + keyColW + gap
+			descW := innerW - keyColW - gap
+			if descW > 0 {
+				c.WriteStyled(y, descCol, truncate(line.desc, descW), dimStyle)
+			}
 		}
 	}
 
 	// Footer separator + status line.
 	sepRow := row + boxH - 3
 	c.WriteStyled(sepRow, innerCol, truncate(repeatRune('-', innerW), innerW), dimStyle)
-	status := "↑/↓/PgUp/PgDn=scroll  Home/End=top/bottom  F1/Esc=close"
+	status := "type=search  ↑/↓/PgUp/PgDn=scroll  Ctrl+L=clear  F1/Esc=close"
 	c.WriteAt(row+boxH-2, innerCol, truncate(status, innerW))
 }
 
@@ -348,22 +391,113 @@ func (hl *helpLayer) HandleKey(a *app, k Key) {
 	case KeyEsc, KeyF1:
 		a.popLayer()
 		return
+	case KeyRune:
+		if k.Ctrl && k.Rune == 'l' {
+			hl.search.SetString("")
+			hl.scroll = 0
+			hl.refilter()
+			return
+		}
 	case KeyUp:
 		hl.scroll--
+		return
 	case KeyDown:
 		hl.scroll++
+		return
 	case KeyPgUp:
 		hl.scroll -= 10
+		return
 	case KeyPgDn:
 		hl.scroll += 10
+		return
 	case KeyHome:
 		hl.scroll = 0
+		return
 	case KeyEnd:
 		hl.scroll = len(hl.lines)
+		return
 	}
+	if hl.search.Handle(k) {
+		hl.scroll = 0
+		hl.refilter()
+	}
+}
+
+func (hl *helpLayer) HandleInput(a *app, msg InputMsg) bool {
+	p, ok := msg.(PasteMsg)
+	if !ok {
+		return false
+	}
+	if hl.search.PasteText(p.Text) {
+		hl.scroll = 0
+		hl.refilter()
+	}
+	return true
 }
 
 func (hl *helpLayer) Hints(a *app) string {
 	_ = a
-	return joinHints("↑/↓/PgUp/PgDn=scroll", "Home/End=top/bottom", "F1/Esc=close")
+	return joinHints("type=search", "↑/↓/PgUp/PgDn=scroll", "Ctrl+L=clear", "F1/Esc=close")
+}
+
+func filterHelpLines(lines []helpLine, query string) []helpLine {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return append([]helpLine(nil), lines...)
+	}
+
+	var out []helpLine
+	for i := 0; i < len(lines); {
+		for i < len(lines) && lines[i].key == "" && lines[i].desc == "" {
+			i++
+		}
+		if i >= len(lines) {
+			break
+		}
+		if lines[i].key != "" {
+			if helpLineMatches(q, "", lines[i]) {
+				out = append(out, lines[i])
+			}
+			i++
+			continue
+		}
+
+		section := lines[i]
+		sectionName := section.desc
+		sectionMatches := helpLineMatches(q, "", section)
+		i++
+
+		var matches []helpLine
+		for i < len(lines) {
+			line := lines[i]
+			if line.key == "" && line.desc != "" {
+				break
+			}
+			i++
+			if line.key == "" && line.desc == "" {
+				continue
+			}
+			if sectionMatches || helpLineMatches(q, sectionName, line) {
+				matches = append(matches, line)
+			}
+		}
+		if len(matches) == 0 {
+			continue
+		}
+		if len(out) > 0 {
+			out = append(out, helpLine{})
+		}
+		out = append(out, section)
+		out = append(out, matches...)
+	}
+	return out
+}
+
+func helpLineMatches(query, section string, line helpLine) bool {
+	candidates := []string{line.key, line.desc}
+	if section != "" {
+		candidates = append(candidates, section+" "+line.key+" "+line.desc)
+	}
+	_, _, ok := fzfmatch.BestMatch(query, candidates...)
+	return ok
 }

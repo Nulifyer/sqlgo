@@ -92,6 +92,16 @@ func (gl *gotoLayer) HandleKey(a *app, k Key) {
 	gl.input.Handle(k)
 }
 
+func (gl *gotoLayer) HandleInput(a *app, msg InputMsg) bool {
+	p, ok := msg.(PasteMsg)
+	if !ok {
+		return false
+	}
+	gl.err = ""
+	gl.input.PasteText(p.Text)
+	return true
+}
+
 func (gl *gotoLayer) Hints(a *app) string {
 	_ = a
 	return joinHints("type=line[:col]", "↵=go", "Esc=cancel")
