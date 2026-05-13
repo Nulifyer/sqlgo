@@ -36,6 +36,22 @@ func TestBracketedPasteSingleMessage(t *testing.T) {
 	}
 }
 
+func TestBracketedPasteNestedStartMarkerStripped(t *testing.T) {
+	// Windows/ConPTY can expose a native bracketed paste and then batch
+	// the remaining queued paste bytes. If that batch gets wrapped again,
+	// the editor must not receive the inner control marker as text.
+	payload := "SELECT 1;"
+	raw := bracketedPasteStart + bracketedPasteStart + payload + bracketedPasteEnd + bracketedPasteEnd
+	got := readAll(t, raw, 1)
+	p, ok := got[0].(PasteMsg)
+	if !ok {
+		t.Fatalf("want PasteMsg, got %T", got[0])
+	}
+	if p.Text != payload {
+		t.Errorf("paste text = %q, want %q", p.Text, payload)
+	}
+}
+
 func TestOversizedBracketedPasteDrainsBeforeNextKey(t *testing.T) {
 	payload := strings.Repeat("x", 16*1024*1024+1)
 	raw := "\x1b[200~" + payload + "\x1b[201~z"

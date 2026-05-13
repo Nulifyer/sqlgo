@@ -32,9 +32,10 @@ func StdinReader() io.Reader {
 }
 
 type conInReader struct {
-	h    windows.Handle
-	wbuf [256]uint16
-	buf  []byte
+	h                      windows.Handle
+	wbuf                   [256]uint16
+	buf                    []byte
+	suppressPasteSynthesis bool
 }
 
 // pasteEventThreshold is the minimum number of key-down events that
@@ -48,7 +49,7 @@ func (c *conInReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if len(c.buf) == 0 {
+	if len(c.buf) == 0 && !c.suppressPasteSynthesis {
 		// ReadConsoleW often does not relay the terminal's ESC[200~
 		// brackets. When the console queue already looks paste-like,
 		// drain that queue directly and synthesize bracketed paste
@@ -73,6 +74,10 @@ func (c *conInReader) Read(p []byte) (int, error) {
 	n := copy(p, c.buf)
 	c.buf = c.buf[n:]
 	return n, nil
+}
+
+func (c *conInReader) setPasteSynthesisEnabled(enabled bool) {
+	c.suppressPasteSynthesis = !enabled
 }
 
 // pendingKeyCount returns the number of key-down events with
@@ -176,13 +181,8 @@ func (c *conInReader) readPasteBatch() []byte {
 	return wrapPasteBatch(string(runes))
 }
 
-const (
-	bracketedPasteStart = "\x1b[200~"
-	bracketedPasteEnd   = "\x1b[201~"
-)
-
 func wrapPasteBatch(content string) []byte {
-	if strings.HasPrefix(content, bracketedPasteStart) {
+	if strings.Contains(content, bracketedPasteStart) || strings.Contains(content, bracketedPasteEnd) {
 		return []byte(content)
 	}
 	return []byte(bracketedPasteStart + content + bracketedPasteEnd)

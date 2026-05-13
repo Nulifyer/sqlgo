@@ -3,6 +3,7 @@ package term
 import (
 	"bufio"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -57,11 +58,25 @@ type Key struct {
 // KeyReader decodes bytes from a terminal into Key events. It owns its
 // own buffered reader so escape sequences can be peeked.
 type KeyReader struct {
-	r *bufio.Reader
+	r          *bufio.Reader
+	pasteSynth pasteSynthesisController
 }
 
 func NewKeyReader(r io.Reader) *KeyReader {
-	return &KeyReader{r: bufio.NewReader(r)}
+	kr := &KeyReader{r: bufio.NewReader(r)}
+	if ps, ok := r.(pasteSynthesisController); ok {
+		kr.pasteSynth = ps
+	}
+	return kr
+}
+
+const (
+	bracketedPasteStart = "\x1b[200~"
+	bracketedPasteEnd   = "\x1b[201~"
+)
+
+type pasteSynthesisController interface {
+	setPasteSynthesisEnabled(enabled bool)
 }
 
 // Read blocks until the next input event is available. Returns one of
@@ -215,12 +230,16 @@ func (kr *KeyReader) readCSI() (InputMsg, error) {
 }
 
 // readPaste accumulates bytes until CSI 201~ (paste end) and returns
-// them as a single PasteMsg. Any CSI/escape bytes inside the paste are
-// passed through verbatim -- terminals that escape them do so before
-// bracketing, so the payload is the literal text the user copied.
+// them as a single PasteMsg. Most CSI/escape bytes inside the paste are
+// passed through verbatim; nested bracketed-paste controls are stripped
+// because they are terminal framing, not editor text.
 func (kr *KeyReader) readPaste() (InputMsg, error) {
+	if kr.pasteSynth != nil {
+		kr.pasteSynth.setPasteSynthesisEnabled(false)
+		defer kr.pasteSynth.setPasteSynthesisEnabled(true)
+	}
 	var buf []byte
-	const endSeq = "\x1b[201~"
+	const endSeq = bracketedPasteEnd
 	for {
 		b, err := kr.r.ReadByte()
 		if err != nil {
@@ -230,7 +249,7 @@ func (kr *KeyReader) readPaste() (InputMsg, error) {
 		// Fast path: check the tail of buf for the terminator.
 		if len(buf) >= len(endSeq) && string(buf[len(buf)-len(endSeq):]) == endSeq {
 			buf = buf[:len(buf)-len(endSeq)]
-			return PasteMsg{Text: string(buf)}, nil
+			return PasteMsg{Text: cleanPasteText(string(buf))}, nil
 		}
 		// Safety cap: 16 MB. A paste longer than that is almost
 		// certainly a wedged terminal; drop the partial, drain through
@@ -244,6 +263,15 @@ func (kr *KeyReader) readPaste() (InputMsg, error) {
 			return PasteMsg{}, nil
 		}
 	}
+}
+
+func cleanPasteText(s string) string {
+	if !strings.Contains(s, "\x1b[") {
+		return s
+	}
+	s = strings.ReplaceAll(s, bracketedPasteStart, "")
+	s = strings.ReplaceAll(s, bracketedPasteEnd, "")
+	return s
 }
 
 func (kr *KeyReader) discardPasteUntilEnd(buf []byte, endSeq string) error {
