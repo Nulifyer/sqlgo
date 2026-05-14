@@ -46,10 +46,11 @@ func (k completionKind) marker() string {
 
 // completionItem is one candidate shown in the popup.
 type completionItem struct {
-	text     string
-	kind     completionKind
-	typeHint string // column type, shown dim after text
-	loading  bool
+	text       string
+	insertText string
+	kind       completionKind
+	typeHint   string // column type, shown dim after text
+	loading    bool
 	// matches holds rune indices into text that matched the current
 	// fuzzy prefix. Populated by filterCompletions; used by
 	// drawComplete to highlight the matching runes. nil means "no
@@ -241,14 +242,38 @@ func (e *editor) acceptCompletion() {
 	if item.loading {
 		return
 	}
-	_, col := e.buf.Cursor()
-	toDelete := col - e.complete.startCol
+	row, col := e.buf.Cursor()
+	startCol := e.complete.startCol
+	text := item.text
+	if item.insertText != "" {
+		text = item.insertText
+	}
+	line := e.buf.Line(row)
+	if startCol > 0 && startCol <= len(line) {
+		open := line[startCol-1]
+		if completionTextStartsWithQuote(text, open) {
+			startCol--
+		}
+	}
+	toDelete := col - startCol
 	for i := 0; i < toDelete; i++ {
 		e.buf.Backspace()
 	}
-	e.buf.InsertText(item.text)
+	e.buf.InsertText(text)
 	e.ClearErrorLocation()
 	e.complete = nil
+}
+
+func completionTextStartsWithQuote(text string, open rune) bool {
+	switch open {
+	case '[':
+		return strings.HasPrefix(text, "[")
+	case '"':
+		return strings.HasPrefix(text, `"`)
+	case '`':
+		return strings.HasPrefix(text, "`")
+	}
+	return false
 }
 
 // filterCompletions keeps fuzzy (subsequence) matches, scored

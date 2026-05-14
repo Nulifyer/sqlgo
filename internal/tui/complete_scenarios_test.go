@@ -1177,6 +1177,42 @@ func TestScenarioInsertIntoShowsTables(t *testing.T) {
 	}
 }
 
+func TestScenarioAcceptTableCompletionQuotesUnsafeName(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE "order details" ("order id" INTEGER, plain TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, "SELECT * FROM order|")
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	e.acceptCompletion()
+	if got, want := e.buf.Text(), `SELECT * FROM "order details"`; got != want {
+		t.Fatalf("buffer = %q, want %q", got, want)
+	}
+}
+
+func TestScenarioAcceptColumnCompletionQuotesUnsafeName(t *testing.T) {
+	a, done := setupAppWithSchema(t,
+		`CREATE TABLE "order details" ("order id" INTEGER, plain TEXT)`,
+	)
+	defer done()
+
+	e := a.mainLayerPtr().editor
+	typeInto(e, `SELECT order| FROM "order details"`)
+	e.openCompletion(a)
+	if e.complete == nil {
+		t.Fatal("popup should open")
+	}
+	e.acceptCompletion()
+	if got, want := e.buf.Text(), `SELECT "order id" FROM "order details"`; got != want {
+		t.Fatalf("buffer = %q, want %q", got, want)
+	}
+}
+
 func TestScenarioInsertColumnListShowsTargetColumns(t *testing.T) {
 	a, done := setupAppWithSchema(t,
 		`CREATE TABLE users (id INTEGER, email TEXT, active INTEGER)`,

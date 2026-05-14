@@ -1626,11 +1626,23 @@ func (m *mainLayer) prefillSelectFromExplorer(a *app) {
 	if !ok {
 		return
 	}
+	if cols, ok := m.explorer.ColumnsForTable(t); ok {
+		m.openSelectPreviewFromExplorer(a, t, cols)
+		return
+	}
+	if a.conn != nil {
+		a.prefillSelectWithFetchedColumns(t)
+		return
+	}
+	m.openSelectPreviewFromExplorer(a, t, nil)
+}
+
+func (m *mainLayer) openSelectPreviewFromExplorer(a *app, t db.TableRef, cols []db.Column) {
 	var caps db.Capabilities
 	if a.conn != nil {
 		caps = a.conn.Capabilities()
 	}
-	sql := sqltok.Format(BuildSelect(caps, t, defaultSelectLimit))
+	sql := sqltok.Format(BuildSelectWithColumns(caps, t, cols, defaultSelectLimit))
 
 	// Reuse an existing preview tab if one is open, else spawn a new
 	// one. Permanent tabs are never clobbered.
@@ -1663,6 +1675,64 @@ func (m *mainLayer) prefillSelectFromExplorer(a *app) {
 	m.activeTab = prev
 	m.session = sess
 	m.focus = FocusQuery
+}
+
+func (a *app) prefillSelectWithFetchedColumns(t db.TableRef) {
+	m := a.mainLayerPtr()
+	if m == nil {
+		return
+	}
+	conn := a.conn
+	if conn == nil {
+		m.openSelectPreviewFromExplorer(a, t, nil)
+		return
+	}
+	fetch := func() ([]db.Column, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		defer cancel()
+		return fetchTableColumns(ctx, conn, t)
+	}
+	if a.asyncCh == nil {
+		cols, err := fetch()
+		if err != nil {
+			m.status = "columns: " + err.Error()
+			m.openSelectPreviewFromExplorer(a, t, nil)
+			return
+		}
+		m.explorer.SetTableColumns(t, cols)
+		m.openSelectPreviewFromExplorer(a, t, cols)
+		return
+	}
+	m.status = "loading columns for " + t.Name + " " + spinnerFrames[0]
+	done := make(chan struct{})
+	go runSpinner(a, done, func(a *app, frame string) {
+		if a.conn != conn {
+			return
+		}
+		if mm := a.mainLayerPtr(); mm != nil {
+			mm.status = "loading columns for " + t.Name + " " + frame
+		}
+	})
+	go func() {
+		cols, err := fetch()
+		close(done)
+		a.asyncCh <- func(a *app) {
+			if a.conn != conn {
+				return
+			}
+			mm := a.mainLayerPtr()
+			if mm == nil {
+				return
+			}
+			if err != nil {
+				mm.status = "columns: " + err.Error()
+				mm.openSelectPreviewFromExplorer(a, t, nil)
+				return
+			}
+			mm.explorer.SetTableColumns(t, cols)
+			mm.openSelectPreviewFromExplorer(a, t, cols)
+		}
+	}()
 }
 
 func (m *mainLayer) copyExplorerName(a *app) {
@@ -1702,12 +1772,7 @@ func (a *app) loadExplorerColumns(t db.TableRef) {
 	fetch := func() ([]db.Column, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		defer cancel()
-		if t.Catalog != "" {
-			if colr, ok := conn.(db.DatabaseColumner); ok {
-				return colr.ColumnsIn(ctx, t.Catalog, t)
-			}
-		}
-		return conn.Columns(ctx, t)
+		return fetchTableColumns(ctx, conn, t)
 	}
 	if a.asyncCh == nil {
 		cols, err := fetch()
@@ -1745,6 +1810,15 @@ func (a *app) loadExplorerColumns(t db.TableRef) {
 			mm.explorer.SetTableColumns(t, cols)
 		}
 	}()
+}
+
+func fetchTableColumns(ctx context.Context, conn db.Conn, t db.TableRef) ([]db.Column, error) {
+	if t.Catalog != "" {
+		if colr, ok := conn.(db.DatabaseColumner); ok {
+			return colr.ColumnsIn(ctx, t.Catalog, t)
+		}
+	}
+	return conn.Columns(ctx, t)
 }
 
 // promoteActiveIfPreview marks the active tab as permanent. Called after

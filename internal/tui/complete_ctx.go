@@ -1196,7 +1196,7 @@ func (a *app) gatherCompletionsCtx(ctx completionCtx) completionGatherResult {
 		items = append(items, a.schemaCandidates()...)
 		items = append(items, a.tableCandidates()...)
 		for _, c := range ctx.ctes {
-			items = append(items, completionItem{text: c.name, kind: completeTable})
+			items = append(items, a.identifierCompletion(c.name, completeTable))
 		}
 	case clauseAfterTableRef:
 		items = append(items, afterTableKeywordCandidates(a)...)
@@ -1255,7 +1255,7 @@ func (a *app) gatherQualified(ctx completionCtx) qualifiedCompletionResult {
 		}
 		out := make([]completionItem, 0, len(c.columns))
 		for _, col := range c.columns {
-			out = append(out, completionItem{text: col, kind: completeColumn})
+			out = append(out, a.identifierCompletion(col, completeColumn))
 		}
 		return qualifiedCompletionResult{status: qualifiedResolved, items: out, qualifierKind: qualifierCTE}
 	}
@@ -1273,7 +1273,7 @@ func (a *app) gatherQualified(ctx completionCtx) qualifiedCompletionResult {
 		if len(t.cols) > 0 {
 			out := make([]completionItem, 0, len(t.cols))
 			for _, col := range t.cols {
-				out = append(out, completionItem{text: col, kind: completeColumn})
+				out = append(out, a.identifierCompletion(col, completeColumn))
 			}
 			return qualifiedCompletionResult{status: qualifiedResolved, items: out, qualifierKind: qualifierScope}
 		}
@@ -1286,11 +1286,9 @@ func (a *app) gatherQualified(ctx completionCtx) qualifiedCompletionResult {
 		}
 		var items []completionItem
 		for _, c := range cols {
-			items = append(items, completionItem{
-				text:     c.Name,
-				kind:     completeColumn,
-				typeHint: c.TypeName,
-			})
+			it := a.identifierCompletion(c.Name, completeColumn)
+			it.typeHint = c.TypeName
+			items = append(items, it)
 		}
 		return qualifiedCompletionResult{status: qualifiedResolved, items: items, qualifierKind: qualifierScope}
 	}
@@ -1308,7 +1306,7 @@ func (a *app) gatherQualified(ctx completionCtx) qualifiedCompletionResult {
 		if t.Kind == db.TableKindView {
 			kind = completeView
 		}
-		items = append(items, completionItem{text: t.Name, kind: kind})
+		items = append(items, a.identifierCompletion(t.Name, kind))
 	}
 	if len(items) == 0 {
 		return qualifiedCompletionResult{}
@@ -1403,6 +1401,66 @@ func (a *app) functionCandidates() []completionItem {
 	return out
 }
 
+func (a *app) identifierCompletion(name string, kind completionKind) completionItem {
+	it := completionItem{text: name, kind: kind}
+	insert := quoteIdentifierIfNeeded(a.completionCaps(), name)
+	if insert != name {
+		it.insertText = insert
+	}
+	return it
+}
+
+func (a *app) qualifiedIdentifierCompletion(kind completionKind, parts ...string) completionItem {
+	display := strings.Join(parts, ".")
+	it := completionItem{text: display, kind: kind}
+	caps := a.completionCaps()
+	quoted := make([]string, len(parts))
+	changed := false
+	for i, part := range parts {
+		quoted[i] = quoteIdentifierIfNeeded(caps, part)
+		if quoted[i] != part {
+			changed = true
+		}
+	}
+	if changed {
+		it.insertText = strings.Join(quoted, ".")
+	}
+	return it
+}
+
+func (a *app) completionCaps() db.Capabilities {
+	if a != nil && a.conn != nil {
+		return a.conn.Capabilities()
+	}
+	return db.Capabilities{}
+}
+
+func quoteIdentifierIfNeeded(caps db.Capabilities, name string) string {
+	if isBareSQLIdentifier(name) && !sqltok.IsKeyword(name) {
+		return name
+	}
+	return quoteIdentifier(caps, name)
+}
+
+func isBareSQLIdentifier(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if i == 0 {
+			if r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+				continue
+			}
+			return false
+		}
+		if r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func (a *app) schemaCandidates() []completionItem {
 	tables := a.completionTables()
 	if len(tables) == 0 {
@@ -1418,7 +1476,7 @@ func (a *app) schemaCandidates() []completionItem {
 			continue
 		}
 		seen[t.Schema] = struct{}{}
-		out = append(out, completionItem{text: t.Schema, kind: completeSchema})
+		out = append(out, a.identifierCompletion(t.Schema, completeSchema))
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].text < out[j].text })
 	return out
@@ -1437,18 +1495,12 @@ func (a *app) tableCandidates() []completionItem {
 		if t.Kind == db.TableKindView {
 			kind = completeView
 		}
-		out = append(out, completionItem{text: t.Name, kind: kind})
+		out = append(out, a.identifierCompletion(t.Name, kind))
 		if t.Schema != "" {
-			out = append(out, completionItem{
-				text: t.Schema + "." + t.Name,
-				kind: kind,
-			})
+			out = append(out, a.qualifiedIdentifierCompletion(kind, t.Schema, t.Name))
 		}
 		if t.Catalog != "" && t.Schema != "" {
-			out = append(out, completionItem{
-				text: t.Catalog + "." + t.Schema + "." + t.Name,
-				kind: kind,
-			})
+			out = append(out, a.qualifiedIdentifierCompletion(kind, t.Catalog, t.Schema, t.Name))
 		}
 	}
 	return out
@@ -1463,13 +1515,13 @@ func (a *app) inScopeColumnCandidates(ctx completionCtx) []completionItem {
 		// Derived subquery-FROM: pre-parsed cols win.
 		if len(t.cols) > 0 {
 			for _, col := range t.cols {
-				out = append(out, completionItem{text: col, kind: completeColumn})
+				out = append(out, a.identifierCompletion(col, completeColumn))
 			}
 			continue
 		}
 		if cteCols, ok := ctx.lookupCTEColumns(t.name); ok {
 			for _, col := range cteCols {
-				out = append(out, completionItem{text: col, kind: completeColumn})
+				out = append(out, a.identifierCompletion(col, completeColumn))
 			}
 			continue
 		}
@@ -1479,11 +1531,9 @@ func (a *app) inScopeColumnCandidates(ctx completionCtx) []completionItem {
 			continue
 		}
 		for _, c := range cols {
-			out = append(out, completionItem{
-				text:     c.Name,
-				kind:     completeColumn,
-				typeHint: c.TypeName,
-			})
+			it := a.identifierCompletion(c.Name, completeColumn)
+			it.typeHint = c.TypeName
+			out = append(out, it)
 		}
 	}
 	return out
@@ -1507,12 +1557,12 @@ func (a *app) aliasCandidates(ctx completionCtx) []completionItem {
 		if t.alias != "" {
 			if _, ok := seen[t.alias]; !ok {
 				seen[t.alias] = struct{}{}
-				out = append(out, completionItem{text: t.alias, kind: completeAlias})
+				out = append(out, a.identifierCompletion(t.alias, completeAlias))
 			}
 		}
 		if _, ok := seen[t.name]; !ok {
 			seen[t.name] = struct{}{}
-			out = append(out, completionItem{text: t.name, kind: completeTable})
+			out = append(out, a.identifierCompletion(t.name, completeTable))
 		}
 	}
 	return out
@@ -1525,25 +1575,23 @@ func (a *app) targetColumnCandidates(ctx completionCtx) []completionItem {
 	if cteCols, ok := ctx.lookupCTEColumns(ctx.target.name); ok {
 		var out []completionItem
 		for _, col := range cteCols {
-			out = append(out, completionItem{text: col, kind: completeColumn})
+			out = append(out, a.identifierCompletion(col, completeColumn))
 		}
 		return out
 	}
 	if len(ctx.target.cols) > 0 {
 		var out []completionItem
 		for _, col := range ctx.target.cols {
-			out = append(out, completionItem{text: col, kind: completeColumn})
+			out = append(out, a.identifierCompletion(col, completeColumn))
 		}
 		return out
 	}
 	cols, _ := a.fetchColumnsFor(ctx.target, ctx.signature())
 	var out []completionItem
 	for _, c := range cols {
-		out = append(out, completionItem{
-			text:     c.Name,
-			kind:     completeColumn,
-			typeHint: c.TypeName,
-		})
+		it := a.identifierCompletion(c.Name, completeColumn)
+		it.typeHint = c.TypeName
+		out = append(out, it)
 	}
 	return out
 }

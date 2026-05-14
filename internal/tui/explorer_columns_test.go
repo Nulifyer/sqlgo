@@ -102,7 +102,7 @@ func TestExplorerColumnLoadUsesColumnsInForCatalog(t *testing.T) {
 func TestExplorerEnterOnTableStillPrefillsSelect(t *testing.T) {
 	t.Parallel()
 
-	conn := &explorerColumnConn{}
+	conn := &explorerColumnConn{cols: []db.Column{{Name: "order id", TypeName: "int"}, {Name: "name", TypeName: "text"}}}
 	m := newMainLayer()
 	a := &app{conn: conn, layers: []Layer{m}}
 	m.focus = FocusExplorer
@@ -114,8 +114,8 @@ func TestExplorerEnterOnTableStillPrefillsSelect(t *testing.T) {
 		t.Fatalf("focus = %v, want Query", m.focus)
 	}
 	got := m.editor.buf.Text()
-	if !strings.Contains(got, "SELECT TOP 100") || !strings.Contains(got, "[dbo].[orders]") {
-		t.Fatalf("editor SQL = %q, want SELECT preview", got)
+	if !strings.Contains(got, "SELECT TOP 100") || !strings.Contains(got, "[order id]") || !strings.Contains(got, "[name]") || !strings.Contains(got, "[dbo].[orders]") {
+		t.Fatalf("editor SQL = %q, want SELECT preview with quoted columns", got)
 	}
 }
 

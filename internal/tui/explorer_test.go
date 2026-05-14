@@ -400,6 +400,21 @@ func TestBuildSelectDriverSpecific(t *testing.T) {
 	}
 }
 
+func TestBuildSelectWithColumnsQuotesColumnNames(t *testing.T) {
+	t.Parallel()
+
+	caps := db.Capabilities{SchemaDepth: db.SchemaDepthSchemas, LimitSyntax: db.LimitSyntaxSelectTop, IdentifierQuote: '['}
+	got := BuildSelectWithColumns(caps, db.TableRef{Schema: "dbo", Name: "orders"}, []db.Column{
+		{Name: "order id"},
+		{Name: "select"},
+		{Name: "name"},
+	}, 100)
+	want := "SELECT TOP 100 [order id], [select], [name] FROM [dbo].[orders]"
+	if got != want {
+		t.Fatalf("BuildSelectWithColumns = %q, want %q", got, want)
+	}
+}
+
 // TestExplorerFlatSchemaOmitsSchemaHeader proves SchemaDepthFlat drops
 // the per-schema parent node entirely, emitting the Tables/Views
 // subgroups at the root so a SQLite connection doesn't show a stray

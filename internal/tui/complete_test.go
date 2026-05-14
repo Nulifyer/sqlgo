@@ -186,6 +186,25 @@ func TestEditorAcceptCompletionAfterDot(t *testing.T) {
 	}
 }
 
+func TestEditorAcceptCompletionReplacesStartedQuote(t *testing.T) {
+	t.Parallel()
+	e := newEditor()
+	for _, r := range `"ord` {
+		e.buf.Insert(r)
+	}
+	e.complete = &completionState{
+		startCol: 1,
+		prefix:   "ord",
+		items: []completionItem{
+			{text: "order details", insertText: `"order details"`, kind: completeTable},
+		},
+	}
+	e.acceptCompletion()
+	if got := e.buf.Text(); got != `"order details"` {
+		t.Errorf("buffer = %q, want quoted completion without duplicate opener", got)
+	}
+}
+
 // TestEditorCtrlSpaceOpensPopup drives the full handleInsert path
 // with a Ctrl+Space key, verifying the popup opens with a filtered
 // list that reflects the word under the cursor. We build a minimal

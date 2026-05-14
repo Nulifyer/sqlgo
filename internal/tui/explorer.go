@@ -589,6 +589,14 @@ func (e *explorer) hasColumnState(t db.TableRef) bool {
 	return e.columnInflight[key]
 }
 
+func (e *explorer) ColumnsForTable(t db.TableRef) ([]db.Column, bool) {
+	cols, ok := e.columns[tableColumnKey(t)]
+	if !ok {
+		return nil, false
+	}
+	return append([]db.Column(nil), cols...), true
+}
+
 func (e *explorer) MarkColumnInflight(t db.TableRef) bool {
 	key := tableColumnKey(t)
 	if e.columnInflight[key] {
@@ -1508,21 +1516,38 @@ func quoteChars(open rune) (string, string) {
 // the given table. The limit form (TOP vs LIMIT) and identifier quoting
 // both come from caps.
 func BuildSelect(caps db.Capabilities, t db.TableRef, limit int) string {
+	return BuildSelectWithColumns(caps, t, nil, limit)
+}
+
+func BuildSelectWithColumns(caps db.Capabilities, t db.TableRef, cols []db.Column, limit int) string {
 	// Strip catalog so scaffold reruns cleanly under whatever DB the
 	// tab's activeCatalog routes to via USE-prepend. Three-part names
 	// would pin the query to the source DB.
 	t.Catalog = ""
 	name := QualifiedName(caps, t)
+	selectList := "*"
+	if len(cols) > 0 {
+		parts := make([]string, 0, len(cols))
+		for _, col := range cols {
+			if col.Name == "" {
+				continue
+			}
+			parts = append(parts, quoteIdentifier(caps, col.Name))
+		}
+		if len(parts) > 0 {
+			selectList = strings.Join(parts, ", ")
+		}
+	}
 	// No trailing ';' — Sybase ASE rejects a bare ';' terminator in some
 	// contexts (Msg 102), and nothing here depends on it. The user adds
 	// one if chaining statements.
 	switch caps.LimitSyntax {
 	case db.LimitSyntaxSelectTop:
-		return "SELECT TOP " + itoa(limit) + " * FROM " + name
+		return "SELECT TOP " + itoa(limit) + " " + selectList + " FROM " + name
 	case db.LimitSyntaxFetchFirst:
-		return "SELECT * FROM " + name + " OFFSET 0 ROWS FETCH NEXT " + itoa(limit) + " ROWS ONLY"
+		return "SELECT " + selectList + " FROM " + name + " OFFSET 0 ROWS FETCH NEXT " + itoa(limit) + " ROWS ONLY"
 	default:
-		return "SELECT * FROM " + name + " LIMIT " + itoa(limit)
+		return "SELECT " + selectList + " FROM " + name + " LIMIT " + itoa(limit)
 	}
 }
 
