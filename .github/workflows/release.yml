@@ -26,14 +26,34 @@ jobs:
       - name: Run tests
         run: go test -tags sqlite_fts5 ./...
 
+      - name: Free release disk space
+        run: |
+          df -h
+          sudo rm -rf \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /usr/share/swift \
+            /opt/ghc \
+            /usr/local/.ghcup
+          docker system prune -af
+          df -h
+
       # goreleaser-cross bundles cgo cross toolchains (linux, windows
       # via mingw, darwin via osxcross) so mattn/go-sqlite3 builds for
       # every target. Pinned to a specific tag.
       - name: Run GoReleaser (cross)
         run: |
+          mkdir -p "${HOME}/go/pkg/mod" "${HOME}/.cache/go-build"
           docker run --rm --privileged \
+            --user "$(id -u):$(id -g)" \
             -v "${PWD}:/src" \
+            -v "${HOME}/go/pkg/mod:/tmp/gomodcache" \
+            -v "${HOME}/.cache/go-build:/tmp/gobuildcache" \
             -w /src \
+            -e HOME=/tmp \
+            -e GOMODCACHE=/tmp/gomodcache \
+            -e GOCACHE=/tmp/gobuildcache \
             -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
             ghcr.io/goreleaser/goreleaser-cross:v1.26 \
             release --clean
