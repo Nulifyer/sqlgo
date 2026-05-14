@@ -1060,8 +1060,8 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 }
 
 // handleExplorerKey processes keys when the Explorer panel is focused in
-// NORMAL mode. Up/Down move, Enter expands a schema, prefills a SELECT for
-// tables and views, or opens the DDL for routines/triggers. 's' always
+// NORMAL mode. Up/Down move, Space expands tree nodes, Enter prefills a
+// SELECT for tables/views or opens DDL for routines/triggers. 's' always
 // prefills a SELECT; 'e' opens the DDL for views/routines/triggers.
 func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 	// When the explorer's inline search bar is open, typed runes and
@@ -1093,8 +1093,11 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 			if cat, need := m.explorer.NeedsDatabaseLoad(); need {
 				a.loadDatabaseSchema(cat)
 			}
-		case itemSchema, itemSubgroup:
+		case itemDatabasesFolder, itemSchema, itemSubgroup, itemColumnFolder:
 			m.explorer.Toggle()
+			if t, need := m.explorer.NeedsColumnLoad(); need {
+				a.loadExplorerColumns(t)
+			}
 		case itemProcedure, itemFunction, itemTrigger:
 			m.editObjectFromExplorer(a)
 		default:
@@ -1104,8 +1107,20 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 	}
 	if k.Kind == KeyRune && !k.Ctrl {
 		switch k.Rune {
+		case ' ':
+			m.explorer.Toggle()
+			if cat, need := m.explorer.NeedsDatabaseLoad(); need {
+				a.loadDatabaseSchema(cat)
+			}
+			if t, need := m.explorer.NeedsColumnLoad(); need {
+				a.loadExplorerColumns(t)
+			}
+			return
 		case 's':
 			m.prefillSelectFromExplorer(a)
+			return
+		case 'y':
+			m.copyExplorerName(a)
 			return
 		case 'e':
 			switch m.explorer.SelectedKind() {
@@ -1114,6 +1129,12 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 			}
 			return
 		case 'R':
+			if m.explorer.dbMode {
+				if cat := m.explorer.CursorCatalog(); cat != "" {
+					a.loadDatabaseSchema(cat)
+					return
+				}
+			}
 			a.loadSchema()
 			return
 		case 'u':
@@ -1644,6 +1665,88 @@ func (m *mainLayer) prefillSelectFromExplorer(a *app) {
 	m.focus = FocusQuery
 }
 
+func (m *mainLayer) copyExplorerName(a *app) {
+	if a.clipboard == nil {
+		m.status = "copy name: clipboard unavailable"
+		return
+	}
+	var caps db.Capabilities
+	if a.conn != nil {
+		caps = a.conn.Capabilities()
+	}
+	name, ok := m.explorer.SelectedCopyName(caps)
+	if !ok || name == "" {
+		m.status = "copy name: select an object"
+		return
+	}
+	if err := a.clipboard.Copy(name); err != nil {
+		m.status = "copy name: " + err.Error()
+		return
+	}
+	m.status = "copied " + name
+}
+
+func (a *app) loadExplorerColumns(t db.TableRef) {
+	if a == nil {
+		return
+	}
+	m := a.mainLayerPtr()
+	if m == nil || a.conn == nil || t.Name == "" {
+		return
+	}
+	if !m.explorer.MarkColumnInflight(t) {
+		return
+	}
+	m.explorer.SetColumnLoading(t, spinnerFrames[0])
+	conn := a.conn
+	fetch := func() ([]db.Column, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		defer cancel()
+		if t.Catalog != "" {
+			if colr, ok := conn.(db.DatabaseColumner); ok {
+				return colr.ColumnsIn(ctx, t.Catalog, t)
+			}
+		}
+		return conn.Columns(ctx, t)
+	}
+	if a.asyncCh == nil {
+		cols, err := fetch()
+		if err != nil {
+			m.explorer.SetColumnError(t, err.Error())
+			return
+		}
+		m.explorer.SetTableColumns(t, cols)
+		return
+	}
+	done := make(chan struct{})
+	go runSpinner(a, done, func(a *app, frame string) {
+		if a.conn != conn {
+			return
+		}
+		if mm := a.mainLayerPtr(); mm != nil {
+			mm.explorer.SetColumnLoadingFrame(t, frame)
+		}
+	})
+	go func() {
+		cols, err := fetch()
+		close(done)
+		a.asyncCh <- func(a *app) {
+			if a.conn != conn {
+				return
+			}
+			mm := a.mainLayerPtr()
+			if mm == nil {
+				return
+			}
+			if err != nil {
+				mm.explorer.SetColumnError(t, err.Error())
+				return
+			}
+			mm.explorer.SetTableColumns(t, cols)
+		}
+	}()
+}
+
 // promoteActiveIfPreview marks the active tab as permanent. Called after
 // any real editor mutation so a user typing into a preview tab converts
 // it to a regular tab, matching VSCode's single-click preview promotion.
@@ -1818,15 +1921,15 @@ func (m *mainLayer) explorerHints(_ *app) string {
 	eHint := ""
 	if !searchFocused {
 		switch m.explorer.SelectedKind() {
-		case itemTable:
+		case itemTable, itemView:
 			enterHint = "↵=SELECT"
-		case itemView:
-			enterHint = "↵=SELECT"
-			eHint = "e=edit"
+			if m.explorer.SelectedKind() == itemView {
+				eHint = "e=edit"
+			}
 		case itemProcedure, itemFunction, itemTrigger:
 			enterHint = "↵=edit"
 			eHint = "e=edit"
-		case itemSchema, itemSubgroup:
+		case itemDatabasesFolder, itemDatabase, itemSchema, itemSubgroup, itemColumnFolder:
 			enterHint = "↵=expand"
 		}
 	}
@@ -1834,6 +1937,9 @@ func (m *mainLayer) explorerHints(_ *app) string {
 		"F1=help",
 		"Ctrl+Q=quit",
 		enterHint,
+		hintIf(!searchFocused, "␣=expand"),
+		hintIf(!searchFocused, "s=SELECT"),
+		hintIf(!searchFocused, "y=copy name"),
 		eHint,
 		hintIf(!searching, "Ctrl+F=search"),
 		hintIf(searching && !searchFocused, "Ctrl+F=edit query"),

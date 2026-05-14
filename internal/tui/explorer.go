@@ -12,9 +12,9 @@ import (
 // entry per visible row) lets us index the cursor with a plain int and makes
 // scrolling trivial: just clamp index+scroll.
 //
-// The tree has three levels: schema → subgroup (Tables/Views) → leaf. Each
-// level can be collapsed independently; expansion state lives on the parent
-// explorer's `expanded` map keyed by expansionKey(item).
+// The tree is flattened from database/schema/object/column metadata. Each
+// collapsible node keeps expansion state in the parent explorer's `expanded`
+// map keyed by its stable object path.
 type explorerItem struct {
 	kind       explorerItemKind
 	label      string        // display text WITHOUT the indent/marker
@@ -22,6 +22,7 @@ type explorerItem struct {
 	schemaName string        // owning schema (set for all kinds except itemDatabase)
 	subgroup   subgroupKind  // valid for itemSubgroup; also set on leaves so Toggle knows which group they belong to
 	table      db.TableRef   // valid only for itemTable / itemView
+	column     db.Column     // valid only for itemColumn
 	routine    db.RoutineRef // valid only for itemProcedure / itemFunction
 	trigger    db.TriggerRef // valid only for itemTrigger
 	suffix     string        // optional trailing hint (e.g. "(denied)", "AFTER INSERT on foo")
@@ -38,6 +39,9 @@ const (
 	itemFunction
 	itemTrigger
 	itemDatabase
+	itemDatabasesFolder
+	itemColumnFolder
+	itemColumn
 )
 
 // subgroupKind distinguishes the children a schema can have.
@@ -84,6 +88,8 @@ var allSubgroups = []subgroupKind{
 // uses the schemas-mode indent for its subgroups/leaves.
 const sysSchemaSentinel = "\x00sys"
 
+const databasesFolderKey = "\x05databases"
+
 // explorer renders a collapsible schema tree. Selection and scroll live on
 // the widget; the main layer reads them to know which table to prefill a
 // SELECT for.
@@ -121,14 +127,23 @@ type explorer struct {
 	dbSchemas map[string]*db.SchemaInfo // catalog -> loaded schema (absent == not yet fetched)
 	dbLoading map[string]string         // catalog -> current spinner frame while a fetch is in flight
 	dbErr     map[string]string         // catalog -> load error message
+
+	columns        map[string][]db.Column
+	columnLoading  map[string]string
+	columnErr      map[string]string
+	columnInflight map[string]bool
 }
 
 func newExplorer() *explorer {
 	return &explorer{
-		expanded:  map[string]bool{},
-		dbSchemas: map[string]*db.SchemaInfo{},
-		dbLoading: map[string]string{},
-		dbErr:     map[string]string{},
+		expanded:       map[string]bool{},
+		dbSchemas:      map[string]*db.SchemaInfo{},
+		dbLoading:      map[string]string{},
+		dbErr:          map[string]string{},
+		columns:        map[string][]db.Column{},
+		columnLoading:  map[string]string{},
+		columnErr:      map[string]string{},
+		columnInflight: map[string]bool{},
 	}
 }
 
@@ -141,6 +156,7 @@ func (e *explorer) ResetDatabases() {
 	e.dbSchemas = map[string]*db.SchemaInfo{}
 	e.dbLoading = map[string]string{}
 	e.dbErr = map[string]string{}
+	e.clearColumnState("")
 	e.expanded = map[string]bool{}
 	e.searchActive = false
 	e.searchFocused = false
@@ -257,6 +273,7 @@ func (e *explorer) SetSchema(info *db.SchemaInfo, depth db.SchemaDepth) {
 	e.depth = depth
 	e.err = ""
 	e.loading = ""
+	e.clearColumnState("")
 	e.cursor = 0
 	e.scroll = 0
 	if info != nil {
@@ -283,6 +300,8 @@ func (e *explorer) seedExpansion(catalog string, _ *db.SchemaInfo, _ db.SchemaDe
 //	db key:       "\x02" + catalog
 //	schema key:   "\x03" + catalog + "\x01" + schema
 //	subgroup key: "\x04" + catalog + "\x01" + schema + "\x00" + sg.label()
+//	table key:    "\x06" + catalog + "\x01" + schema + "\x01" + kind + "\x01" + name
+//	columns key:  "\x07" + catalog + "\x01" + schema + "\x01" + kind + "\x01" + name
 //
 // In single-DB mode catalog is the empty string.
 func dbExpansionKey(catalog string) string {
@@ -297,6 +316,18 @@ func subgroupExpansionKey(catalog, schema string, sg subgroupKind) string {
 	return "\x04" + catalog + "\x01" + schema + "\x00" + sg.label()
 }
 
+func tableExpansionKey(t db.TableRef) string {
+	return "\x06" + tableColumnKey(t)
+}
+
+func columnFolderExpansionKey(t db.TableRef) string {
+	return "\x07" + tableColumnKey(t)
+}
+
+func tableColumnKey(t db.TableRef) string {
+	return t.Catalog + "\x01" + t.Schema + "\x01" + string(rune(t.Kind)) + "\x01" + t.Name
+}
+
 // SetLoading shows an animated placeholder while a background schema
 // fetch is in flight. Called on the main goroutine before kicking off
 // the fetch so the user has immediate feedback. The initial frame is
@@ -307,6 +338,7 @@ func (e *explorer) SetLoading() {
 	e.loading = spinnerFrames[0]
 	e.info = nil
 	e.items = nil
+	e.clearColumnState("")
 	e.cursor = 0
 	e.scroll = 0
 }
@@ -344,6 +376,7 @@ func (e *explorer) SetDatabases(names []string) {
 	e.info = nil
 	e.err = ""
 	e.loading = ""
+	e.expanded[databasesFolderKey] = true
 	e.cursor = 0
 	e.scroll = 0
 	e.rebuild()
@@ -359,6 +392,7 @@ func (e *explorer) SetDatabaseSchema(catalog string, info *db.SchemaInfo) {
 	e.dbSchemas[catalog] = info
 	delete(e.dbLoading, catalog)
 	delete(e.dbErr, catalog)
+	e.clearColumnState(catalog)
 	e.rebuild()
 }
 
@@ -379,6 +413,7 @@ func (e *explorer) SetDatabaseLoading(catalog, frame string) {
 	} else {
 		e.dbLoading[catalog] = frame
 		delete(e.dbErr, catalog)
+		e.clearColumnState(catalog)
 	}
 	e.rebuild()
 }
@@ -391,6 +426,67 @@ func (e *explorer) SetDatabaseLoadingFrame(catalog, frame string) {
 		return
 	}
 	e.dbLoading[catalog] = frame
+	e.rebuild()
+}
+
+func (e *explorer) clearColumnState(catalog string) {
+	for key := range e.columns {
+		if catalog == "" || strings.HasPrefix(key, catalog+"\x01") {
+			delete(e.columns, key)
+		}
+	}
+	for key := range e.columnLoading {
+		if catalog == "" || strings.HasPrefix(key, catalog+"\x01") {
+			delete(e.columnLoading, key)
+		}
+	}
+	for key := range e.columnErr {
+		if catalog == "" || strings.HasPrefix(key, catalog+"\x01") {
+			delete(e.columnErr, key)
+		}
+	}
+	for key := range e.columnInflight {
+		if catalog == "" || strings.HasPrefix(key, catalog+"\x01") {
+			delete(e.columnInflight, key)
+		}
+	}
+}
+
+func (e *explorer) SetColumnLoading(t db.TableRef, frame string) {
+	key := tableColumnKey(t)
+	if frame == "" {
+		delete(e.columnLoading, key)
+	} else {
+		e.columnLoading[key] = frame
+		delete(e.columnErr, key)
+	}
+	e.rebuild()
+}
+
+func (e *explorer) SetColumnLoadingFrame(t db.TableRef, frame string) {
+	key := tableColumnKey(t)
+	if _, ok := e.columnLoading[key]; !ok {
+		return
+	}
+	e.columnLoading[key] = frame
+	e.rebuild()
+}
+
+func (e *explorer) SetTableColumns(t db.TableRef, cols []db.Column) {
+	key := tableColumnKey(t)
+	e.columns[key] = append([]db.Column(nil), cols...)
+	delete(e.columnLoading, key)
+	delete(e.columnErr, key)
+	delete(e.columnInflight, key)
+	e.rebuild()
+}
+
+func (e *explorer) SetColumnError(t db.TableRef, msg string) {
+	key := tableColumnKey(t)
+	e.columnErr[key] = msg
+	delete(e.columnLoading, key)
+	delete(e.columnInflight, key)
+	e.rebuild()
 }
 
 // SelectedDatabase returns the catalog name under the cursor when it's
@@ -443,6 +539,65 @@ func (e *explorer) NeedsDatabaseLoad() (string, bool) {
 	return cat, true
 }
 
+func (e *explorer) SelectedTableForColumns() (db.TableRef, bool) {
+	if e.cursor < 0 || e.cursor >= len(e.items) {
+		return db.TableRef{}, false
+	}
+	it := e.items[e.cursor]
+	switch it.kind {
+	case itemTable, itemView, itemColumnFolder:
+		return it.table, it.table.Name != ""
+	}
+	return db.TableRef{}, false
+}
+
+func (e *explorer) NeedsColumnLoad() (db.TableRef, bool) {
+	t, ok := e.SelectedTableForColumns()
+	if !ok {
+		return db.TableRef{}, false
+	}
+	if !e.expanded[tableExpansionKey(t)] || !e.expanded[columnFolderExpansionKey(t)] {
+		return db.TableRef{}, false
+	}
+	key := tableColumnKey(t)
+	if _, ok := e.columns[key]; ok {
+		return db.TableRef{}, false
+	}
+	if _, ok := e.columnErr[key]; ok {
+		return db.TableRef{}, false
+	}
+	if e.columnInflight[key] {
+		return db.TableRef{}, false
+	}
+	if _, ok := e.columnLoading[key]; ok {
+		return db.TableRef{}, false
+	}
+	return t, true
+}
+
+func (e *explorer) hasColumnState(t db.TableRef) bool {
+	key := tableColumnKey(t)
+	if _, ok := e.columns[key]; ok {
+		return true
+	}
+	if _, ok := e.columnLoading[key]; ok {
+		return true
+	}
+	if _, ok := e.columnErr[key]; ok {
+		return true
+	}
+	return e.columnInflight[key]
+}
+
+func (e *explorer) MarkColumnInflight(t db.TableRef) bool {
+	key := tableColumnKey(t)
+	if e.columnInflight[key] {
+		return false
+	}
+	e.columnInflight[key] = true
+	return true
+}
+
 // Selected returns the currently highlighted item, if any. ok==false means
 // the tree is empty, the cursor is on a schema header, or we're in an error
 // state — all cases where "run a SELECT" makes no sense.
@@ -491,6 +646,40 @@ func (e *explorer) SelectedKind() explorerItemKind {
 		return -1
 	}
 	return e.items[e.cursor].kind
+}
+
+func (e *explorer) SelectedCopyName(caps db.Capabilities) (string, bool) {
+	if e.cursor < 0 || e.cursor >= len(e.items) {
+		return "", false
+	}
+	it := e.items[e.cursor]
+	switch it.kind {
+	case itemDatabase:
+		return quoteIdentifier(caps, it.catalog), it.catalog != ""
+	case itemSchema:
+		if it.schemaName == "" || it.schemaName == sysSchemaSentinel {
+			return "", false
+		}
+		return quoteIdentifier(caps, it.schemaName), true
+	case itemTable, itemView:
+		return QualifiedName(caps, it.table), it.table.Name != ""
+	case itemProcedure, itemFunction:
+		if it.routine.Name == "" {
+			return "", false
+		}
+		return qualifiedParts(caps, it.catalog, it.routine.Schema, it.routine.Name), true
+	case itemTrigger:
+		if it.trigger.Name == "" {
+			return "", false
+		}
+		return qualifiedParts(caps, it.catalog, it.trigger.Schema, it.trigger.Name), true
+	case itemColumn:
+		if it.table.Name == "" || it.column.Name == "" {
+			return "", false
+		}
+		return QualifiedName(caps, it.table) + "." + quoteIdentifier(caps, it.column.Name), true
+	}
+	return "", false
 }
 
 // SelectedSchema returns the schema name under the cursor (either the schema
@@ -565,28 +754,41 @@ func (e *explorer) Toggle() {
 	it := e.items[e.cursor]
 	var key string
 	switch it.kind {
+	case itemDatabasesFolder:
+		key = databasesFolderKey
 	case itemDatabase:
 		key = dbExpansionKey(it.catalog)
 	case itemSchema:
 		key = schemaExpansionKey(it.catalog, it.schemaName)
 	case itemSubgroup:
 		key = subgroupExpansionKey(it.catalog, it.schemaName, it.subgroup)
+	case itemTable, itemView:
+		key = tableExpansionKey(it.table)
+	case itemColumnFolder:
+		key = columnFolderExpansionKey(it.table)
 	default:
 		return
 	}
 	e.expanded[key] = !e.expanded[key]
+	if (it.kind == itemTable || it.kind == itemView) && e.expanded[key] {
+		e.expanded[columnFolderExpansionKey(it.table)] = true
+	}
 
 	// Preserve the highlight across the rebuild.
 	targetKind := it.kind
 	targetCatalog := it.catalog
 	targetSchema := it.schemaName
 	targetSub := it.subgroup
+	targetTableKey := tableColumnKey(it.table)
 	e.rebuild()
 	for i, row := range e.items {
 		if row.kind != targetKind || row.catalog != targetCatalog || row.schemaName != targetSchema {
 			continue
 		}
 		if targetKind == itemSubgroup && row.subgroup != targetSub {
+			continue
+		}
+		if (targetKind == itemTable || targetKind == itemView || targetKind == itemColumnFolder) && tableColumnKey(row.table) != targetTableKey {
 			continue
 		}
 		e.cursor = i
@@ -616,36 +818,39 @@ func (e *explorer) Toggle() {
 func (e *explorer) rebuild() {
 	e.items = nil
 	if e.dbMode {
-		for _, name := range e.databases {
-			e.items = append(e.items, explorerItem{
-				kind:    itemDatabase,
-				label:   name,
-				catalog: name,
-			})
-			if !e.isExpanded(dbExpansionKey(name)) {
-				continue
-			}
-			if msg, ok := e.dbErr[name]; ok && msg != "" {
+		e.items = append(e.items, explorerItem{kind: itemDatabasesFolder, label: "Databases"})
+		if e.isExpanded(databasesFolderKey) {
+			for _, name := range e.databases {
 				e.items = append(e.items, explorerItem{
-					kind:    itemSubgroup, // reuse for indent; treated as informational
-					label:   "(error: " + msg + ")",
+					kind:    itemDatabase,
+					label:   name,
 					catalog: name,
 				})
-				continue
+				if !e.isExpanded(dbExpansionKey(name)) {
+					continue
+				}
+				if msg, ok := e.dbErr[name]; ok && msg != "" {
+					e.items = append(e.items, explorerItem{
+						kind:    itemSubgroup, // reuse for indent; treated as informational
+						label:   "(error: " + msg + ")",
+						catalog: name,
+					})
+					continue
+				}
+				if frame := e.dbLoading[name]; frame != "" {
+					e.items = append(e.items, explorerItem{
+						kind:    itemSubgroup,
+						label:   frame + " loading…",
+						catalog: name,
+					})
+					continue
+				}
+				info := e.dbSchemas[name]
+				if info == nil {
+					continue
+				}
+				e.emitSchemaTier(name, info, e.depth)
 			}
-			if frame := e.dbLoading[name]; frame != "" {
-				e.items = append(e.items, explorerItem{
-					kind:    itemSubgroup,
-					label:   frame + " loading…",
-					catalog: name,
-				})
-				continue
-			}
-			info := e.dbSchemas[name]
-			if info == nil {
-				continue
-			}
-			e.emitSchemaTier(name, info, e.depth)
 		}
 	} else if e.info != nil {
 		e.emitSchemaTier("", e.info, e.depth)
@@ -679,41 +884,80 @@ func (e *explorer) applySearchFilter() {
 	keep := make([]bool, len(e.items))
 
 	// First pass: row kept if it or any live ancestor matches.
-	dbMatch, schemaMatch, subMatch := false, false, false
+	dbFolderMatch, dbMatch, schemaMatch, subMatch, tableMatch, colFolderMatch := false, false, false, false, false, false
 	for i, it := range e.items {
 		lm := strings.Contains(normalizeExplorerSearchText(it.label), q)
 		switch it.kind {
+		case itemDatabasesFolder:
+			dbFolderMatch = lm
+			dbMatch = false
+			schemaMatch = false
+			subMatch = false
+			tableMatch = false
+			colFolderMatch = false
 		case itemDatabase:
 			dbMatch = lm
 			schemaMatch = false
 			subMatch = false
+			tableMatch = false
+			colFolderMatch = false
 		case itemSchema:
 			schemaMatch = lm
 			subMatch = false
+			tableMatch = false
+			colFolderMatch = false
 		case itemSubgroup:
 			subMatch = lm
+			tableMatch = false
+			colFolderMatch = false
+		case itemTable, itemView:
+			tableMatch = lm
+			colFolderMatch = false
+		case itemColumnFolder:
+			colFolderMatch = lm
 		}
-		if lm || dbMatch || schemaMatch || subMatch {
+		if lm || dbFolderMatch || dbMatch || schemaMatch || subMatch || tableMatch || colFolderMatch {
 			keep[i] = true
 		}
 	}
 
 	// Second pass: pull every kept row's ancestors into the result.
-	dbIdx, schemaIdx, subIdx := -1, -1, -1
+	dbFolderIdx, dbIdx, schemaIdx, subIdx, tableIdx, colFolderIdx := -1, -1, -1, -1, -1, -1
 	for i, it := range e.items {
 		switch it.kind {
+		case itemDatabasesFolder:
+			dbFolderIdx = i
+			dbIdx = -1
+			schemaIdx = -1
+			subIdx = -1
+			tableIdx = -1
+			colFolderIdx = -1
 		case itemDatabase:
 			dbIdx = i
 			schemaIdx = -1
 			subIdx = -1
+			tableIdx = -1
+			colFolderIdx = -1
 		case itemSchema:
 			schemaIdx = i
 			subIdx = -1
+			tableIdx = -1
+			colFolderIdx = -1
 		case itemSubgroup:
 			subIdx = i
+			tableIdx = -1
+			colFolderIdx = -1
+		case itemTable, itemView:
+			tableIdx = i
+			colFolderIdx = -1
+		case itemColumnFolder:
+			colFolderIdx = i
 		}
 		if !keep[i] {
 			continue
+		}
+		if dbFolderIdx >= 0 {
+			keep[dbFolderIdx] = true
 		}
 		if dbIdx >= 0 {
 			keep[dbIdx] = true
@@ -723,6 +967,12 @@ func (e *explorer) applySearchFilter() {
 		}
 		if subIdx >= 0 {
 			keep[subIdx] = true
+		}
+		if tableIdx >= 0 {
+			keep[tableIdx] = true
+		}
+		if colFolderIdx >= 0 {
+			keep[colFolderIdx] = true
 		}
 	}
 
@@ -884,6 +1134,52 @@ func (e *explorer) appendTableSubgroup(catalog, schema string, sg subgroupKind, 
 			schemaName: schema,
 			subgroup:   sg,
 			table:      t,
+		})
+		if e.isExpanded(tableExpansionKey(t)) && (!e.searchActive || e.hasColumnState(t)) {
+			e.appendColumnFolder(t, schema)
+		}
+	}
+}
+
+func (e *explorer) appendColumnFolder(t db.TableRef, schema string) {
+	e.items = append(e.items, explorerItem{
+		kind:       itemColumnFolder,
+		label:      "Columns",
+		catalog:    t.Catalog,
+		schemaName: schema,
+		table:      t,
+	})
+	if !e.isExpanded(columnFolderExpansionKey(t)) {
+		return
+	}
+	key := tableColumnKey(t)
+	if msg := e.columnErr[key]; msg != "" {
+		e.items = append(e.items, explorerItem{
+			kind:       itemSubgroup,
+			label:      "(error: " + msg + ")",
+			catalog:    t.Catalog,
+			schemaName: schema,
+		})
+		return
+	}
+	if frame := e.columnLoading[key]; frame != "" {
+		e.items = append(e.items, explorerItem{
+			kind:       itemSubgroup,
+			label:      frame + " loading columns…",
+			catalog:    t.Catalog,
+			schemaName: schema,
+		})
+		return
+	}
+	for _, col := range e.columns[key] {
+		e.items = append(e.items, explorerItem{
+			kind:       itemColumn,
+			label:      col.Name,
+			catalog:    t.Catalog,
+			schemaName: schema,
+			table:      t,
+			column:     col,
+			suffix:     col.TypeName,
 		})
 	}
 }
@@ -1070,15 +1366,21 @@ func (e *explorer) draw(c *cellbuf, r rect, focused bool) {
 func renderExplorerLine(it explorerItem, isExpanded func(string) bool) string {
 	dbIndent := ""
 	if it.catalog != "" && it.kind != itemDatabase {
-		dbIndent = "  "
+		dbIndent = "    "
 	}
 	switch it.kind {
+	case itemDatabasesFolder:
+		marker := "▸"
+		if isExpanded(databasesFolderKey) {
+			marker = "▾"
+		}
+		return marker + " " + it.label
 	case itemDatabase:
 		marker := "▸"
 		if isExpanded(dbExpansionKey(it.catalog)) {
 			marker = "▾"
 		}
-		return marker + " " + it.label
+		return "  " + marker + " " + it.label
 	case itemSchema:
 		marker := "▸"
 		if isExpanded(schemaExpansionKey(it.catalog, it.schemaName)) {
@@ -1100,13 +1402,23 @@ func renderExplorerLine(it explorerItem, isExpanded func(string) bool) string {
 			return dbIndent + marker + " " + it.label
 		}
 		return dbIndent + "  " + marker + " " + it.label
-	case itemTable, itemView, itemProcedure, itemFunction, itemTrigger:
+	case itemTable, itemView:
 		leaf := "· "
-		switch it.kind {
-		case itemView:
+		if it.kind == itemView {
 			leaf = "◇ "
-		case itemProcedure:
-			leaf = "λ "
+		}
+		marker := "▸ "
+		if isExpanded(tableExpansionKey(it.table)) {
+			marker = "▾ "
+		}
+		body := marker + leaf + it.label
+		if it.schemaName == "" {
+			return dbIndent + "  " + body
+		}
+		return dbIndent + "    " + body
+	case itemProcedure, itemFunction, itemTrigger:
+		leaf := "λ "
+		switch it.kind {
 		case itemFunction:
 			leaf = "ƒ "
 		case itemTrigger:
@@ -1117,9 +1429,27 @@ func renderExplorerLine(it explorerItem, isExpanded func(string) bool) string {
 			body += " " + it.suffix
 		}
 		if it.schemaName == "" {
-			return dbIndent + "    " + body
+			return dbIndent + "  " + body
 		}
-		return dbIndent + "      " + body
+		return dbIndent + "    " + body
+	case itemColumnFolder:
+		marker := "▸"
+		if isExpanded(columnFolderExpansionKey(it.table)) {
+			marker = "▾"
+		}
+		if it.schemaName == "" {
+			return dbIndent + "    " + marker + " " + it.label
+		}
+		return dbIndent + "      " + marker + " " + it.label
+	case itemColumn:
+		body := "- " + it.label
+		if it.suffix != "" {
+			body += " " + it.suffix
+		}
+		if it.schemaName == "" {
+			return dbIndent + "      " + body
+		}
+		return dbIndent + "        " + body
 	}
 	return it.label
 }
@@ -1129,24 +1459,33 @@ func renderExplorerLine(it explorerItem, isExpanded func(string) bool) string {
 // a new engine is just a matter of setting IdentifierQuote on its
 // capability struct — no string-switch on Name() here.
 func QualifiedName(caps db.Capabilities, t db.TableRef) string {
-	open, close := quoteChars(caps.IdentifierQuote)
-	q := func(s string) string {
-		// Double any embedded close char so an identifier containing ']'
-		// (MSSQL), '`' (MySQL) or '"' (ANSI) round-trips correctly
-		// instead of prematurely terminating the quoted form.
-		if strings.Contains(s, close) {
-			s = strings.ReplaceAll(s, close, close+close)
-		}
-		return open + s + close
-	}
 	parts := ""
 	if t.Catalog != "" {
-		parts = q(t.Catalog) + "."
+		parts = quoteIdentifier(caps, t.Catalog) + "."
 	}
 	if t.Schema == "" || caps.SchemaDepth == db.SchemaDepthFlat {
-		return parts + q(t.Name)
+		return parts + quoteIdentifier(caps, t.Name)
 	}
-	return parts + q(t.Schema) + "." + q(t.Name)
+	return parts + quoteIdentifier(caps, t.Schema) + "." + quoteIdentifier(caps, t.Name)
+}
+
+func qualifiedParts(caps db.Capabilities, catalog, schema, name string) string {
+	out := ""
+	if catalog != "" {
+		out += quoteIdentifier(caps, catalog) + "."
+	}
+	if schema != "" && caps.SchemaDepth != db.SchemaDepthFlat {
+		out += quoteIdentifier(caps, schema) + "."
+	}
+	return out + quoteIdentifier(caps, name)
+}
+
+func quoteIdentifier(caps db.Capabilities, name string) string {
+	open, close := quoteChars(caps.IdentifierQuote)
+	if strings.Contains(name, close) {
+		name = strings.ReplaceAll(name, close, close+close)
+	}
+	return open + name + close
 }
 
 // quoteChars returns the opening and closing identifier quote characters

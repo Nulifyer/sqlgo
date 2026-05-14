@@ -42,6 +42,50 @@ func TestExplorerBuildsTreeCollapsed(t *testing.T) {
 	}
 }
 
+func TestExplorerDatabasesFolderWrapsCrossDatabaseTree(t *testing.T) {
+	t.Parallel()
+
+	e := newExplorer()
+	e.SetDatabases([]string{"SqlgoA", "SqlgoB"})
+
+	want := []struct {
+		kind  explorerItemKind
+		label string
+	}{
+		{itemDatabasesFolder, "Databases"},
+		{itemDatabase, "SqlgoA"},
+		{itemDatabase, "SqlgoB"},
+	}
+	if len(e.items) != len(want) {
+		t.Fatalf("items len = %d, want %d: %+v", len(e.items), len(want), e.items)
+	}
+	for i, w := range want {
+		if e.items[i].kind != w.kind || e.items[i].label != w.label {
+			t.Errorf("items[%d] = (%d %q), want (%d %q)", i, e.items[i].kind, e.items[i].label, w.kind, w.label)
+		}
+	}
+
+	e.cursor = 0
+	e.Toggle()
+	if len(e.items) != 1 || e.items[0].kind != itemDatabasesFolder {
+		t.Fatalf("collapsed databases folder items = %+v, want folder only", e.items)
+	}
+}
+
+func TestExplorerDatabaseExpandStillRequestsLazySchemaLoad(t *testing.T) {
+	t.Parallel()
+
+	e := newExplorer()
+	e.SetDatabases([]string{"SqlgoA"})
+	e.cursor = 1
+	e.Toggle()
+
+	got, ok := e.NeedsDatabaseLoad()
+	if !ok || got != "SqlgoA" {
+		t.Fatalf("NeedsDatabaseLoad = %q/%v, want SqlgoA/true", got, ok)
+	}
+}
+
 func TestExplorerExpandsSchemaManually(t *testing.T) {
 	t.Parallel()
 	e := newExplorer()
@@ -75,6 +119,101 @@ func TestExplorerExpandsSchemaManually(t *testing.T) {
 		if e.items[i].kind != w.kind || e.items[i].label != w.label {
 			t.Errorf("items[%d] = (%d %q), want (%d %q)", i, e.items[i].kind, e.items[i].label, w.kind, w.label)
 		}
+	}
+}
+
+func TestExplorerTableExpansionRendersColumns(t *testing.T) {
+	t.Parallel()
+
+	e := newExplorer()
+	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
+	e.cursor = 0
+	e.Toggle() // dbo
+	e.cursor = 1
+	e.Toggle() // Tables
+	e.cursor = 2
+	e.Toggle() // orders
+	tbl := e.items[e.cursor].table
+	e.SetTableColumns(tbl, []db.Column{
+		{Name: "id", TypeName: "int"},
+		{Name: "name", TypeName: "nvarchar"},
+	})
+
+	want := []struct {
+		kind   explorerItemKind
+		label  string
+		suffix string
+	}{
+		{itemSchema, "dbo", ""},
+		{itemSubgroup, "Tables", ""},
+		{itemTable, "orders", ""},
+		{itemColumnFolder, "Columns", ""},
+		{itemColumn, "id", "int"},
+		{itemColumn, "name", "nvarchar"},
+		{itemTable, "users", ""},
+		{itemSubgroup, "Views", ""},
+		{itemSchema, "hr", ""},
+	}
+	if len(e.items) != len(want) {
+		t.Fatalf("items len = %d, want %d: %+v", len(e.items), len(want), e.items)
+	}
+	for i, w := range want {
+		if e.items[i].kind != w.kind || e.items[i].label != w.label || e.items[i].suffix != w.suffix {
+			t.Errorf("items[%d] = (%d %q %q), want (%d %q %q)", i, e.items[i].kind, e.items[i].label, e.items[i].suffix, w.kind, w.label, w.suffix)
+		}
+	}
+}
+
+func TestExplorerColumnErrorRendersChildRow(t *testing.T) {
+	t.Parallel()
+
+	e := newExplorer()
+	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
+	e.cursor = 0
+	e.Toggle()
+	e.cursor = 1
+	e.Toggle()
+	e.cursor = 2
+	e.Toggle()
+	tbl := e.items[e.cursor].table
+	e.SetColumnError(tbl, "permission denied")
+
+	found := false
+	for _, it := range e.items {
+		if it.label == "(error: permission denied)" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("column error row missing: %+v", e.items)
+	}
+}
+
+func TestExplorerDatabaseRefreshClearsLoadedColumns(t *testing.T) {
+	t.Parallel()
+
+	e := newExplorer()
+	e.SetDatabases([]string{"SqlgoA"})
+	e.depth = db.SchemaDepthSchemas
+	e.expanded[dbExpansionKey("SqlgoA")] = true
+	e.SetDatabaseSchema("SqlgoA", fixtureSchema())
+	e.cursor = 2 // dbo
+	e.Toggle()
+	e.cursor = 3 // Tables
+	e.Toggle()
+	e.cursor = 4 // orders
+	e.Toggle()
+	tbl := e.items[e.cursor].table
+	e.SetTableColumns(tbl, []db.Column{{Name: "id"}})
+	if len(e.columns) == 0 {
+		t.Fatal("expected loaded columns before refresh")
+	}
+
+	e.SetDatabaseLoading("SqlgoA", spinnerFrames[0])
+
+	if len(e.columns) != 0 {
+		t.Fatalf("columns after database refresh = %+v, want cleared", e.columns)
 	}
 }
 
@@ -385,5 +524,37 @@ func TestExplorerSearchMatchesSpacesAgainstUnderscores(t *testing.T) {
 	}
 	if !foundLeaf {
 		t.Fatalf("VECTOR_HITCOUNT not found in filtered items: %+v", e.items)
+	}
+}
+
+func TestExplorerSearchMatchesLoadedColumns(t *testing.T) {
+	t.Parallel()
+
+	e := newExplorer()
+	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
+	e.cursor = 0
+	e.Toggle()
+	e.cursor = 1
+	e.Toggle()
+	e.cursor = 2
+	e.Toggle()
+	tbl := e.items[e.cursor].table
+	e.SetTableColumns(tbl, []db.Column{{Name: "customer_id", TypeName: "int"}})
+	e.searchActive = true
+	e.searchInput = newInput("customer")
+	e.rebuild()
+
+	foundColumn := false
+	foundTable := false
+	for _, it := range e.items {
+		if it.kind == itemTable && it.label == "orders" {
+			foundTable = true
+		}
+		if it.kind == itemColumn && it.label == "customer_id" {
+			foundColumn = true
+		}
+	}
+	if !foundTable || !foundColumn {
+		t.Fatalf("filtered items missing table/column: %+v", e.items)
 	}
 }

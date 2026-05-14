@@ -51,9 +51,11 @@ No mouse required. No Electron. One binary.
 
 ### 🌳 Schema Explorer
 
-- Browse schemas, tables, and views
+- Browse databases, schemas, tables, views, routines, triggers, and table columns
 - `↵` or `s` on a table drops a driver-aware `SELECT ... LIMIT 100` into the editor
-- `R` refreshes the schema
+- `␣` expands databases, schemas, folders, and table columns
+- `y` copies a qualified object name
+- `R` refreshes the schema or selected database
 
 ### 📊 Results
 
@@ -192,11 +194,13 @@ Open the command menu with `Ctrl+K` for global actions (connect, disconnect, his
 | **Explorer** | `Ctrl+F` | Search object names |
 | | `Esc` | Close search |
 | | `↑` / `↓` / `PgUp` / `PgDn` | Move cursor |
-| | `↵` | SELECT table / view; expand schema / group; edit DDL for routines / triggers |
+| | `↵` | SELECT table / view; expand folders; edit DDL for routines / triggers |
+| | `␣` | Expand database / schema / group / table columns |
 | | `s` | Generate `SELECT` for table / view |
 | | `e` | Open DDL for view / routine / trigger |
+| | `y` | Copy qualified object name |
 | | `u` | Pin active database to cursor |
-| | `R` | Refresh schema |
+| | `R` | Refresh schema / database |
 | **Active database picker** | `type` | Filter databases |
 | | `↑` / `↓` | Move |
 | | `↵` | Use selected database |

@@ -38,6 +38,9 @@ func TestHelpContentUsesIconVocabulary(t *testing.T) {
 	if !helpHasEntry(lines, "Alt+Shift+A", "Markdown") {
 		t.Fatal("helpContent missing Alt+Shift+A Markdown copy binding")
 	}
+	if !helpHasEntry(lines, "y", "copy qualified object name") {
+		t.Fatal("helpContent missing Explorer copy-name binding")
+	}
 	if !helpHasEntry(lines, "Ctrl+␣", "autocomplete") {
 		t.Fatal("helpContent missing Ctrl+␣ autocomplete binding")
 	}
