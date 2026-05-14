@@ -31,7 +31,8 @@ type sqlOptions struct {
 	// one of "view", "procedure", "function", "trigger". Adapters return
 	// ErrDefinitionUnsupported for kinds they can't satisfy. Nil means the
 	// driver doesn't implement Definition at all.
-	DefinitionFetcher func(ctx context.Context, db *sql.DB, kind, schema, name string) (string, error)
+	DefinitionFetcher  func(ctx context.Context, db *sql.DB, kind, schema, name string) (string, error)
+	TableDesignFetcher func(ctx context.Context, q SQLQuerier, t TableRef) (TableDesign, error)
 
 	// ExplainRunner is an optional override that executes the engine's
 	// EXPLAIN flow end-to-end and returns the raw plan rows. When nil,
@@ -64,13 +65,18 @@ type sqlOptions struct {
 	DefaultDatabase string
 }
 
+// SQLQuerier is the subset of *sql.DB and *sql.Conn that profile metadata
+// loaders need. It is exported so driver profiles can supply richer metadata
+// fetchers without depending on database/sql concrete types.
+type SQLQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 // sqlQuerier is the subset of *sql.DB and *sql.Conn that the schema
 // loaders need. Lets SchemaForDatabase run the same queries against a
 // pinned *sql.Conn (so USE [db] state sticks) without duplicating the
 // loader logic.
-type sqlQuerier interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}
+type sqlQuerier = SQLQuerier
 
 func openSQL(ctx context.Context, sqlDB *sql.DB, opts sqlOptions) (Conn, error) {
 	if err := sqlDB.PingContext(ctx); err != nil {
@@ -267,20 +273,51 @@ func loadTriggersFrom(ctx context.Context, q sqlQuerier, query string) ([]Trigge
 // Columns runs ColumnsQuery or ColumnsBuilder. Returns nil when
 // neither is configured (no error).
 func (c *sqlConn) Columns(ctx context.Context, t TableRef) ([]Column, error) {
+	return columnsFrom(ctx, c.db, c.opts, t, "")
+}
+
+// ColumnsIn satisfies DatabaseColumner. Pins a *sql.Conn, applies
+// USE [database], then runs the driver's configured columns query on
+// the pinned conn so drivers whose query is session-scoped (MSSQL's
+// INFORMATION_SCHEMA.COLUMNS) return rows from the requested catalog
+// rather than the connection's login default.
+func (c *sqlConn) ColumnsIn(ctx context.Context, database string, t TableRef) ([]Column, error) {
+	if database == "" || c.opts.UseDatabaseStmt == nil {
+		return c.Columns(ctx, t)
+	}
+	useStmt := c.opts.UseDatabaseStmt(database)
+	if useStmt == "" {
+		return c.Columns(ctx, t)
+	}
+	conn, err := c.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("columns pin: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, useStmt); err != nil {
+		return nil, fmt.Errorf("columns use %q: %w", database, err)
+	}
+	return columnsFrom(ctx, conn, c.opts, t, database)
+}
+
+func columnsFrom(ctx context.Context, q sqlQuerier, opts sqlOptions, t TableRef, database string) ([]Column, error) {
 	var (
 		query string
 		args  []any
 	)
-	if c.opts.ColumnsBuilder != nil {
-		query, args = c.opts.ColumnsBuilder(t)
-	} else if c.opts.ColumnsQuery != "" {
-		query = c.opts.ColumnsQuery
+	if opts.ColumnsBuilder != nil {
+		query, args = opts.ColumnsBuilder(t)
+	} else if opts.ColumnsQuery != "" {
+		query = opts.ColumnsQuery
 		args = []any{t.Schema, t.Name}
 	} else {
 		return nil, nil
 	}
-	rows, err := c.db.QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
+		if database != "" {
+			return nil, fmt.Errorf("columns query %s.%s.%s: %w", database, t.Schema, t.Name, err)
+		}
 		return nil, fmt.Errorf("columns query %s.%s: %w", t.Schema, t.Name, err)
 	}
 	defer rows.Close()
@@ -301,59 +338,51 @@ func (c *sqlConn) Columns(ctx context.Context, t TableRef) ([]Column, error) {
 	return out, nil
 }
 
-// ColumnsIn satisfies DatabaseColumner. Pins a *sql.Conn, applies
-// USE [database], then runs the driver's configured columns query on
-// the pinned conn so drivers whose query is session-scoped (MSSQL's
-// INFORMATION_SCHEMA.COLUMNS) return rows from the requested catalog
-// rather than the connection's login default.
-func (c *sqlConn) ColumnsIn(ctx context.Context, database string, t TableRef) ([]Column, error) {
+func (c *sqlConn) TableDesign(ctx context.Context, t TableRef) (TableDesign, error) {
+	if c.opts.TableDesignFetcher != nil {
+		design, err := c.opts.TableDesignFetcher(ctx, c.db, t)
+		if err != nil {
+			return TableDesign{}, err
+		}
+		design.Table = t
+		return design, nil
+	}
+	cols, err := c.Columns(ctx, t)
+	if err != nil {
+		return TableDesign{}, err
+	}
+	return BasicTableDesign(t, cols), nil
+}
+
+func (c *sqlConn) TableDesignIn(ctx context.Context, database string, t TableRef) (TableDesign, error) {
 	if database == "" || c.opts.UseDatabaseStmt == nil {
-		return c.Columns(ctx, t)
+		return c.TableDesign(ctx, t)
 	}
 	useStmt := c.opts.UseDatabaseStmt(database)
 	if useStmt == "" {
-		return c.Columns(ctx, t)
-	}
-	var (
-		query string
-		args  []any
-	)
-	if c.opts.ColumnsBuilder != nil {
-		query, args = c.opts.ColumnsBuilder(t)
-	} else if c.opts.ColumnsQuery != "" {
-		query = c.opts.ColumnsQuery
-		args = []any{t.Schema, t.Name}
-	} else {
-		return nil, nil
+		return c.TableDesign(ctx, t)
 	}
 	conn, err := c.db.Conn(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("columns pin: %w", err)
+		return TableDesign{}, fmt.Errorf("table design pin: %w", err)
 	}
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, useStmt); err != nil {
-		return nil, fmt.Errorf("columns use %q: %w", database, err)
+		return TableDesign{}, fmt.Errorf("table design use %q: %w", database, err)
 	}
-	rows, err := conn.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("columns query %s.%s.%s: %w", database, t.Schema, t.Name, err)
-	}
-	defer rows.Close()
-	var out []Column
-	for rows.Next() {
-		var (
-			name    string
-			typeSQL sql.NullString
-		)
-		if err := rows.Scan(&name, &typeSQL); err != nil {
-			return nil, fmt.Errorf("columns scan: %w", err)
+	if c.opts.TableDesignFetcher != nil {
+		design, err := c.opts.TableDesignFetcher(ctx, conn, t)
+		if err != nil {
+			return TableDesign{}, err
 		}
-		out = append(out, Column{Name: name, TypeName: typeSQL.String})
+		design.Table = t
+		return design, nil
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("columns rows: %w", err)
+	cols, err := columnsFrom(ctx, conn, c.opts, t, database)
+	if err != nil {
+		return TableDesign{}, err
 	}
-	return out, nil
+	return BasicTableDesign(t, cols), nil
 }
 
 func (c *sqlConn) Definition(ctx context.Context, kind, schema, name string) (string, error) {

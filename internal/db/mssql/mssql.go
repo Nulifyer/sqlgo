@@ -99,6 +99,7 @@ var Profile = db.Profile{
 	IsPermissionDenied: isPermissionDenied,
 	DefinitionFetcher:  fetchDefinition,
 	ExplainRunner:      runExplain,
+	TableDesignFetcher: fetchTableDesign,
 	DatabaseListQuery:  databaseListQuery,
 	UseDatabaseStmt:    useDatabaseStmt,
 }
@@ -209,6 +210,93 @@ FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2
 ORDER BY ORDINAL_POSITION;
 `
+
+const tableDesignQuery = `
+SELECT
+	c.column_id,
+	c.name,
+	CASE
+		WHEN ty.name IN ('varchar','char','varbinary','binary') THEN ty.name + '(' + CASE WHEN c.max_length = -1 THEN 'max' ELSE CONVERT(varchar(10), c.max_length) END + ')'
+		WHEN ty.name IN ('nvarchar','nchar') THEN ty.name + '(' + CASE WHEN c.max_length = -1 THEN 'max' ELSE CONVERT(varchar(10), c.max_length / 2) END + ')'
+		WHEN ty.name IN ('decimal','numeric') THEN ty.name + '(' + CONVERT(varchar(10), c.[precision]) + ',' + CONVERT(varchar(10), c.scale) + ')'
+		WHEN ty.name IN ('datetime2','datetimeoffset','time') THEN ty.name + '(' + CONVERT(varchar(10), c.scale) + ')'
+		ELSE ty.name
+	END AS type_name,
+	c.is_nullable,
+	dc.definition,
+	c.is_identity,
+	c.is_computed,
+	CASE WHEN EXISTS (
+		SELECT 1
+		FROM sys.index_columns ic
+		JOIN sys.key_constraints kc
+			ON kc.parent_object_id = ic.object_id
+			AND kc.unique_index_id = ic.index_id
+			AND kc.type = 'PK'
+		WHERE ic.object_id = c.object_id AND ic.column_id = c.column_id
+	) THEN 1 ELSE 0 END AS is_pk,
+	CASE WHEN EXISTS (
+		SELECT 1
+		FROM sys.foreign_key_columns fkc
+		WHERE fkc.parent_object_id = c.object_id AND fkc.parent_column_id = c.column_id
+	) THEN 1 ELSE 0 END AS is_fk,
+	CASE WHEN EXISTS (
+		SELECT 1
+		FROM sys.index_columns ic
+		JOIN sys.key_constraints kc
+			ON kc.parent_object_id = ic.object_id
+			AND kc.unique_index_id = ic.index_id
+			AND kc.type = 'UQ'
+		WHERE ic.object_id = c.object_id AND ic.column_id = c.column_id
+	) THEN 1 ELSE 0 END AS is_unique
+FROM sys.columns c
+JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
+WHERE c.object_id = OBJECT_ID(CASE WHEN @p1 = '' THEN QUOTENAME(@p2) ELSE QUOTENAME(@p1) + '.' + QUOTENAME(@p2) END)
+ORDER BY c.column_id;
+`
+
+func fetchTableDesign(ctx context.Context, q db.SQLQuerier, t db.TableRef) (db.TableDesign, error) {
+	rows, err := q.QueryContext(ctx, tableDesignQuery, t.Schema, t.Name)
+	if err != nil {
+		return db.TableDesign{}, fmt.Errorf("table design %s.%s: %w", t.Schema, t.Name, err)
+	}
+	defer rows.Close()
+	var cols []db.ColumnDetail
+	for rows.Next() {
+		var (
+			ordinal                      int
+			name, typ                    string
+			nullable, identity, computed bool
+			pk, fk, unique               int
+			def                          sql.NullString
+		)
+		if err := rows.Scan(&ordinal, &name, &typ, &nullable, &def, &identity, &computed, &pk, &fk, &unique); err != nil {
+			return db.TableDesign{}, fmt.Errorf("table design scan: %w", err)
+		}
+		d := db.ColumnDetail{
+			Name:          name,
+			TypeName:      typ,
+			Ordinal:       ordinal,
+			NullableKnown: true,
+			Nullable:      nullable,
+			PrimaryKey:    pk != 0,
+			ForeignKey:    fk != 0,
+			Unique:        unique != 0,
+			Identity:      identity,
+			Computed:      computed,
+		}
+		if def.Valid {
+			d.DefaultKnown = true
+			d.Default = def.String
+		}
+		cols = append(cols, d)
+	}
+	if err := rows.Err(); err != nil {
+		return db.TableDesign{}, fmt.Errorf("table design rows: %w", err)
+	}
+	return db.TableDesign{Table: t, Columns: cols}, nil
+}
 
 // fetchDefinition returns runnable DDL for a view/procedure/function/trigger.
 // Uses OBJECT_DEFINITION(OBJECT_ID(...)) to retrieve the original CREATE text,

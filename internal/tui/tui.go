@@ -153,6 +153,12 @@ type app struct {
 	// goroutine racing the first. Cleared by the completion callback.
 	schemaLoading bool
 
+	// metadataBusy is set while a broad metadata operation, such as
+	// explorer deep-search column loading, is using the active Conn. The
+	// Conn contract requires serialized use, so query execution and other
+	// fresh metadata fetches wait until this clears.
+	metadataBusy bool
+
 	quit bool
 }
 
@@ -630,6 +636,7 @@ func (a *app) finishConnect(c config.Connection, conn db.Conn, tunnel *sshtunnel
 	}
 	a.conn = conn
 	a.tunnel = tunnel
+	a.metadataBusy = false
 	cc := c
 	a.activeConn = &cc
 	a.connErr = nil
@@ -680,6 +687,7 @@ func (a *app) disconnect() {
 	}
 	_ = a.conn.Close()
 	a.conn = nil
+	a.metadataBusy = false
 	// Close the tunnel after the db conn so any lingering reads on
 	// the forwarded socket get the driver's "closed" error first.
 	if a.tunnel != nil {
@@ -857,6 +865,10 @@ func (a *app) runQuery() {
 		sess.status = "no connection: press Ctrl+K then c to connect"
 		return
 	}
+	if a.metadataBusy {
+		sess.status = "metadata loading; try again when it finishes"
+		return
+	}
 	sql := strings.TrimSpace(sess.editor.buf.Text())
 	if sql == "" {
 		sess.status = "nothing to run"
@@ -917,6 +929,9 @@ func (a *app) runQueryUnsafe() {
 	if pre := a.catalogPreamble(sess); pre != "" {
 		sentSQL = pre + "\n" + sql
 		preambleLines = strings.Count(pre, "\n") + 1
+	}
+	if sess.preview {
+		sess.preview = false
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sess.cancel = cancel

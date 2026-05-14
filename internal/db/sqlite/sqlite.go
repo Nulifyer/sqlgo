@@ -51,7 +51,8 @@ var Profile = db.Profile{
 		q := "SELECT name, type FROM pragma_table_info(" + quoteSQLiteLiteral(t.Name) + ");"
 		return q, nil
 	},
-	DefinitionFetcher: fetchDefinition,
+	DefinitionFetcher:  fetchDefinition,
+	TableDesignFetcher: fetchTableDesign,
 }
 
 var SQLiteTransport = db.Transport{
@@ -134,6 +135,130 @@ func fetchDefinition(ctx context.Context, sqlDB *sql.DB, kind, schema, name stri
 	}
 	drop := fmt.Sprintf("DROP %s IF EXISTS \"%s\";\n", dropKw, strings.ReplaceAll(name, `"`, `""`))
 	return drop + strings.TrimRight(body.String, "\r\n\t ;") + ";", nil
+}
+
+func fetchTableDesign(ctx context.Context, q db.SQLQuerier, t db.TableRef) (db.TableDesign, error) {
+	_ = t.Schema
+	cols, err := fetchSQLiteColumnDetails(ctx, q, t.Name)
+	if err != nil {
+		return db.TableDesign{}, err
+	}
+	if len(cols) == 0 {
+		return db.TableDesign{Table: t}, nil
+	}
+	fkCols, err := sqliteForeignKeyColumns(ctx, q, t.Name)
+	if err != nil {
+		return db.TableDesign{}, err
+	}
+	uniqueCols, err := sqliteUniqueColumns(ctx, q, t.Name)
+	if err != nil {
+		return db.TableDesign{}, err
+	}
+	for i := range cols {
+		cols[i].ForeignKey = fkCols[cols[i].Name]
+		cols[i].Unique = uniqueCols[cols[i].Name]
+	}
+	return db.TableDesign{Table: t, Columns: cols}, nil
+}
+
+func fetchSQLiteColumnDetails(ctx context.Context, q db.SQLQuerier, table string) ([]db.ColumnDetail, error) {
+	rows, err := q.QueryContext(ctx, "SELECT cid, name, type, [notnull], dflt_value, pk, hidden FROM pragma_table_xinfo("+quoteSQLiteLiteral(table)+") ORDER BY cid;")
+	if err != nil {
+		return nil, fmt.Errorf("table_xinfo: %w", err)
+	}
+	defer rows.Close()
+	var out []db.ColumnDetail
+	for rows.Next() {
+		var (
+			cid, notNull, pk, hidden int
+			name, typ                string
+			def                      sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &def, &pk, &hidden); err != nil {
+			return nil, fmt.Errorf("table_xinfo scan: %w", err)
+		}
+		d := db.ColumnDetail{
+			Name:          name,
+			TypeName:      typ,
+			Ordinal:       cid + 1,
+			NullableKnown: true,
+			Nullable:      notNull == 0 && pk == 0,
+			PrimaryKey:    pk > 0,
+			Computed:      hidden == 2 || hidden == 3,
+		}
+		if def.Valid {
+			d.DefaultKnown = true
+			d.Default = def.String
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("table_xinfo rows: %w", err)
+	}
+	return out, nil
+}
+
+func sqliteForeignKeyColumns(ctx context.Context, q db.SQLQuerier, table string) (map[string]bool, error) {
+	rows, err := q.QueryContext(ctx, "SELECT [from] FROM pragma_foreign_key_list("+quoteSQLiteLiteral(table)+");")
+	if err != nil {
+		return nil, fmt.Errorf("foreign_key_list: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("foreign_key_list scan: %w", err)
+		}
+		out[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("foreign_key_list rows: %w", err)
+	}
+	return out, nil
+}
+
+func sqliteUniqueColumns(ctx context.Context, q db.SQLQuerier, table string) (map[string]bool, error) {
+	rows, err := q.QueryContext(ctx, "SELECT name, [unique] FROM pragma_index_list("+quoteSQLiteLiteral(table)+");")
+	if err != nil {
+		return nil, fmt.Errorf("index_list: %w", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		var unique int
+		if err := rows.Scan(&name, &unique); err != nil {
+			return nil, fmt.Errorf("index_list scan: %w", err)
+		}
+		if unique != 0 {
+			names = append(names, name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("index_list rows: %w", err)
+	}
+	out := map[string]bool{}
+	for _, name := range names {
+		idxRows, err := q.QueryContext(ctx, "SELECT name FROM pragma_index_info("+quoteSQLiteLiteral(name)+");")
+		if err != nil {
+			return nil, fmt.Errorf("index_info %s: %w", name, err)
+		}
+		for idxRows.Next() {
+			var col string
+			if err := idxRows.Scan(&col); err != nil {
+				_ = idxRows.Close()
+				return nil, fmt.Errorf("index_info scan: %w", err)
+			}
+			out[col] = true
+		}
+		if err := idxRows.Err(); err != nil {
+			_ = idxRows.Close()
+			return nil, fmt.Errorf("index_info rows: %w", err)
+		}
+		_ = idxRows.Close()
+	}
+	return out, nil
 }
 
 // buildDSN converts cfg into a sqlite DSN. cfg.Database is the

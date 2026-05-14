@@ -17,15 +17,19 @@ import (
 // map keyed by its stable object path.
 type explorerItem struct {
 	kind       explorerItemKind
-	label      string        // display text WITHOUT the indent/marker
-	catalog    string        // owning database for DB-tier mode; empty in single-DB mode
-	schemaName string        // owning schema (set for all kinds except itemDatabase)
-	subgroup   subgroupKind  // valid for itemSubgroup; also set on leaves so Toggle knows which group they belong to
-	table      db.TableRef   // valid only for itemTable / itemView
-	column     db.Column     // valid only for itemColumn
-	routine    db.RoutineRef // valid only for itemProcedure / itemFunction
-	trigger    db.TriggerRef // valid only for itemTrigger
-	suffix     string        // optional trailing hint (e.g. "(denied)", "AFTER INSERT on foo")
+	label      string          // display text WITHOUT the indent/marker
+	nodeKey    string          // stable identity for parent navigation
+	parentKey  string          // nodeKey of the visible parent, when any
+	expandKey  string          // non-empty for expandable rows
+	depth      int             // logical tree depth
+	catalog    string          // owning database for DB-tier mode; empty in single-DB mode
+	schemaName string          // owning schema (set for all kinds except itemDatabase)
+	subgroup   subgroupKind    // valid for itemSubgroup; also set on leaves so Toggle knows which group they belong to
+	table      db.TableRef     // valid only for itemTable / itemView
+	column     db.ColumnDetail // valid only for itemColumn
+	routine    db.RoutineRef   // valid only for itemProcedure / itemFunction
+	trigger    db.TriggerRef   // valid only for itemTrigger
+	suffix     string          // optional trailing hint (e.g. "(denied)", "AFTER INSERT on foo")
 }
 
 type explorerItemKind int
@@ -129,6 +133,7 @@ type explorer struct {
 	dbErr     map[string]string         // catalog -> load error message
 
 	columns        map[string][]db.Column
+	designs        map[string]db.TableDesign
 	columnLoading  map[string]string
 	columnErr      map[string]string
 	columnInflight map[string]bool
@@ -141,6 +146,7 @@ func newExplorer() *explorer {
 		dbLoading:      map[string]string{},
 		dbErr:          map[string]string{},
 		columns:        map[string][]db.Column{},
+		designs:        map[string]db.TableDesign{},
 		columnLoading:  map[string]string{},
 		columnErr:      map[string]string{},
 		columnInflight: map[string]bool{},
@@ -328,6 +334,25 @@ func tableColumnKey(t db.TableRef) string {
 	return t.Catalog + "\x01" + t.Schema + "\x01" + string(rune(t.Kind)) + "\x01" + t.Name
 }
 
+func rootParentKey(catalog string) string {
+	if catalog == "" {
+		return ""
+	}
+	return dbExpansionKey(catalog)
+}
+
+func columnNodeKey(t db.TableRef, name string) string {
+	return "\x08" + tableColumnKey(t) + "\x01" + name
+}
+
+func routineNodeKey(catalog string, r db.RoutineRef) string {
+	return "\x09" + catalog + "\x01" + r.Schema + "\x01" + string(rune(r.Kind)) + "\x01" + r.Name
+}
+
+func triggerNodeKey(catalog string, tr db.TriggerRef) string {
+	return "\x0a" + catalog + "\x01" + tr.Schema + "\x01" + tr.Table + "\x01" + tr.Name
+}
+
 // SetLoading shows an animated placeholder while a background schema
 // fetch is in flight. Called on the main goroutine before kicking off
 // the fetch so the user has immediate feedback. The initial frame is
@@ -435,6 +460,11 @@ func (e *explorer) clearColumnState(catalog string) {
 			delete(e.columns, key)
 		}
 	}
+	for key := range e.designs {
+		if catalog == "" || strings.HasPrefix(key, catalog+"\x01") {
+			delete(e.designs, key)
+		}
+	}
 	for key := range e.columnLoading {
 		if catalog == "" || strings.HasPrefix(key, catalog+"\x01") {
 			delete(e.columnLoading, key)
@@ -475,6 +505,18 @@ func (e *explorer) SetColumnLoadingFrame(t db.TableRef, frame string) {
 func (e *explorer) SetTableColumns(t db.TableRef, cols []db.Column) {
 	key := tableColumnKey(t)
 	e.columns[key] = append([]db.Column(nil), cols...)
+	e.designs[key] = db.BasicTableDesign(t, cols)
+	delete(e.columnLoading, key)
+	delete(e.columnErr, key)
+	delete(e.columnInflight, key)
+	e.rebuild()
+}
+
+func (e *explorer) SetTableDesign(t db.TableRef, design db.TableDesign) {
+	key := tableColumnKey(t)
+	design.Table = t
+	e.designs[key] = design
+	e.columns[key] = db.ColumnsFromDesign(design)
 	delete(e.columnLoading, key)
 	delete(e.columnErr, key)
 	delete(e.columnInflight, key)
@@ -484,6 +526,7 @@ func (e *explorer) SetTableColumns(t db.TableRef, cols []db.Column) {
 func (e *explorer) SetColumnError(t db.TableRef, msg string) {
 	key := tableColumnKey(t)
 	e.columnErr[key] = msg
+	delete(e.designs, key)
 	delete(e.columnLoading, key)
 	delete(e.columnInflight, key)
 	e.rebuild()
@@ -595,6 +638,57 @@ func (e *explorer) ColumnsForTable(t db.TableRef) ([]db.Column, bool) {
 		return nil, false
 	}
 	return append([]db.Column(nil), cols...), true
+}
+
+func (e *explorer) TableDesignForTable(t db.TableRef) (db.TableDesign, bool) {
+	design, ok := e.designs[tableColumnKey(t)]
+	if !ok {
+		return db.TableDesign{}, false
+	}
+	design.Columns = append([]db.ColumnDetail(nil), design.Columns...)
+	return design, true
+}
+
+func (e *explorer) TablesForDeepSearch(limit int) []db.TableRef {
+	if limit <= 0 {
+		limit = 250
+	}
+	out := make([]db.TableRef, 0)
+	seen := map[string]bool{}
+	addInfo := func(catalog string, info *db.SchemaInfo) {
+		if info == nil || len(out) >= limit {
+			return
+		}
+		for _, t := range info.Tables {
+			if len(out) >= limit {
+				return
+			}
+			if catalog != "" {
+				t.Catalog = catalog
+			}
+			if t.Kind != db.TableKindTable && t.Kind != db.TableKindView {
+				continue
+			}
+			key := tableColumnKey(t)
+			if seen[key] || e.hasColumnState(t) {
+				continue
+			}
+			seen[key] = true
+			out = append(out, t)
+		}
+	}
+	if e.dbMode {
+		if cat := e.CursorCatalog(); cat != "" {
+			addInfo(cat, e.dbSchemas[cat])
+			return out
+		}
+		for _, cat := range e.databases {
+			addInfo(cat, e.dbSchemas[cat])
+		}
+		return out
+	}
+	addInfo("", e.info)
+	return out
 }
 
 func (e *explorer) MarkColumnInflight(t db.TableRef) bool {
@@ -760,21 +854,8 @@ func (e *explorer) Toggle() {
 		return
 	}
 	it := e.items[e.cursor]
-	var key string
-	switch it.kind {
-	case itemDatabasesFolder:
-		key = databasesFolderKey
-	case itemDatabase:
-		key = dbExpansionKey(it.catalog)
-	case itemSchema:
-		key = schemaExpansionKey(it.catalog, it.schemaName)
-	case itemSubgroup:
-		key = subgroupExpansionKey(it.catalog, it.schemaName, it.subgroup)
-	case itemTable, itemView:
-		key = tableExpansionKey(it.table)
-	case itemColumnFolder:
-		key = columnFolderExpansionKey(it.table)
-	default:
+	key := it.expandKey
+	if key == "" {
 		return
 	}
 	e.expanded[key] = !e.expanded[key]
@@ -782,25 +863,61 @@ func (e *explorer) Toggle() {
 		e.expanded[columnFolderExpansionKey(it.table)] = true
 	}
 
-	// Preserve the highlight across the rebuild.
-	targetKind := it.kind
-	targetCatalog := it.catalog
-	targetSchema := it.schemaName
-	targetSub := it.subgroup
-	targetTableKey := tableColumnKey(it.table)
+	e.rebuildKeepingNode(it)
+}
+
+func (e *explorer) ExpandOrMoveToChild() {
+	if e.cursor < 0 || e.cursor >= len(e.items) {
+		return
+	}
+	it := e.items[e.cursor]
+	if it.expandKey != "" && !e.expanded[it.expandKey] {
+		e.expanded[it.expandKey] = true
+		if it.kind == itemTable || it.kind == itemView {
+			e.expanded[columnFolderExpansionKey(it.table)] = true
+		}
+		e.rebuildKeepingNode(it)
+		return
+	}
+	for i := e.cursor + 1; i < len(e.items); i++ {
+		if e.items[i].parentKey == it.nodeKey {
+			e.cursor = i
+			return
+		}
+		if e.items[i].depth <= it.depth {
+			return
+		}
+	}
+}
+
+func (e *explorer) CollapseOrMoveToParent() {
+	if e.cursor < 0 || e.cursor >= len(e.items) {
+		return
+	}
+	it := e.items[e.cursor]
+	if it.expandKey != "" && e.expanded[it.expandKey] && !e.searchActive {
+		e.expanded[it.expandKey] = false
+		e.rebuildKeepingNode(it)
+		return
+	}
+	if it.parentKey == "" {
+		return
+	}
+	for i := e.cursor - 1; i >= 0; i-- {
+		if e.items[i].nodeKey == it.parentKey {
+			e.cursor = i
+			return
+		}
+	}
+}
+
+func (e *explorer) rebuildKeepingNode(target explorerItem) {
 	e.rebuild()
 	for i, row := range e.items {
-		if row.kind != targetKind || row.catalog != targetCatalog || row.schemaName != targetSchema {
-			continue
+		if row.nodeKey == target.nodeKey {
+			e.cursor = i
+			return
 		}
-		if targetKind == itemSubgroup && row.subgroup != targetSub {
-			continue
-		}
-		if (targetKind == itemTable || targetKind == itemView || targetKind == itemColumnFolder) && tableColumnKey(row.table) != targetTableKey {
-			continue
-		}
-		e.cursor = i
-		return
 	}
 }
 
@@ -826,30 +943,46 @@ func (e *explorer) Toggle() {
 func (e *explorer) rebuild() {
 	e.items = nil
 	if e.dbMode {
-		e.items = append(e.items, explorerItem{kind: itemDatabasesFolder, label: "Databases"})
+		e.items = append(e.items, explorerItem{
+			kind:      itemDatabasesFolder,
+			label:     "Databases",
+			nodeKey:   databasesFolderKey,
+			expandKey: databasesFolderKey,
+			depth:     0,
+		})
 		if e.isExpanded(databasesFolderKey) {
 			for _, name := range e.databases {
 				e.items = append(e.items, explorerItem{
-					kind:    itemDatabase,
-					label:   name,
-					catalog: name,
+					kind:      itemDatabase,
+					label:     name,
+					nodeKey:   dbExpansionKey(name),
+					parentKey: databasesFolderKey,
+					expandKey: dbExpansionKey(name),
+					depth:     1,
+					catalog:   name,
 				})
 				if !e.isExpanded(dbExpansionKey(name)) {
 					continue
 				}
 				if msg, ok := e.dbErr[name]; ok && msg != "" {
 					e.items = append(e.items, explorerItem{
-						kind:    itemSubgroup, // reuse for indent; treated as informational
-						label:   "(error: " + msg + ")",
-						catalog: name,
+						kind:      itemSubgroup, // reuse for indent; treated as informational
+						label:     "(error: " + msg + ")",
+						nodeKey:   dbExpansionKey(name) + "\x00err",
+						parentKey: dbExpansionKey(name),
+						depth:     2,
+						catalog:   name,
 					})
 					continue
 				}
 				if frame := e.dbLoading[name]; frame != "" {
 					e.items = append(e.items, explorerItem{
-						kind:    itemSubgroup,
-						label:   frame + " loading…",
-						catalog: name,
+						kind:      itemSubgroup,
+						label:     frame + " loading…",
+						nodeKey:   dbExpansionKey(name) + "\x00loading",
+						parentKey: dbExpansionKey(name),
+						depth:     2,
+						catalog:   name,
 					})
 					continue
 				}
@@ -1087,13 +1220,18 @@ func (e *explorer) emitSchemaTier(catalog string, info *db.SchemaInfo, depth db.
 		emit("", merged)
 	} else {
 		for _, s := range schemas {
+			key := schemaExpansionKey(catalog, s)
 			e.items = append(e.items, explorerItem{
 				kind:       itemSchema,
 				label:      s,
+				nodeKey:    key,
+				parentKey:  rootParentKey(catalog),
+				expandKey:  key,
+				depth:      1,
 				catalog:    catalog,
 				schemaName: s,
 			})
-			if !e.isExpanded(schemaExpansionKey(catalog, s)) {
+			if !e.isExpanded(key) {
 				continue
 			}
 			emit(s, buckets[s])
@@ -1104,13 +1242,18 @@ func (e *explorer) emitSchemaTier(catalog string, info *db.SchemaInfo, depth db.
 		len(sysBucket.procedures)+len(sysBucket.functions)+
 		len(sysBucket.triggers) > 0
 	if sysNonEmpty {
+		key := schemaExpansionKey(catalog, sysSchemaSentinel)
 		e.items = append(e.items, explorerItem{
 			kind:       itemSchema,
 			label:      "Sys",
+			nodeKey:    key,
+			parentKey:  rootParentKey(catalog),
+			expandKey:  key,
+			depth:      1,
 			catalog:    catalog,
 			schemaName: sysSchemaSentinel,
 		})
-		if e.isExpanded(schemaExpansionKey(catalog, sysSchemaSentinel)) {
+		if e.isExpanded(key) {
 			emit(sysSchemaSentinel, sysBucket)
 		}
 	}
@@ -1120,14 +1263,25 @@ func (e *explorer) appendTableSubgroup(catalog, schema string, sg subgroupKind, 
 	if len(entries) == 0 {
 		return
 	}
+	key := subgroupExpansionKey(catalog, schema, sg)
+	parent := rootParentKey(catalog)
+	depth := 1
+	if schema != "" {
+		parent = schemaExpansionKey(catalog, schema)
+		depth = 2
+	}
 	e.items = append(e.items, explorerItem{
 		kind:       itemSubgroup,
 		label:      sg.label(),
+		nodeKey:    key,
+		parentKey:  parent,
+		expandKey:  key,
+		depth:      depth,
 		catalog:    catalog,
 		schemaName: schema,
 		subgroup:   sg,
 	})
-	if !e.isExpanded(subgroupExpansionKey(catalog, schema, sg)) {
+	if !e.isExpanded(key) {
 		return
 	}
 	for _, t := range entries {
@@ -1135,9 +1289,14 @@ func (e *explorer) appendTableSubgroup(catalog, schema string, sg subgroupKind, 
 		if t.Kind == db.TableKindView {
 			leafKind = itemView
 		}
+		tableKey := tableExpansionKey(t)
 		e.items = append(e.items, explorerItem{
 			kind:       leafKind,
 			label:      t.Name,
+			nodeKey:    tableKey,
+			parentKey:  key,
+			expandKey:  tableKey,
+			depth:      depth + 1,
 			catalog:    catalog,
 			schemaName: schema,
 			subgroup:   sg,
@@ -1150,44 +1309,68 @@ func (e *explorer) appendTableSubgroup(catalog, schema string, sg subgroupKind, 
 }
 
 func (e *explorer) appendColumnFolder(t db.TableRef, schema string) {
+	key := columnFolderExpansionKey(t)
+	depth := 3
+	if schema != "" {
+		depth = 4
+	}
 	e.items = append(e.items, explorerItem{
 		kind:       itemColumnFolder,
 		label:      "Columns",
+		nodeKey:    key,
+		parentKey:  tableExpansionKey(t),
+		expandKey:  key,
+		depth:      depth,
 		catalog:    t.Catalog,
 		schemaName: schema,
 		table:      t,
 	})
-	if !e.isExpanded(columnFolderExpansionKey(t)) {
+	if !e.isExpanded(key) {
 		return
 	}
-	key := tableColumnKey(t)
-	if msg := e.columnErr[key]; msg != "" {
+	tableKey := tableColumnKey(t)
+	if msg := e.columnErr[tableKey]; msg != "" {
 		e.items = append(e.items, explorerItem{
 			kind:       itemSubgroup,
 			label:      "(error: " + msg + ")",
+			nodeKey:    key + "\x00err",
+			parentKey:  key,
+			depth:      depth + 1,
 			catalog:    t.Catalog,
 			schemaName: schema,
 		})
 		return
 	}
-	if frame := e.columnLoading[key]; frame != "" {
+	if frame := e.columnLoading[tableKey]; frame != "" {
 		e.items = append(e.items, explorerItem{
 			kind:       itemSubgroup,
 			label:      frame + " loading columns…",
+			nodeKey:    key + "\x00loading",
+			parentKey:  key,
+			depth:      depth + 1,
 			catalog:    t.Catalog,
 			schemaName: schema,
 		})
 		return
 	}
-	for _, col := range e.columns[key] {
+	details := e.designs[tableKey].Columns
+	if len(details) == 0 {
+		for i, col := range e.columns[tableKey] {
+			details = append(details, db.ColumnDetail{Name: col.Name, TypeName: col.TypeName, Ordinal: i + 1})
+		}
+	}
+	for _, col := range details {
 		e.items = append(e.items, explorerItem{
 			kind:       itemColumn,
 			label:      col.Name,
+			nodeKey:    columnNodeKey(t, col.Name),
+			parentKey:  key,
+			depth:      depth + 1,
 			catalog:    t.Catalog,
 			schemaName: schema,
 			table:      t,
 			column:     col,
-			suffix:     col.TypeName,
+			suffix:     columnExplorerSuffix(col),
 		})
 	}
 }
@@ -1196,14 +1379,25 @@ func (e *explorer) appendRoutineSubgroup(catalog, schema string, sg subgroupKind
 	if len(entries) == 0 {
 		return
 	}
+	key := subgroupExpansionKey(catalog, schema, sg)
+	parent := rootParentKey(catalog)
+	depth := 1
+	if schema != "" {
+		parent = schemaExpansionKey(catalog, schema)
+		depth = 2
+	}
 	e.items = append(e.items, explorerItem{
 		kind:       itemSubgroup,
 		label:      sg.label(),
+		nodeKey:    key,
+		parentKey:  parent,
+		expandKey:  key,
+		depth:      depth,
 		catalog:    catalog,
 		schemaName: schema,
 		subgroup:   sg,
 	})
-	if !e.isExpanded(subgroupExpansionKey(catalog, schema, sg)) {
+	if !e.isExpanded(key) {
 		return
 	}
 	leafKind := itemFunction
@@ -1218,6 +1412,9 @@ func (e *explorer) appendRoutineSubgroup(catalog, schema string, sg subgroupKind
 		e.items = append(e.items, explorerItem{
 			kind:       leafKind,
 			label:      r.Name,
+			nodeKey:    routineNodeKey(catalog, r),
+			parentKey:  key,
+			depth:      depth + 1,
 			catalog:    catalog,
 			schemaName: schema,
 			subgroup:   sg,
@@ -1231,14 +1428,25 @@ func (e *explorer) appendTriggerSubgroup(catalog, schema string, entries []db.Tr
 	if len(entries) == 0 {
 		return
 	}
+	key := subgroupExpansionKey(catalog, schema, subgroupTriggers)
+	parent := rootParentKey(catalog)
+	depth := 1
+	if schema != "" {
+		parent = schemaExpansionKey(catalog, schema)
+		depth = 2
+	}
 	e.items = append(e.items, explorerItem{
 		kind:       itemSubgroup,
 		label:      subgroupTriggers.label(),
+		nodeKey:    key,
+		parentKey:  parent,
+		expandKey:  key,
+		depth:      depth,
 		catalog:    catalog,
 		schemaName: schema,
 		subgroup:   subgroupTriggers,
 	})
-	if !e.isExpanded(subgroupExpansionKey(catalog, schema, subgroupTriggers)) {
+	if !e.isExpanded(key) {
 		return
 	}
 	for _, tr := range entries {
@@ -1249,6 +1457,9 @@ func (e *explorer) appendTriggerSubgroup(catalog, schema string, entries []db.Tr
 		e.items = append(e.items, explorerItem{
 			kind:       itemTrigger,
 			label:      tr.Name,
+			nodeKey:    triggerNodeKey(catalog, tr),
+			parentKey:  key,
+			depth:      depth + 1,
 			catalog:    catalog,
 			schemaName: schema,
 			subgroup:   subgroupTriggers,
@@ -1256,6 +1467,39 @@ func (e *explorer) appendTriggerSubgroup(catalog, schema string, entries []db.Tr
 			suffix:     suffix,
 		})
 	}
+}
+
+func columnExplorerSuffix(col db.ColumnDetail) string {
+	parts := make([]string, 0, 4)
+	if col.TypeName != "" {
+		parts = append(parts, col.TypeName)
+	}
+	var flags []string
+	if col.PrimaryKey {
+		flags = append(flags, "PK")
+	}
+	if col.ForeignKey {
+		flags = append(flags, "FK")
+	}
+	if col.Unique {
+		flags = append(flags, "UQ")
+	}
+	if col.NullableKnown && !col.Nullable {
+		flags = append(flags, "NN")
+	}
+	if col.Identity {
+		flags = append(flags, "ID")
+	}
+	if col.Computed {
+		flags = append(flags, "CMP")
+	}
+	if col.DefaultKnown {
+		flags = append(flags, "DEF")
+	}
+	if len(flags) > 0 {
+		parts = append(parts, "["+strings.Join(flags, " ")+"]")
+	}
+	return strings.Join(parts, " ")
 }
 
 // trimSpace collapses consecutive spaces and trims ends without pulling in strings.
@@ -1549,6 +1793,76 @@ func BuildSelectWithColumns(caps db.Capabilities, t db.TableRef, cols []db.Colum
 	default:
 		return "SELECT " + selectList + " FROM " + name + " LIMIT " + itoa(limit)
 	}
+}
+
+func BuildInsert(caps db.Capabilities, t db.TableRef, cols []db.ColumnDetail) string {
+	t.Catalog = ""
+	name := QualifiedName(caps, t)
+	writable := writableColumns(cols)
+	parts := quoteColumnNames(caps, writable)
+	if len(parts) == 0 {
+		return "INSERT INTO " + name + " (\n    -- columns\n) VALUES (\n    -- values\n)"
+	}
+	values := make([]string, len(parts))
+	for i, col := range writable {
+		values[i] = "<" + col.Name + ">"
+	}
+	return "INSERT INTO " + name + " (\n    " + strings.Join(parts, ",\n    ") + "\n) VALUES (\n    " + strings.Join(values, ",\n    ") + "\n)"
+}
+
+func BuildUpdate(caps db.Capabilities, t db.TableRef, cols []db.ColumnDetail) string {
+	t.Catalog = ""
+	name := QualifiedName(caps, t)
+	updatable := updatableColumns(cols)
+	sets := make([]string, 0, len(updatable))
+	for _, col := range updatable {
+		if col.Name == "" {
+			continue
+		}
+		sets = append(sets, quoteIdentifier(caps, col.Name)+" = NULL")
+	}
+	if len(sets) == 0 {
+		return "UPDATE " + name + "\nSET\n    -- column = value\nWHERE 1 = 0"
+	}
+	return "UPDATE " + name + "\nSET\n    " + strings.Join(sets, ",\n    ") + "\nWHERE 1 = 0"
+}
+
+func BuildDelete(caps db.Capabilities, t db.TableRef) string {
+	t.Catalog = ""
+	return "DELETE FROM " + QualifiedName(caps, t) + "\nWHERE 1 = 0"
+}
+
+func writableColumns(cols []db.ColumnDetail) []db.ColumnDetail {
+	out := make([]db.ColumnDetail, 0, len(cols))
+	for _, col := range cols {
+		if col.Name == "" || col.Identity || col.Computed {
+			continue
+		}
+		out = append(out, col)
+	}
+	return out
+}
+
+func updatableColumns(cols []db.ColumnDetail) []db.ColumnDetail {
+	writable := writableColumns(cols)
+	out := make([]db.ColumnDetail, 0, len(writable))
+	for _, col := range writable {
+		if col.PrimaryKey {
+			continue
+		}
+		out = append(out, col)
+	}
+	return out
+}
+
+func quoteColumnNames(caps db.Capabilities, cols []db.ColumnDetail) []string {
+	parts := make([]string, 0, len(cols))
+	for _, col := range cols {
+		if col.Name != "" {
+			parts = append(parts, quoteIdentifier(caps, col.Name))
+		}
+	}
+	return parts
 }
 
 // itoa avoids pulling in strconv for one call site.

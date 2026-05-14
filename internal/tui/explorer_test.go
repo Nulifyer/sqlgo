@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
@@ -326,6 +327,37 @@ func TestExplorerMoveCursorClamps(t *testing.T) {
 	}
 }
 
+func TestExplorerLeftRightNavigation(t *testing.T) {
+	t.Parallel()
+
+	e := newExplorer()
+	e.SetSchema(fixtureSchema(), db.SchemaDepthSchemas)
+
+	e.cursor = 0
+	e.ExpandOrMoveToChild()
+	if !e.expanded[schemaExpansionKey("", "dbo")] {
+		t.Fatal("Right did not expand dbo schema")
+	}
+	if e.cursor != 0 {
+		t.Fatalf("cursor after expand = %d, want 0", e.cursor)
+	}
+
+	e.ExpandOrMoveToChild()
+	if e.cursor != 1 || e.items[e.cursor].kind != itemSubgroup || e.items[e.cursor].label != "Tables" {
+		t.Fatalf("cursor after second Right = %d/%+v, want Tables child", e.cursor, e.items[e.cursor])
+	}
+
+	e.CollapseOrMoveToParent()
+	if e.cursor != 0 || e.items[e.cursor].kind != itemSchema {
+		t.Fatalf("cursor after Left from child = %d/%+v, want parent schema", e.cursor, e.items[e.cursor])
+	}
+
+	e.CollapseOrMoveToParent()
+	if e.expanded[schemaExpansionKey("", "dbo")] {
+		t.Fatal("Left on expanded schema did not collapse")
+	}
+}
+
 func TestExplorerSelectedOnlyOnLeaf(t *testing.T) {
 	t.Parallel()
 	e := newExplorer()
@@ -412,6 +444,43 @@ func TestBuildSelectWithColumnsQuotesColumnNames(t *testing.T) {
 	want := "SELECT TOP 100 [order id], [select], [name] FROM [dbo].[orders]"
 	if got != want {
 		t.Fatalf("BuildSelectWithColumns = %q, want %q", got, want)
+	}
+}
+
+func TestBuildDMLQuotesAndUsesSafePredicates(t *testing.T) {
+	t.Parallel()
+
+	caps := db.Capabilities{SchemaDepth: db.SchemaDepthSchemas, IdentifierQuote: '['}
+	tbl := db.TableRef{Schema: "dbo", Name: "order details"}
+	cols := []db.ColumnDetail{
+		{Name: "id", PrimaryKey: true, Identity: true},
+		{Name: "select"},
+		{Name: "computed total", Computed: true},
+		{Name: "notes"},
+	}
+
+	insertSQL := BuildInsert(caps, tbl, cols)
+	if strings.Contains(insertSQL, "[id]") || strings.Contains(insertSQL, "[computed total]") {
+		t.Fatalf("BuildInsert = %q, should exclude identity/computed columns", insertSQL)
+	}
+	if !strings.Contains(insertSQL, "INSERT INTO [dbo].[order details]") || !strings.Contains(insertSQL, "[select]") || !strings.Contains(insertSQL, "[notes]") {
+		t.Fatalf("BuildInsert = %q, want quoted writable columns", insertSQL)
+	}
+	if strings.Contains(insertSQL, "NULL") || !strings.Contains(insertSQL, "<select>") || !strings.Contains(insertSQL, "<notes>") {
+		t.Fatalf("BuildInsert = %q, want non-runnable value placeholders", insertSQL)
+	}
+
+	updateSQL := BuildUpdate(caps, tbl, cols)
+	if strings.Contains(updateSQL, "[id] = NULL") || strings.Contains(updateSQL, "[computed total] = NULL") {
+		t.Fatalf("BuildUpdate = %q, should exclude key/computed assignments", updateSQL)
+	}
+	if !strings.Contains(updateSQL, "UPDATE [dbo].[order details]") || !strings.Contains(updateSQL, "WHERE 1 = 0") {
+		t.Fatalf("BuildUpdate = %q, want safe predicate", updateSQL)
+	}
+
+	deleteSQL := BuildDelete(caps, tbl)
+	if deleteSQL != "DELETE FROM [dbo].[order details]\nWHERE 1 = 0" {
+		t.Fatalf("BuildDelete = %q", deleteSQL)
 	}
 }
 

@@ -31,8 +31,9 @@ type Profile struct {
 
 	IsPermissionDenied func(error) bool
 
-	DefinitionFetcher func(ctx context.Context, db *sql.DB, kind, schema, name string) (string, error)
-	ExplainRunner     func(ctx context.Context, db *sql.DB, sql string) ([][]any, error)
+	DefinitionFetcher  func(ctx context.Context, db *sql.DB, kind, schema, name string) (string, error)
+	ExplainRunner      func(ctx context.Context, db *sql.DB, sql string) ([][]any, error)
+	TableDesignFetcher func(ctx context.Context, q SQLQuerier, t TableRef) (TableDesign, error)
 
 	DatabaseListQuery string
 	UseDatabaseStmt   func(name string) string
@@ -58,6 +59,7 @@ func (p Profile) sqlOptions(driverName string) sqlOptions {
 		IsPermissionDenied: p.IsPermissionDenied,
 		DefinitionFetcher:  p.DefinitionFetcher,
 		ExplainRunner:      p.ExplainRunner,
+		TableDesignFetcher: p.TableDesignFetcher,
 		DatabaseListQuery:  p.DatabaseListQuery,
 		UseDatabaseStmt:    p.UseDatabaseStmt,
 		OnClose:            p.OnClose,

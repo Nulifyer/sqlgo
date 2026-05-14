@@ -137,9 +137,13 @@ func helpContent() []helpLine {
 
 		section("Explorer"),
 		bind("Ctrl+F", "search object names"),
+		bind("F", "deep-search unloaded columns in loaded scope"),
 		bind("Esc", "close search"),
 		bind("↵ / s", "SELECT from table / view"),
+		bind("a", "open SELECT / INSERT / UPDATE / DELETE actions"),
+		bind("d", "open table design"),
 		bind("␣", "expand database / schema / group / table columns"),
+		bind("← / →", "collapse / expand or move parent / child"),
 		bind("↵", "expand folders; edit DDL for routines / triggers"),
 		bind("e", "edit DDL for view / routine / trigger"),
 		bind("y", "copy qualified object name"),
@@ -191,6 +195,13 @@ func helpContent() []helpLine {
 		bind("↑ / ↓ / PgUp / PgDn", "scroll"),
 		bind("Home / End", "scroll to top / bottom"),
 		bind("y", "copy cell"),
+		bind("Esc", "close"),
+		blank,
+
+		section("Table design"),
+		bind("↑ / ↓ / PgUp / PgDn", "scroll columns"),
+		bind("Home / End", "scroll to top / bottom"),
+		bind("y", "copy selected column"),
 		bind("Esc", "close"),
 		blank,
 

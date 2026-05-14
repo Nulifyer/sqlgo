@@ -204,6 +204,57 @@ func TestColumnsReturnsSchemaForTable(t *testing.T) {
 	}
 }
 
+func TestTableDesignReturnsRichColumnMetadata(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	d, _ := db.Get(driverName)
+	conn, err := d.Open(ctx, db.Config{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.Exec(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatalf("foreign_keys: %v", err)
+	}
+	if err := conn.Exec(ctx, `CREATE TABLE parent (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	if err := conn.Exec(ctx, `CREATE TABLE widgets (
+		id INTEGER PRIMARY KEY,
+		parent_id INTEGER REFERENCES parent(id),
+		sku TEXT NOT NULL UNIQUE DEFAULT 'new',
+		total INTEGER GENERATED ALWAYS AS (id + 1) VIRTUAL
+	)`); err != nil {
+		t.Fatalf("create widgets: %v", err)
+	}
+
+	designer, ok := conn.(db.TableDesigner)
+	if !ok {
+		t.Fatal("sqlite conn does not implement TableDesigner")
+	}
+	design, err := designer.TableDesign(ctx, db.TableRef{Schema: "main", Name: "widgets"})
+	if err != nil {
+		t.Fatalf("TableDesign: %v", err)
+	}
+	cols := map[string]db.ColumnDetail{}
+	for _, col := range design.Columns {
+		cols[col.Name] = col
+	}
+	if !cols["id"].PrimaryKey || !cols["id"].NullableKnown || cols["id"].Nullable {
+		t.Fatalf("id metadata = %+v, want PK not-null", cols["id"])
+	}
+	if !cols["parent_id"].ForeignKey {
+		t.Fatalf("parent_id metadata = %+v, want FK", cols["parent_id"])
+	}
+	if !cols["sku"].Unique || !cols["sku"].DefaultKnown || cols["sku"].Nullable {
+		t.Fatalf("sku metadata = %+v, want unique default not-null", cols["sku"])
+	}
+	if !cols["total"].Computed {
+		t.Fatalf("total metadata = %+v, want computed", cols["total"])
+	}
+}
+
 // TestColumnsRejectsUnknownTable verifies Columns returns an empty
 // slice (not an error) for a nonexistent table -- pragma_table_info
 // simply yields zero rows in that case, which matches how the

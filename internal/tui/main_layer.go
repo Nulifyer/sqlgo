@@ -1080,6 +1080,18 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 	case KeyDown:
 		m.explorer.MoveCursor(1)
 		return
+	case KeyLeft:
+		m.explorer.CollapseOrMoveToParent()
+		return
+	case KeyRight:
+		m.explorer.ExpandOrMoveToChild()
+		if cat, need := m.explorer.NeedsDatabaseLoad(); need {
+			a.loadDatabaseSchema(cat)
+		}
+		if t, need := m.explorer.NeedsColumnLoad(); need {
+			a.loadExplorerColumns(t)
+		}
+		return
 	case KeyPgUp:
 		m.explorer.MoveCursor(-10)
 		return
@@ -1118,6 +1130,15 @@ func (m *mainLayer) handleExplorerKey(a *app, k Key) {
 			return
 		case 's':
 			m.prefillSelectFromExplorer(a)
+			return
+		case 'a':
+			m.openExplorerActionPicker(a)
+			return
+		case 'd':
+			m.openTableDesignFromExplorer(a)
+			return
+		case 'F':
+			a.deepSearchExplorerColumns()
 			return
 		case 'y':
 			m.copyExplorerName(a)
@@ -1643,7 +1664,10 @@ func (m *mainLayer) openSelectPreviewFromExplorer(a *app, t db.TableRef, cols []
 		caps = a.conn.Capabilities()
 	}
 	sql := sqltok.Format(BuildSelectWithColumns(caps, t, cols, defaultSelectLimit))
+	m.openSQLPreviewFromExplorer(a, t, sql)
+}
 
+func (m *mainLayer) openSQLPreviewFromExplorer(a *app, t db.TableRef, sql string) {
 	// Reuse an existing preview tab if one is open, else spawn a new
 	// one. Permanent tabs are never clobbered.
 	prev := -1
@@ -1687,20 +1711,24 @@ func (a *app) prefillSelectWithFetchedColumns(t db.TableRef) {
 		m.openSelectPreviewFromExplorer(a, t, nil)
 		return
 	}
-	fetch := func() ([]db.Column, error) {
+	if a.metadataBusy {
+		m.status = "metadata loading; try again when it finishes"
+		return
+	}
+	fetch := func() (db.TableDesign, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		defer cancel()
-		return fetchTableColumns(ctx, conn, t)
+		return fetchTableDesign(ctx, conn, t)
 	}
 	if a.asyncCh == nil {
-		cols, err := fetch()
+		design, err := fetch()
 		if err != nil {
-			m.status = "columns: " + err.Error()
+			m.status = "columns unavailable; generated SELECT *: " + err.Error()
 			m.openSelectPreviewFromExplorer(a, t, nil)
 			return
 		}
-		m.explorer.SetTableColumns(t, cols)
-		m.openSelectPreviewFromExplorer(a, t, cols)
+		m.explorer.SetTableDesign(t, design)
+		m.openSelectPreviewFromExplorer(a, t, db.ColumnsFromDesign(design))
 		return
 	}
 	m.status = "loading columns for " + t.Name + " " + spinnerFrames[0]
@@ -1714,7 +1742,7 @@ func (a *app) prefillSelectWithFetchedColumns(t db.TableRef) {
 		}
 	})
 	go func() {
-		cols, err := fetch()
+		design, err := fetch()
 		close(done)
 		a.asyncCh <- func(a *app) {
 			if a.conn != conn {
@@ -1725,12 +1753,12 @@ func (a *app) prefillSelectWithFetchedColumns(t db.TableRef) {
 				return
 			}
 			if err != nil {
-				mm.status = "columns: " + err.Error()
+				mm.status = "columns unavailable; generated SELECT *: " + err.Error()
 				mm.openSelectPreviewFromExplorer(a, t, nil)
 				return
 			}
-			mm.explorer.SetTableColumns(t, cols)
-			mm.openSelectPreviewFromExplorer(a, t, cols)
+			mm.explorer.SetTableDesign(t, design)
+			mm.openSelectPreviewFromExplorer(a, t, db.ColumnsFromDesign(design))
 		}
 	}()
 }
@@ -1756,6 +1784,215 @@ func (m *mainLayer) copyExplorerName(a *app) {
 	m.status = "copied " + name
 }
 
+func (m *mainLayer) openExplorerActionPicker(a *app) {
+	t, ok := m.explorer.Selected()
+	if !ok {
+		m.status = "actions: select a table or view"
+		return
+	}
+	a.pushLayer(newObjectActionLayer(t))
+}
+
+func (m *mainLayer) runExplorerObjectAction(a *app, t db.TableRef, action explorerSQLAction) {
+	switch action {
+	case explorerActionSelect:
+		m.openSelectOrFetch(a, t)
+	case explorerActionInsert:
+		m.openGeneratedSQLWithDesign(a, t, "INSERT")
+	case explorerActionUpdate:
+		m.openGeneratedSQLWithDesign(a, t, "UPDATE")
+	case explorerActionDelete:
+		var caps db.Capabilities
+		if a.conn != nil {
+			caps = a.conn.Capabilities()
+		}
+		m.openSQLPreviewFromExplorer(a, t, sqltok.Format(BuildDelete(caps, t)))
+	case explorerActionDesign:
+		m.openTableDesign(a, t)
+	case explorerActionCopy:
+		m.copyExplorerName(a)
+	}
+}
+
+func (m *mainLayer) openSelectOrFetch(a *app, t db.TableRef) {
+	if cols, ok := m.explorer.ColumnsForTable(t); ok {
+		m.openSelectPreviewFromExplorer(a, t, cols)
+		return
+	}
+	if a.conn != nil {
+		a.prefillSelectWithFetchedColumns(t)
+		return
+	}
+	m.openSelectPreviewFromExplorer(a, t, nil)
+}
+
+func (m *mainLayer) openTableDesignFromExplorer(a *app) {
+	t, ok := m.explorer.Selected()
+	if !ok {
+		m.status = "design: select a table or view"
+		return
+	}
+	m.openTableDesign(a, t)
+}
+
+func (m *mainLayer) openTableDesign(a *app, t db.TableRef) {
+	if design, ok := m.explorer.TableDesignForTable(t); ok {
+		m.pushTableDesignLayer(a, design)
+		return
+	}
+	if a.conn == nil {
+		m.status = "design: not connected"
+		return
+	}
+	if a.metadataBusy {
+		m.status = "metadata loading; try again when it finishes"
+		return
+	}
+	conn := a.conn
+	fetch := func() (db.TableDesign, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		defer cancel()
+		return fetchTableDesign(ctx, conn, t)
+	}
+	if a.asyncCh == nil {
+		design, err := fetch()
+		if err != nil {
+			m.status = "design: " + err.Error()
+			return
+		}
+		m.explorer.SetTableDesign(t, design)
+		m.pushTableDesignLayer(a, design)
+		return
+	}
+	m.status = "loading design for " + t.Name + " " + spinnerFrames[0]
+	done := make(chan struct{})
+	go runSpinner(a, done, func(a *app, frame string) {
+		if a.conn != conn {
+			return
+		}
+		if mm := a.mainLayerPtr(); mm != nil {
+			mm.status = "loading design for " + t.Name + " " + frame
+		}
+	})
+	go func() {
+		design, err := fetch()
+		close(done)
+		a.asyncCh <- func(a *app) {
+			if a.conn != conn {
+				return
+			}
+			mm := a.mainLayerPtr()
+			if mm == nil {
+				return
+			}
+			if err != nil {
+				mm.status = "design: " + err.Error()
+				return
+			}
+			mm.explorer.SetTableDesign(t, design)
+			mm.status = ""
+			mm.pushTableDesignLayer(a, design)
+		}
+	}()
+}
+
+func (m *mainLayer) pushTableDesignLayer(a *app, design db.TableDesign) {
+	var caps db.Capabilities
+	if a.conn != nil {
+		caps = a.conn.Capabilities()
+	}
+	a.pushLayer(newTableDesignLayer(caps, design))
+}
+
+func (m *mainLayer) openGeneratedSQLWithDesign(a *app, t db.TableRef, kind string) {
+	if design, ok := m.explorer.TableDesignForTable(t); ok {
+		m.openGeneratedSQLFromDesign(a, t, design, kind)
+		return
+	}
+	if a.conn == nil {
+		m.status = strings.ToLower(kind) + ": not connected"
+		return
+	}
+	if a.metadataBusy {
+		m.status = "metadata loading; try again when it finishes"
+		return
+	}
+	conn := a.conn
+	fetch := func() (db.TableDesign, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		defer cancel()
+		return fetchTableDesign(ctx, conn, t)
+	}
+	if a.asyncCh == nil {
+		design, err := fetch()
+		if err != nil {
+			m.status = strings.ToLower(kind) + ": columns unavailable: " + err.Error()
+			return
+		}
+		m.explorer.SetTableDesign(t, design)
+		m.openGeneratedSQLFromDesign(a, t, design, kind)
+		return
+	}
+	m.status = "loading columns for " + t.Name + " " + spinnerFrames[0]
+	done := make(chan struct{})
+	go runSpinner(a, done, func(a *app, frame string) {
+		if a.conn != conn {
+			return
+		}
+		if mm := a.mainLayerPtr(); mm != nil {
+			mm.status = "loading columns for " + t.Name + " " + frame
+		}
+	})
+	go func() {
+		design, err := fetch()
+		close(done)
+		a.asyncCh <- func(a *app) {
+			if a.conn != conn {
+				return
+			}
+			mm := a.mainLayerPtr()
+			if mm == nil {
+				return
+			}
+			if err != nil {
+				mm.status = strings.ToLower(kind) + ": columns unavailable: " + err.Error()
+				return
+			}
+			mm.explorer.SetTableDesign(t, design)
+			mm.openGeneratedSQLFromDesign(a, t, design, kind)
+		}
+	}()
+}
+
+func (m *mainLayer) openGeneratedSQLFromDesign(a *app, t db.TableRef, design db.TableDesign, kind string) {
+	var caps db.Capabilities
+	if a.conn != nil {
+		caps = a.conn.Capabilities()
+	}
+	if len(design.Columns) == 0 {
+		m.status = strings.ToLower(kind) + ": no columns available"
+		return
+	}
+	var sql string
+	switch kind {
+	case "INSERT":
+		if len(writableColumns(design.Columns)) == 0 {
+			m.status = "insert: no writable columns available"
+			return
+		}
+		sql = BuildInsert(caps, t, design.Columns)
+	case "UPDATE":
+		if len(updatableColumns(design.Columns)) == 0 {
+			m.status = "update: no writable columns available"
+			return
+		}
+		sql = BuildUpdate(caps, t, design.Columns)
+	default:
+		return
+	}
+	m.openSQLPreviewFromExplorer(a, t, sqltok.Format(sql))
+}
+
 func (a *app) loadExplorerColumns(t db.TableRef) {
 	if a == nil {
 		return
@@ -1764,23 +2001,27 @@ func (a *app) loadExplorerColumns(t db.TableRef) {
 	if m == nil || a.conn == nil || t.Name == "" {
 		return
 	}
+	if a.metadataBusy {
+		m.status = "metadata loading; try again when it finishes"
+		return
+	}
 	if !m.explorer.MarkColumnInflight(t) {
 		return
 	}
 	m.explorer.SetColumnLoading(t, spinnerFrames[0])
 	conn := a.conn
-	fetch := func() ([]db.Column, error) {
+	fetch := func() (db.TableDesign, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		defer cancel()
-		return fetchTableColumns(ctx, conn, t)
+		return fetchTableDesign(ctx, conn, t)
 	}
 	if a.asyncCh == nil {
-		cols, err := fetch()
+		design, err := fetch()
 		if err != nil {
 			m.explorer.SetColumnError(t, err.Error())
 			return
 		}
-		m.explorer.SetTableColumns(t, cols)
+		m.explorer.SetTableDesign(t, design)
 		return
 	}
 	done := make(chan struct{})
@@ -1793,7 +2034,7 @@ func (a *app) loadExplorerColumns(t db.TableRef) {
 		}
 	})
 	go func() {
-		cols, err := fetch()
+		design, err := fetch()
 		close(done)
 		a.asyncCh <- func(a *app) {
 			if a.conn != conn {
@@ -1807,7 +2048,94 @@ func (a *app) loadExplorerColumns(t db.TableRef) {
 				mm.explorer.SetColumnError(t, err.Error())
 				return
 			}
-			mm.explorer.SetTableColumns(t, cols)
+			mm.explorer.SetTableDesign(t, design)
+		}
+	}()
+}
+
+func (a *app) deepSearchExplorerColumns() {
+	if a == nil || a.conn == nil {
+		return
+	}
+	m := a.mainLayerPtr()
+	if m == nil || !m.explorer.IsSearching() {
+		return
+	}
+	if a.metadataBusy {
+		m.status = "metadata loading; try again when it finishes"
+		return
+	}
+	tables := m.explorer.TablesForDeepSearch(250)
+	if len(tables) == 0 {
+		m.status = "deep search: no unloaded tables in loaded scope"
+		return
+	}
+	conn := a.conn
+	a.metadataBusy = true
+	for _, t := range tables {
+		if m.explorer.MarkColumnInflight(t) {
+			m.explorer.SetColumnLoading(t, spinnerFrames[0])
+		}
+	}
+	m.status = fmt.Sprintf("deep search: loading columns for %d table(s)", len(tables))
+	loadOne := func(t db.TableRef) (db.TableDesign, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		defer cancel()
+		return fetchTableDesign(ctx, conn, t)
+	}
+	if a.asyncCh == nil {
+		defer func() { a.metadataBusy = false }()
+		loaded, failed := 0, 0
+		for _, t := range tables {
+			design, err := loadOne(t)
+			if err != nil {
+				m.explorer.SetColumnError(t, err.Error())
+				failed++
+				continue
+			}
+			m.explorer.SetTableDesign(t, design)
+			loaded++
+		}
+		m.status = fmt.Sprintf("deep search: loaded %d table(s), %d failed", loaded, failed)
+		return
+	}
+	go func() {
+		loaded, failed := 0, 0
+		for i, t := range tables {
+			design, err := loadOne(t)
+			if err != nil {
+				failed++
+			} else {
+				loaded++
+			}
+			idx := i + 1
+			table := t
+			result := design
+			resultErr := err
+			loadedCount := loaded
+			failedCount := failed
+			a.asyncCh <- func(a *app) {
+				if a.conn != conn {
+					return
+				}
+				mm := a.mainLayerPtr()
+				if mm == nil {
+					if idx == len(tables) {
+						a.metadataBusy = false
+					}
+					return
+				}
+				if resultErr != nil {
+					mm.explorer.SetColumnError(table, resultErr.Error())
+				} else {
+					mm.explorer.SetTableDesign(table, result)
+				}
+				mm.status = fmt.Sprintf("deep search: %d/%d loaded (%d failed)", idx, len(tables), failedCount)
+				if idx == len(tables) {
+					a.metadataBusy = false
+					mm.status = fmt.Sprintf("deep search: loaded %d table(s), %d failed", loadedCount, failedCount)
+				}
+			}
 		}
 	}()
 }
@@ -1819,6 +2147,33 @@ func fetchTableColumns(ctx context.Context, conn db.Conn, t db.TableRef) ([]db.C
 		}
 	}
 	return conn.Columns(ctx, t)
+}
+
+func fetchTableDesign(ctx context.Context, conn db.Conn, t db.TableRef) (db.TableDesign, error) {
+	var designErr error
+	if t.Catalog != "" {
+		if designer, ok := conn.(db.DatabaseTableDesigner); ok {
+			design, err := designer.TableDesignIn(ctx, t.Catalog, t)
+			if err == nil {
+				return design, nil
+			}
+			designErr = err
+		}
+	} else if designer, ok := conn.(db.TableDesigner); ok {
+		design, err := designer.TableDesign(ctx, t)
+		if err == nil {
+			return design, nil
+		}
+		designErr = err
+	}
+	cols, err := fetchTableColumns(ctx, conn, t)
+	if err != nil {
+		if designErr != nil {
+			return db.TableDesign{}, designErr
+		}
+		return db.TableDesign{}, err
+	}
+	return db.BasicTableDesign(t, cols), nil
 }
 
 // promoteActiveIfPreview marks the active tab as permanent. Called after
@@ -2012,11 +2367,15 @@ func (m *mainLayer) explorerHints(_ *app) string {
 		"Ctrl+Q=quit",
 		enterHint,
 		hintIf(!searchFocused, "␣=expand"),
+		hintIf(!searchFocused, "←/→=nav"),
+		hintIf(!searchFocused, "a=actions"),
 		hintIf(!searchFocused, "s=SELECT"),
+		hintIf(!searchFocused, "d=design"),
 		hintIf(!searchFocused, "y=copy name"),
 		eHint,
 		hintIf(!searching, "Ctrl+F=search"),
 		hintIf(searching && !searchFocused, "Ctrl+F=edit query"),
+		hintIf(searching && !searchFocused, "F=deep search"),
 		hintIf(searching, "Esc=close search"),
 		"Ctrl+K=menu",
 	)

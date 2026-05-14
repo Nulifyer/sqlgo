@@ -251,6 +251,21 @@ type DatabaseColumner interface {
 	ColumnsIn(ctx context.Context, database string, t TableRef) ([]Column, error)
 }
 
+// TableDesigner is an optional Conn capability for richer table metadata.
+// Conn.Columns remains the universal, cheap column-name/type API used by
+// autocomplete; TableDesign powers UI affordances like design dialogs and
+// richer explorer labels when a driver can provide those details.
+type TableDesigner interface {
+	TableDesign(ctx context.Context, t TableRef) (TableDesign, error)
+}
+
+// DatabaseTableDesigner is the cross-database analogue of TableDesigner.
+// Drivers that can switch catalog on a pinned session implement it so design
+// lookups honor a table's Catalog in the explorer.
+type DatabaseTableDesigner interface {
+	TableDesignIn(ctx context.Context, database string, t TableRef) (TableDesign, error)
+}
+
 // ErrExplainUnsupported is returned by Conn.Explain for drivers whose
 // Capabilities report ExplainFormatNone.
 var ErrExplainUnsupported = errors.New("explain unsupported")
@@ -369,6 +384,61 @@ type SchemaInfo struct {
 type Column struct {
 	Name     string
 	TypeName string // driver-reported SQL type name, for display
+}
+
+// ColumnDetail describes one persisted table/view column. The known flags
+// distinguish "driver says false" from "driver did not report this field".
+type ColumnDetail struct {
+	Name     string
+	TypeName string
+	Ordinal  int
+
+	NullableKnown bool
+	Nullable      bool
+
+	DefaultKnown bool
+	Default      string
+
+	PrimaryKey bool
+	ForeignKey bool
+	Unique     bool
+	Identity   bool
+	Computed   bool
+}
+
+// TableDesign is the rich metadata shape consumed by explorer UI. Drivers may
+// fill only the fields they can answer cheaply; callers must tolerate unknowns.
+type TableDesign struct {
+	Table   TableRef
+	Columns []ColumnDetail
+}
+
+// BasicTableDesign adapts the universal Columns result into a minimal design.
+func BasicTableDesign(t TableRef, cols []Column) TableDesign {
+	out := TableDesign{Table: t, Columns: make([]ColumnDetail, 0, len(cols))}
+	for i, col := range cols {
+		if col.Name == "" {
+			continue
+		}
+		out.Columns = append(out.Columns, ColumnDetail{
+			Name:     col.Name,
+			TypeName: col.TypeName,
+			Ordinal:  i + 1,
+		})
+	}
+	return out
+}
+
+// ColumnsFromDesign adapts a rich design back to the narrow column API.
+func ColumnsFromDesign(design TableDesign) []Column {
+	out := make([]Column, 0, len(design.Columns))
+	for _, col := range design.Columns {
+		if col.Name == "" {
+			continue
+		}
+		out = append(out, Column{Name: col.Name, TypeName: col.TypeName})
+	}
+	return out
 }
 
 // Result is a materialized view of a query's rows. Conn.Query does NOT
