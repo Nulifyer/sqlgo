@@ -33,7 +33,7 @@ usage:
 verbs:
   exec      run SQL and print results (table on tty, tsv on a pipe)
   export    run SQL and write results to a file (default csv)
-  open      query CSV/TSV/JSONL files in-memory (no saved connection)
+  open      open SQLite databases or query CSV/TSV/JSONL files
   edit      launch the TUI with FILE.sql preloaded in the editor
   conns     manage saved connections (list, show, add, set, rm, test, import, export)
   history   inspect query history (list, search, clear)

@@ -276,14 +276,15 @@ Open the command menu with `Ctrl+K` for global actions (connect, disconnect, his
 | | `Esc` | Cancel |
 
 
-## Scripting (non-TUI)
+## CLI commands
 
-sqlgo also runs headless. When the first argument is a known verb, nothing in the TUI is loaded -- the binary behaves like `psql`/`mysql` for shell scripts and CI jobs.
+sqlgo also provides verbs for scripting and direct startup actions. Most verbs run headlessly; `open` launches the TUI when no query source is supplied and runs headlessly with `-q`, `-f`, or piped SQL.
 
 | Verb | Purpose |
 |---|---|
 | `exec` | run SQL and print results (default: table on a tty, TSV on a pipe) |
 | `export` | run SQL and write results to a file or stdout (default: CSV) |
+| `open` | open a SQLite database or query CSV/TSV/JSONL files without a saved connection |
 | `conns` | manage saved connections (`list`, `show`, `add`, `set`, `rm`, `test`, `import`, `export`) |
 | `history` | inspect query history (`list`, `search`, `clear`) |
 | `version` | print sqlgo version (also `--version` / `-v`) |
@@ -309,6 +310,32 @@ Common flags (shared by `exec` and `export`):
 Password precedence: `--password-stdin` > `$SQLGO_PASSWORD` > DSN / keyring.
 
 DSN schemes: `postgres://`, `mysql://`, `mssql://` (or `sqlserver://`), `sqlite://`, `oracle://`, `firebird://`, `libsql://`, `d1://`. Postgres aliases (`cockroachdb`, `supabase`, `neon`, `yugabytedb`, `timescaledb`) and MySQL alias (`mariadb`) are also accepted as schemes and as driver names under `conns add --driver`.
+
+### Open local data
+
+Open one SQLite database directly in the TUI without creating a saved connection:
+
+```sh
+sqlgo open app.db
+```
+
+Common SQLite extensions (`.db`, `.db3`, `.s3db`, `.sqlite`, and `.sqlite3`) are recognized. Existing SQLite databases with other extensions are detected from their file header. The database is opened directly, so mutations are written to the original file.
+
+CSV, TSV, and JSONL files are loaded into an ephemeral SQLite database. Each file becomes a table named after its filename, and multiple files can be opened together:
+
+```sh
+sqlgo open customers.csv orders.jsonl
+```
+
+Pass `-q`, `-f`, or piped SQL to query local data headlessly. Query and output flags must precede the file paths:
+
+```sh
+sqlgo open -q "select name from users order by name" app.db
+sqlgo open --format jsonl -q "select * from customers" customers.csv
+cat report.sql | sqlgo open customers.csv
+```
+
+SQLite databases must be opened one at a time. Opening flat files never modifies the source files.
 
 ### `conns` subcommands
 
@@ -346,6 +373,9 @@ cat report.sql | sqlgo export -c prod -o report.csv
 
 # Inline DSN, JSONL for downstream tools
 sqlgo export --dsn "postgres://me@db.local:5432/app" -q "select * from users" --format jsonl
+
+# Open a local SQLite database directly in the TUI
+sqlgo open app.db
 
 # Save a new connection (password read from stdin, stored in OS keyring)
 echo -n "$PGPASSWORD" | sqlgo conns add prod --driver postgres \

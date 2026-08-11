@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"os"
@@ -29,6 +30,64 @@ func TestDispatchUnknownVerbReturnsUsage(t *testing.T) {
 		t.Fatalf("code = %d, want %d", code, ExitUsage)
 	}
 	if !bytes.Contains(stderr.Bytes(), []byte(`unknown verb "nope"`)) {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestOpenSQLiteDatabaseHeadless(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "people.db")
+	sqlDB, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite fixture: %v", err)
+	}
+	if _, err := sqlDB.Exec(`CREATE TABLE people (name TEXT); INSERT INTO people VALUES ('Ada'), ('Grace');`); err != nil {
+		_ = sqlDB.Close()
+		t.Fatalf("seed sqlite fixture: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close sqlite fixture: %v", err)
+	}
+
+	restoreTerminal := stubTerminalDetector(t, false)
+	defer restoreTerminal()
+
+	var stdout, stderr bytes.Buffer
+	code := Dispatch(
+		[]string{"open", "-q", "SELECT name FROM people ORDER BY name", dbPath},
+		bytes.NewBuffer(nil),
+		&stdout,
+		&stderr,
+	)
+	if code != ExitOK {
+		t.Fatalf("code = %d, want %d; stderr = %q", code, ExitOK, stderr.String())
+	}
+	if got, want := stdout.String(), "name\nAda\nGrace\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestOpenSQLiteDatabaseMustBeOpenedAlone(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "app.sqlite")
+	csvPath := filepath.Join(dir, "data.csv")
+	if err := os.WriteFile(dbPath, nil, 0o644); err != nil {
+		t.Fatalf("write sqlite fixture: %v", err)
+	}
+	if err := os.WriteFile(csvPath, []byte("id\n1\n"), 0o644); err != nil {
+		t.Fatalf("write csv fixture: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	code := Dispatch(
+		[]string{"open", "-q", "SELECT 1", dbPath, csvPath},
+		bytes.NewBuffer(nil),
+		bytes.NewBuffer(nil),
+		&stderr,
+	)
+	if code != ExitUsage {
+		t.Fatalf("code = %d, want %d", code, ExitUsage)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("a SQLite database must be opened by itself")) {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }

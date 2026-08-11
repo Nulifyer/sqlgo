@@ -306,7 +306,7 @@ _sqlgo_conn_names() {
 
 _sqlgo_exec()       { _sqlgo_common_flags; _arguments '--allow-unsafe[permit destructive statements]' '--continue-on-error[keep running after failure]' '--record-history[append to history]' }
 _sqlgo_export()     { _sqlgo_common_flags }
-_sqlgo_open()       { _sqlgo_common_flags; _files -g '*.(csv|tsv|jsonl|json)' }
+_sqlgo_open()       { _sqlgo_common_flags; _files -g '*.(csv|tsv|jsonl|ndjson|db|db3|s3db|sqlite|sqlite3)' }
 _sqlgo_edit()       { _sqlgo_common_flags; _files -g '*.sql' }
 _sqlgo_version()    { }
 _sqlgo_help()       { _describe 'verb' verbs }

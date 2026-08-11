@@ -16,18 +16,29 @@ import (
 	"github.com/Nulifyer/sqlgo/internal/tui"
 )
 
-// openAllowedExts mirrors the extensions the file driver's importer
-// dispatches on. Validated up front so a typo fails loudly instead of
-// landing on the driver's "no loader for …" error deep in connect.
-var openAllowedExts = map[string]struct{}{
+// openImportExts mirrors the extensions the file driver's importer
+// dispatches on. SQLite databases with other extensions are also accepted
+// when their file header identifies them as SQLite.
+var openImportExts = map[string]struct{}{
 	".csv":    {},
 	".tsv":    {},
 	".jsonl":  {},
 	".ndjson": {},
 }
 
-// runOpen handles `sqlgo open FILE [FILE...]`. It loads CSV/TSV/JSONL
-// files into an ephemeral in-memory SQLite database via the file driver.
+var openSQLiteExts = map[string]struct{}{
+	".db":      {},
+	".db3":     {},
+	".s3db":    {},
+	".sqlite":  {},
+	".sqlite3": {},
+}
+
+const sqliteFileHeader = "SQLite format 3\x00"
+
+// runOpen handles `sqlgo open FILE [FILE...]`. It opens a SQLite database
+// directly or loads CSV/TSV/JSONL files into an ephemeral in-memory SQLite
+// database via the file driver.
 //
 // Default shape is interactive: with no query source the TUI launches
 // pre-connected to the file so the user can browse the schema and run
@@ -61,11 +72,11 @@ func runOpen(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 
 	fs.Usage = func() {
 		io.WriteString(stderr, "usage: sqlgo open FILE [FILE...] [flags]\n")
-		io.WriteString(stderr, "\nLoads CSV/TSV/JSONL files into an ephemeral in-memory SQLite\n")
-		io.WriteString(stderr, "database (one table per file, named after the filename). With no\n")
-		io.WriteString(stderr, "query flags the TUI launches pre-connected to the file. Passing\n")
+		io.WriteString(stderr, "\nOpens one SQLite database directly, or loads CSV/TSV/JSONL files into\n")
+		io.WriteString(stderr, "an ephemeral in-memory SQLite database (one table per file, named after\n")
+		io.WriteString(stderr, "the filename). With no query flags the TUI launches pre-connected. Passing\n")
 		io.WriteString(stderr, "-q/-f/stdin runs headlessly and writes results to stdout or -o.\n")
-		io.WriteString(stderr, "Nothing is persisted; no saved connection is created.\n\n")
+		io.WriteString(stderr, "No saved connection is created.\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(argv); err != nil {
@@ -81,16 +92,10 @@ func runOpen(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 		fs.Usage()
 		return ExitUsage
 	}
-	for _, p := range paths {
-		ext := strings.ToLower(filepath.Ext(p))
-		if _, ok := openAllowedExts[ext]; !ok {
-			stderrf(stderr, "open: unsupported extension %q for %s (expected .csv, .tsv, .jsonl, .ndjson)", ext, p)
-			return ExitUsage
-		}
-		if _, err := os.Stat(p); err != nil {
-			stderrf(stderr, "open: %v", err)
-			return ExitUsage
-		}
+	driver, err := openDriverForPaths(paths)
+	if err != nil {
+		stderrf(stderr, "open: %v", err)
+		return ExitUsage
 	}
 
 	// Resolve any user-supplied query. Unlike exec, an empty result here
@@ -118,7 +123,11 @@ func runOpen(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 		sql = string(b)
 	}
 
-	connCfg := db.Config{Database: strings.Join(paths, ";")}
+	database := paths[0]
+	if driver == "file" {
+		database = strings.Join(paths, ";")
+	}
+	connCfg := db.Config{Database: database}
 	headless := strings.TrimSpace(sql) != "" || outPath != ""
 
 	if !headless {
@@ -127,7 +136,7 @@ func runOpen(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 		name := "open:" + strings.Join(paths, ",")
 		ic := &config.Connection{
 			Name:     name,
-			Driver:   "file",
+			Driver:   driver,
 			Database: connCfg.Database,
 		}
 		if err := tui.Run(tui.Options{InitialConnection: ic}); err != nil {
@@ -172,8 +181,9 @@ func runOpen(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 		outClose = fp.Close
 	}
 
+	runtime := runtimeDepsFactory()
 	opts := &runOptions{
-		driver:          "file",
+		driver:          driver,
 		cfg:             connCfg,
 		sql:             sql,
 		format:          fmtSel,
@@ -185,5 +195,63 @@ func runOpen(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 		outClose:        outClose,
 		stderr:          stderr,
 	}
+	opts.openConn = func(ctx context.Context) (db.Conn, io.Closer, error) {
+		d, err := runtime.GetDriver(driver)
+		if err != nil {
+			return nil, nil, err
+		}
+		conn, err := d.Open(ctx, connCfg)
+		return conn, nil, err
+	}
 	return run(context.Background(), opts)
+}
+
+func openDriverForPaths(paths []string) (string, error) {
+	foundSQLite := false
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			return "", err
+		}
+
+		ext := strings.ToLower(filepath.Ext(p))
+		if _, ok := openImportExts[ext]; ok {
+			continue
+		}
+		if _, ok := openSQLiteExts[ext]; ok {
+			foundSQLite = true
+			continue
+		}
+
+		isSQLite, err := hasSQLiteHeader(p)
+		if err != nil {
+			return "", err
+		}
+		if !isSQLite {
+			return "", errors.New("unsupported file " + p + " (expected CSV, TSV, JSONL, or SQLite database)")
+		}
+		foundSQLite = true
+	}
+
+	if foundSQLite {
+		if len(paths) != 1 {
+			return "", errors.New("a SQLite database must be opened by itself")
+		}
+		return "sqlite", nil
+	}
+	return "file", nil
+}
+
+func hasSQLiteHeader(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	header := make([]byte, len(sqliteFileHeader))
+	n, err := io.ReadFull(f, header)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return false, err
+	}
+	return n == len(header) && string(header) == sqliteFileHeader, nil
 }
