@@ -146,7 +146,7 @@ INSERT IGNORE INTO sqlgo_b.gadgets VALUES (1,'gizmo-B'),(2,'widget-B');
 function Seed-Oracle {
     Write-Log "oracle: waiting for server (may take 60-120s on first boot)"
     $ok = Wait-For "oracle" {
-        podman exec sqlgo-oracle bash -c "echo 'SELECT 1 FROM dual;' | sqlplus -s system/sqlgo_dev@//localhost:1521/FREEPDB1"
+        podman exec sqlgo-oracle bash -c "printf 'WHENEVER OSERROR EXIT FAILURE;\nWHENEVER SQLERROR EXIT SQL.SQLCODE;\nSELECT 1 FROM dual;\nEXIT;\n' | sqlplus -s system/sqlgo_dev@//localhost:1521/FREEPDB1"
     }
     if (-not $ok) { return }
 
@@ -292,7 +292,7 @@ GO
 use sqlgo_a
 GO
 if not exists (select 1 from sysusers where name='tester')
-  exec sp_adduser tester
+  exec sp_adduser 'tester'
 GO
 if exists (select 1 from sysobjects where name='widgets' and type='U')
   drop table widgets
@@ -306,7 +306,7 @@ GO
 use sqlgo_b
 GO
 if not exists (select 1 from sysusers where name='tester')
-  exec sp_adduser tester
+  exec sp_adduser 'tester'
 GO
 if exists (select 1 from sysobjects where name='gadgets' and type='U')
   drop table gadgets
@@ -545,6 +545,11 @@ try {
     # --- register sqlgo connections ------------------------------------------
     # Save a connection entry in the sqlgo store for each seeded service so
     # the TUI picker already lists them.
+    if ($env:SQLGO_SKIP_REGISTER -eq "1") {
+        Write-Log "all services seeded (connection registration skipped)"
+        return
+    }
+
     function Register-Conn {
         param([string]$Name, [string]$Password, [string[]]$Rest)
         if ($Password) {

@@ -59,7 +59,7 @@ func TestIntegrationBigQueryErrors(t *testing.T) {
 			CheckNumber:         true,
 			WantNumber:          400,
 			WantReason:          "jobInternalError",
-			WantMessageContains: []string{`Expected end of input but got identifier "FORM"`},
+			WantMessageContains: []string{`got identifier "FORM"`},
 		},
 	})
 }

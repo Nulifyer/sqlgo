@@ -6,8 +6,9 @@
 # isn't the only thing visible on connect.
 #
 # Usage:
-#   ./scripts/seed-testdbs.sh                  # all services
-#   ./scripts/seed-testdbs.sh mssql postgres   # subset
+#   ./.scripts/seed-testdbs.sh                  # all services
+#   ./.scripts/seed-testdbs.sh mssql postgres   # subset
+#   SQLGO_SKIP_REGISTER=1 ./.scripts/seed-testdbs.sh postgres
 #
 # Idempotent: re-runs are no-ops. Seeds go through `podman exec` into
 # each service container so no host-side DB tooling is required.
@@ -18,9 +19,6 @@ export MSYS_NO_PATHCONV=1
 cd "$(dirname "$0")/.."
 
 ALL_SERVICES=(mssql postgres mysql oracle firebird libsql sybase clickhouse trino spanner bigquery)
-# Services intentionally excluded from the default set (heavy images,
-# license gates, etc.). Still seedable by explicit arg: ./seed-testdbs.sh hana
-OPTIONAL_SERVICES=(hana)
 if [ $# -gt 0 ]; then
     SERVICES=("$@")
 else
@@ -33,7 +31,7 @@ warn() { printf '[seed] WARN: %s\n' "$*" >&2; }
 # wait_for <description> <cmd...> — polls until cmd exits 0 or 60 tries.
 wait_for() {
     local desc="$1"; shift
-    for i in $(seq 1 60); do
+    for _ in $(seq 1 60); do
         if "$@" >/dev/null 2>&1; then
             return 0
         fi
@@ -137,7 +135,7 @@ seed_mysql() {
 seed_oracle() {
     log "oracle: waiting for server (may take 60-120s on first boot)"
     wait_for "oracle" podman exec sqlgo-oracle \
-        bash -c "echo 'SELECT 1 FROM dual;' | sqlplus -s system/sqlgo_dev@//localhost:1521/FREEPDB1" \
+        bash -c "printf 'WHENEVER OSERROR EXIT FAILURE;\nWHENEVER SQLERROR EXIT SQL.SQLCODE;\nSELECT 1 FROM dual;\nEXIT;\n' | sqlplus -s system/sqlgo_dev@//localhost:1521/FREEPDB1" \
         || return 0
 
     log "oracle: ensuring SQLGO_A/SQLGO_B schemas"
@@ -254,7 +252,7 @@ GO
 use sqlgo_a
 GO
 if not exists (select 1 from sysusers where name='tester')
-  exec sp_adduser tester
+  exec sp_adduser 'tester'
 GO
 if exists (select 1 from sysobjects where name='widgets' and type='U')
   drop table widgets
@@ -268,7 +266,7 @@ GO
 use sqlgo_b
 GO
 if not exists (select 1 from sysusers where name='tester')
-  exec sp_adduser tester
+  exec sp_adduser 'tester'
 GO
 if exists (select 1 from sysobjects where name='gadgets' and type='U')
   drop table gadgets
@@ -447,6 +445,11 @@ done
 # --- register sqlgo connections --------------------------------------------
 # Save a connection entry in the sqlgo store for each seeded service so the
 # TUI picker already lists them.
+if [ "${SQLGO_SKIP_REGISTER:-}" = "1" ]; then
+    log "all services seeded (connection registration skipped)"
+    exit 0
+fi
+
 SQLGO="go run -tags sqlite_fts5 ./cmd/sqlgo"
 register() {
     local name="$1" pass="$2"; shift 2

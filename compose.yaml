@@ -77,7 +77,7 @@ services:
         "
 
   postgres:
-    image: postgres:16-alpine
+    image: docker.io/library/postgres:16-alpine
     container_name: sqlgo-postgres
     environment:
       POSTGRES_USER: sqlgo
@@ -92,7 +92,7 @@ services:
       retries: 10
 
   mysql:
-    image: mysql:8.4
+    image: docker.io/library/mysql:8.4
     container_name: sqlgo-mysql
     environment:
       MYSQL_ROOT_PASSWORD: sqlgo_dev
@@ -114,7 +114,7 @@ services:
   # ORACLE_PASSWORD sets the SYS/SYSTEM password. APP_USER creates a
   # non-privileged schema used by the integration tests.
   oracle:
-    image: gvenzl/oracle-free:23-slim-faststart
+    image: docker.io/gvenzl/oracle-free:23-slim-faststart
     container_name: sqlgo-oracle
     environment:
       ORACLE_PASSWORD: sqlgo_dev
@@ -132,7 +132,7 @@ services:
   # Firebird 5.x. FIREBIRD_DATABASE seeds an initial database owned by
   # the APP user; the integration test connects to it directly.
   firebird:
-    image: firebirdsql/firebird:5
+    image: docker.io/firebirdsql/firebird:5
     container_name: sqlgo-firebird
     environment:
       FIREBIRD_ROOT_PASSWORD: sqlgo_dev
@@ -160,7 +160,7 @@ services:
   # preseeded `testdb` database owned by `tester`/`guest1234`. First
   # boot takes ~60s while dataserver initializes.
   sybase:
-    image: datagrip/sybase:16.0
+    image: docker.io/datagrip/sybase:16.0
     container_name: sqlgo-sybase
     ports:
       - "15000:5000"
@@ -179,7 +179,7 @@ services:
   # a cert on every connection. Used by the ClickHouseTLS / MTLS
   # integration tests in internal/db/clickhouse/.
   clickhouse:
-    image: clickhouse/clickhouse-server:24-alpine
+    image: docker.io/clickhouse/clickhouse-server:24-alpine
     container_name: sqlgo-clickhouse
     environment:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
@@ -208,7 +208,7 @@ services:
   # HTTPS per the driver, so we stick to plain HTTP for dev. First boot
   # takes ~15-30s while the coordinator finishes starting workers.
   trino:
-    image: trinodb/trino:latest
+    image: docker.io/trinodb/trino:latest
     container_name: sqlgo-trino
     ports:
       - "18081:8080"
@@ -231,7 +231,7 @@ services:
   #   podman login docker.io
   #   podman compose --profile auth up -d vertica
   vertica:
-    image: opentext/vertica-ce:latest
+    image: docker.io/opentext/vertica-ce:latest
     container_name: sqlgo-vertica
     profiles: ["auth"]
     ports:
@@ -253,7 +253,7 @@ services:
   # lives on 39013). SYSTEM password is set via the master-password
   # file baked into /etc/entry-hdb-master-password.txt at start-up.
   hana:
-    image: saplabs/hanaexpress:latest
+    image: docker.io/saplabs/hanaexpress:latest
     container_name: sqlgo-hana
     profiles: ["heavy"]
     # saplabs/hanaexpress wants the license flag and a master password
@@ -316,7 +316,7 @@ services:
   # (setting SQLFLITE_USERNAME causes a segfault in current builds).
   # gRPC listens on 31337 in-container, mapped to host 19070. First boot ~5s.
   flightsql:
-    image: voltrondata/sqlflite:latest
+    image: docker.io/voltrondata/sqlflite:latest
     container_name: sqlgo-flightsql
     environment:
       SQLFLITE_PASSWORD: "sqlgo_dev"
@@ -331,7 +331,7 @@ services:
   # tunnel path can be exercised end-to-end. Authenticates with
   # password "sqlgo_dev" for user "sqlgo".
   sshd:
-    image: linuxserver/openssh-server:latest
+    image: lscr.io/linuxserver/openssh-server:latest
     container_name: sqlgo-sshd
     environment:
       PUID: "1000"
@@ -344,4 +344,3 @@ services:
       - "12222:2222"
     depends_on:
       - postgres
-
