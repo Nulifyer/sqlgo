@@ -27,7 +27,7 @@ builds:
       - -trimpath
       - -buildvcs=false
     ldflags:
-      - -s -w
+      - -s -w -X github.com/Nulifyer/sqlgo/cmd/sqlgo/cli.Version={{.Tag}}
     # Per-target overrides set the cross compiler and apply OS-specific
     # hardening / perf flags. See docs/db-support-plan.md and the goreleaser
     # build for rationale on each flag (FORTIFY_SOURCE, CET, BTI, RELRO, etc).
@@ -46,7 +46,7 @@ builds:
           - -buildvcs=false
           - -buildmode=pie
         ldflags:
-          - -s -w -linkmode=external
+          - -s -w -linkmode=external -X github.com/Nulifyer/sqlgo/cmd/sqlgo/cli.Version={{.Tag}}
 
       # linux/arm64: same as amd64 but PAC+BTI instead of CET.
       - goos: linux
@@ -62,7 +62,7 @@ builds:
           - -buildvcs=false
           - -buildmode=pie
         ldflags:
-          - -s -w -linkmode=external
+          - -s -w -linkmode=external -X github.com/Nulifyer/sqlgo/cmd/sqlgo/cli.Version={{.Tag}}
 
       # windows/amd64: Go linker handles PIE/ASLR/DEP. -lssp links libssp for
       # the stack protector. FORTIFY_SOURCE skipped (no glibc on mingw).
