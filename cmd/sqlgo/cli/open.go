@@ -71,7 +71,7 @@ func runOpen(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 	fs.IntVar(&maxRows, "max-rows", 0, "stop reading after this many rows (headless)")
 
 	fs.Usage = func() {
-		io.WriteString(stderr, "usage: sqlgo open FILE [FILE...] [flags]\n")
+		io.WriteString(stderr, "usage: sqlgo open [flags] FILE [FILE...]\n")
 		io.WriteString(stderr, "\nOpens one SQLite database directly, or loads CSV/TSV/JSONL files into\n")
 		io.WriteString(stderr, "an ephemeral in-memory SQLite database (one table per file, named after\n")
 		io.WriteString(stderr, "the filename). With no query flags the TUI launches pre-connected. Passing\n")

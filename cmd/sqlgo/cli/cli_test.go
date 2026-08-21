@@ -66,6 +66,57 @@ func TestOpenSQLiteDatabaseHeadless(t *testing.T) {
 	}
 }
 
+func TestOpenDelimitedFilesHeadless(t *testing.T) {
+	dir := t.TempDir()
+	csvPath := filepath.Join(dir, "customers.csv")
+	tsvPath := filepath.Join(dir, "orders.tsv")
+	if err := os.WriteFile(csvPath, []byte("id,name\n1,Ada\n2,Grace\n"), 0o644); err != nil {
+		t.Fatalf("write CSV fixture: %v", err)
+	}
+	if err := os.WriteFile(tsvPath, []byte("customer_id\ttotal\n1\t19.5\n2\t42\n"), 0o644); err != nil {
+		t.Fatalf("write TSV fixture: %v", err)
+	}
+
+	restoreTerminal := stubTerminalDetector(t, false)
+	defer restoreTerminal()
+
+	var stdout, stderr bytes.Buffer
+	code := Dispatch(
+		[]string{
+			"open",
+			"--format", "jsonl",
+			"-q", "SELECT c.name, o.total FROM customers c JOIN orders o ON o.customer_id = c.id ORDER BY c.id",
+			csvPath,
+			tsvPath,
+		},
+		bytes.NewBuffer(nil),
+		&stdout,
+		&stderr,
+	)
+	if code != ExitOK {
+		t.Fatalf("code = %d, want %d; stderr = %q", code, ExitOK, stderr.String())
+	}
+	if got, want := stdout.String(), "{\"name\":\"Ada\",\"total\":\"19.5\"}\n{\"name\":\"Grace\",\"total\":\"42\"}\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestOpenHelpShowsFlagsBeforeFiles(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Dispatch(
+		[]string{"open", "-h"},
+		bytes.NewBuffer(nil),
+		&stdout,
+		&stderr,
+	)
+	if code != ExitOK {
+		t.Fatalf("code = %d, want %d", code, ExitOK)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("usage: sqlgo open [flags] FILE [FILE...]")) {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestOpenSQLiteDatabaseMustBeOpenedAlone(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "app.sqlite")
