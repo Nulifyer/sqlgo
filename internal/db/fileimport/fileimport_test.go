@@ -3,6 +3,7 @@ package fileimport
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,6 +20,37 @@ func openMem(t *testing.T) *sql.DB {
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+func TestWriteTableRollsBackStreamingSourceError(t *testing.T) {
+	t.Parallel()
+	db := openMem(t)
+	sourceErr := errors.New("source failed")
+	calls := 0
+	err := writeTable(
+		context.Background(),
+		db,
+		"streamed",
+		[]string{"id"},
+		[]ColumnType{TypeInteger},
+		func() ([]any, bool, error) {
+			calls++
+			if calls == 1 {
+				return []any{"1"}, true, nil
+			}
+			return nil, false, sourceErr
+		},
+	)
+	if !errors.Is(err, sourceErr) {
+		t.Fatalf("writeTable error = %v, want %v", err, sourceErr)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'streamed'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("streamed table exists after rollback")
+	}
 }
 
 func writeFile(t *testing.T, name, body string) string {

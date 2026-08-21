@@ -5,7 +5,15 @@ import (
 	"testing"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
+	"github.com/Nulifyer/sqlgo/internal/db/mssql"
 )
+
+func TestTransportIsCompatibleWithMSSQLProfile(t *testing.T) {
+	t.Parallel()
+	if !mssql.Profile.SupportsTransport(AzureSQLTransport.Name) {
+		t.Fatalf("MSSQL profile does not support transport %q", AzureSQLTransport.Name)
+	}
+}
 
 // TestBuildDSN_Modes covers the semantic field mapping per fedauth
 // mode. Each case declares the Config and the (key -> value) query

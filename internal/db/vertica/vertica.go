@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 
 	vertigo "github.com/vertica/vertica-sql-go"
@@ -43,7 +42,8 @@ func init() {
 // text format (no JSON option) so ExplainFormat stays None until the TUI
 // grows a Vertica-aware parser.
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"vertica"},
 	Capabilities: db.Capabilities{
 		SchemaDepth:          db.SchemaDepthSchemas,
 		LimitSyntax:          db.LimitSyntaxLimit,
@@ -303,7 +303,7 @@ func buildDSN(cfg db.Config) string {
 	u := url.URL{
 		Scheme: "vertica",
 		User:   userinfo,
-		Host:   host + ":" + strconv.Itoa(port),
+		Host:   db.JoinHostPort(host, port),
 	}
 	if cfg.Database != "" {
 		// url.URL escapes the path; database names rarely contain

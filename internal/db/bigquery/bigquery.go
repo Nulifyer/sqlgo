@@ -36,7 +36,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
+	"net/url"
 	"strings"
 	"time"
 
@@ -115,14 +115,11 @@ func buildClientOptions(cfg db.Config) ([]option.ClientOption, error) {
 
 	endpoint := strings.TrimSpace(cfg.Options["endpoint"])
 	if endpoint == "" && strings.TrimSpace(cfg.Host) != "" {
-		host := strings.TrimSpace(cfg.Host)
-		if !strings.Contains(host, "://") {
-			host = "http://" + host
+		formatted, err := endpointForHostPort(strings.TrimSpace(cfg.Host), cfg.Port)
+		if err != nil {
+			return nil, err
 		}
-		if cfg.Port > 0 {
-			host = host + ":" + strconv.Itoa(cfg.Port)
-		}
-		endpoint = host
+		endpoint = formatted
 	}
 	if endpoint != "" {
 		opts = append(opts, option.WithEndpoint(endpoint))
@@ -155,6 +152,30 @@ func buildClientOptions(cfg db.Config) ([]option.ClientOption, error) {
 		opts = append(opts, option.WithCredentialsJSON([]byte(v)))
 	}
 	return opts, nil
+}
+
+func endpointForHostPort(rawHost string, port int) (string, error) {
+	if !strings.Contains(rawHost, "://") {
+		if port > 0 {
+			rawHost = db.JoinHostPort(rawHost, port)
+		} else {
+			rawHost = db.BracketIPv6Host(rawHost)
+		}
+		return "http://" + rawHost, nil
+	}
+
+	u, err := url.Parse(rawHost)
+	if err != nil {
+		return "", fmt.Errorf("parse bigquery endpoint host: %w", err)
+	}
+	if port > 0 {
+		hostname := u.Hostname()
+		if hostname == "" {
+			return "", fmt.Errorf("parse bigquery endpoint host: missing hostname")
+		}
+		u.Host = db.JoinHostPort(hostname, port)
+	}
+	return u.String(), nil
 }
 
 // --- conn -------------------------------------------------------------------

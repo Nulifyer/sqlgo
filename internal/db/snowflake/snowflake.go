@@ -36,7 +36,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
 
 	_ "github.com/snowflakedb/gosnowflake"
@@ -58,7 +57,8 @@ func init() {
 // procedures (JavaScript / SQL / Python), and transactions. EXPLAIN
 // returns a text plan, not JSON, so ExplainFormat stays None.
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"snowflake"},
 	Capabilities: db.Capabilities{
 		SchemaDepth:          db.SchemaDepthSchemas,
 		LimitSyntax:          db.LimitSyntaxLimit,
@@ -198,7 +198,9 @@ func buildDSN(cfg db.Config) string {
 
 	host := cfg.Host
 	if cfg.Port != 0 {
-		host = host + ":" + strconv.Itoa(cfg.Port)
+		host = db.JoinHostPort(host, cfg.Port)
+	} else {
+		host = db.BracketIPv6Host(host)
 	}
 
 	// Database + optional schema compose the URL path. gosnowflake

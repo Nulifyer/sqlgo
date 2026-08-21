@@ -1635,12 +1635,16 @@ func (a *app) fetchColumnsFor(t tableScope, refreshSig string) ([]db.Column, boo
 			err  error
 		)
 		if t.catalog != "" {
+			release := a.connOps.acquire()
+			defer release()
 			if colr, ok := a.conn.(db.DatabaseColumner); ok {
 				cols, err = colr.ColumnsIn(ctx, t.catalog, ref)
 			} else {
 				cols, err = a.conn.Columns(ctx, ref)
 			}
 		} else {
+			release := a.connOps.acquire()
+			defer release()
 			cols, err = a.conn.Columns(ctx, ref)
 		}
 		if err != nil {
@@ -1662,6 +1666,8 @@ func (a *app) fetchColumnsFor(t tableScope, refreshSig string) ([]db.Column, boo
 			cols []db.Column
 			err  error
 		)
+		release := a.connOps.acquire()
+		defer release()
 		// Route through ColumnsIn when the tab has a pinned catalog so
 		// the driver's session-scoped columns query (e.g. MSSQL's
 		// INFORMATION_SCHEMA.COLUMNS) runs against the right DB instead

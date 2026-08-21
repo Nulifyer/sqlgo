@@ -84,6 +84,7 @@ func helpContent() []helpLine {
 
 		section("Query editor"),
 		bind("F5", "run query"),
+		bind("F6", "cancel running query from any panel"),
 		bind("F9", "explain plan"),
 		bind("Ctrl+O", "open SQL file"),
 		bind("Ctrl+S", "save tab"),
@@ -161,7 +162,7 @@ func helpContent() []helpLine {
 		blank,
 
 		section("Results"),
-		bind("Ctrl+C", "cancel running query"),
+		bind("Ctrl+C / F6", "cancel running query (F6 works from any panel)"),
 		bind("Ctrl+F", "filter rows"),
 		bind("↑ / ↓ / ← / →", "move cell cursor"),
 		bind("PgUp / PgDn", "page rows"),

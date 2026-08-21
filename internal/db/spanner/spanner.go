@@ -43,7 +43,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
 
 	_ "github.com/googleapis/go-sql-spanner"
@@ -67,7 +66,8 @@ func init() {
 // ANSI-compatible enough that DialectSpanner is the right tag for
 // both modes.
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"spanner"},
 	Capabilities: db.Capabilities{
 		SchemaDepth:           db.SchemaDepthSchemas,
 		LimitSyntax:           db.LimitSyntaxLimit,
@@ -188,10 +188,10 @@ func buildDSN(cfg db.Config) string {
 
 	var b strings.Builder
 	if host := strings.TrimSpace(cfg.Host); host != "" {
-		b.WriteString(host)
 		if cfg.Port > 0 {
-			b.WriteString(":")
-			b.WriteString(strconv.Itoa(cfg.Port))
+			b.WriteString(db.JoinHostPort(host, cfg.Port))
+		} else {
+			b.WriteString(db.BracketIPv6Host(host))
 		}
 		b.WriteString("/")
 	}

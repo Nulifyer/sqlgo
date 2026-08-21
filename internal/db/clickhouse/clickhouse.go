@@ -26,7 +26,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 
 	chgo "github.com/ClickHouse/clickhouse-go/v2"
@@ -51,7 +50,8 @@ func init() {
 // tables in one flat listing (databases are lightweight namespaces, and
 // CH supports 2-part `db.table` references from any session).
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"clickhouse"},
 	Capabilities: db.Capabilities{
 		SchemaDepth:          db.SchemaDepthSchemas,
 		LimitSyntax:          db.LimitSyntaxLimit,
@@ -245,7 +245,7 @@ func buildDSN(cfg db.Config) string {
 	u := url.URL{
 		Scheme: "clickhouse",
 		User:   url.UserPassword(cfg.User, cfg.Password),
-		Host:   host + ":" + strconv.Itoa(port),
+		Host:   db.JoinHostPort(host, port),
 	}
 	if cfg.Database != "" {
 		u.Path = "/" + cfg.Database

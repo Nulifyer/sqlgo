@@ -14,7 +14,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
 
 	_ "github.com/trinodb/trino-go-client/trino"
@@ -38,7 +37,8 @@ func init() {
 // most deployments disable them at the coordinator -- we treat the engine
 // as non-transactional for the autocomplete/safety overlay.
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"trino"},
 	Capabilities: db.Capabilities{
 		SchemaDepth:          db.SchemaDepthSchemas,
 		LimitSyntax:          db.LimitSyntaxLimit,
@@ -191,7 +191,7 @@ func buildDSN(cfg db.Config) string {
 	u := url.URL{
 		Scheme: scheme,
 		User:   userinfo,
-		Host:   host + ":" + strconv.Itoa(port),
+		Host:   db.JoinHostPort(host, port),
 	}
 
 	q := u.Query()

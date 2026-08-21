@@ -389,7 +389,7 @@ sqlgo conns export -o conns.json
 sqlgo conns import -i conns.json
 ```
 
-`conns export` preserves keyring-backed passwords as placeholders, so it is useful for moving connection metadata but not for making a portable secret backup.
+`conns export` omits keyring-backed passwords and replaces plaintext passwords, SSH passwords, tokens, passphrases, and inline credential options with redaction markers. Importing over an existing connection preserves its local secrets. A newly imported connection needs its credentials entered again.
 
 Exit codes:
 

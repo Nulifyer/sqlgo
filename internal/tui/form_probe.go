@@ -189,6 +189,9 @@ func (fl *formLayer) startTestAuth(a *app) {
 }
 
 func probeAuth(c config.Connection) string {
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+
 	d, err := db.Get(c.Driver)
 	if err != nil {
 		return "auth: " + err.Error()
@@ -216,7 +219,7 @@ func probeAuth(c config.Connection) string {
 			TargetHost:  c.Host,
 			TargetPort:  c.Port,
 		}
-		t, terr := sshtunnel.Open(tcfg)
+		t, terr := sshtunnel.OpenContext(ctx, tcfg)
 		if terr != nil {
 			return "auth: ssh tunnel: " + terr.Error()
 		}
@@ -225,8 +228,6 @@ func probeAuth(c config.Connection) string {
 		cfg.Host = t.LocalHost
 		cfg.Port = t.LocalPort
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
-	defer cancel()
 	conn, err := d.Open(ctx, cfg)
 	if err != nil {
 		return "auth: " + err.Error()

@@ -1,6 +1,8 @@
 package mysql
 
 import (
+	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -79,6 +81,29 @@ func TestBuildDSNRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBuildDSNIPv6(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		host string
+		want string
+	}{
+		{name: "literal", host: "2001:db8::1", want: "[2001:db8::1]:33060"},
+		{name: "bracketed", host: "[2001:db8::1]", want: "[2001:db8::1]:33060"},
+		{name: "zone", host: "fe80::1%eth0", want: "[fe80::1%eth0]:33060"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := gomysql.ParseDSN(buildDSN(db.Config{Host: tc.host, Port: 33060, User: "app"}))
+			if err != nil {
+				t.Fatalf("ParseDSN: %v", err)
+			}
+			if parsed.Addr != tc.want {
+				t.Fatalf("parsed address = %q, want %q", parsed.Addr, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildDSNExtraParams(t *testing.T) {
 	t.Parallel()
 	dsn := buildDSN(db.Config{
@@ -119,6 +144,24 @@ func TestRDSIAMEnabled(t *testing.T) {
 				t.Errorf("rdsIAMEnabled(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestProfilePreparationDisabledLeavesConfigUnchanged(t *testing.T) {
+	t.Parallel()
+	cfg := db.Config{
+		Host:    "db.example.com",
+		Options: map[string]string{"tls": "verify-full"},
+	}
+	got, err := Profile.PrepareConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("PrepareConfig: %v", err)
+	}
+	if !reflect.DeepEqual(got, cfg) {
+		t.Fatalf("PrepareConfig = %#v, want %#v", got, cfg)
+	}
+	if !Profile.SupportsTransport(MySQLTransport.Name) || Profile.SupportsTransport("pgx") {
+		t.Fatalf("profile transport compatibility = %v/%v", Profile.SupportsTransport(MySQLTransport.Name), Profile.SupportsTransport("pgx"))
 	}
 }
 

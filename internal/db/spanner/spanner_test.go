@@ -39,6 +39,18 @@ func TestBuildDSN(t *testing.T) {
 			wantParams: map[string]string{"autoConfigEmulator": "true"},
 		},
 		{
+			name: "ipv6_emulator_without_port",
+			cfg: db.Config{
+				Host:     "2001:db8::1",
+				Database: "sqlgo_test",
+				Options: map[string]string{
+					"project":  "sqlgo-emu",
+					"instance": "sqlgo",
+				},
+			},
+			wantPrefix: "[2001:db8::1]/projects/sqlgo-emu/instances/sqlgo/databases/sqlgo_test",
+		},
+		{
 			name: "production_path_only",
 			cfg: db.Config{
 				Database: "appdb",

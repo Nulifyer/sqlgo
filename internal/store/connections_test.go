@@ -3,12 +3,14 @@ package store
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Nulifyer/sqlgo/internal/config"
+	"github.com/Nulifyer/sqlgo/internal/secret"
 )
 
 func openTestStore(t *testing.T) *Store {
@@ -164,6 +166,98 @@ func TestExportImportRoundTrip(t *testing.T) {
 	}
 	if len(list) != 2 || list[0].Name != "a" || list[1].Name != "b" {
 		t.Errorf("dst list = %+v", list)
+	}
+}
+
+func TestExportRedactsPlaintextCredentials(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	ctx := context.Background()
+	c := sampleConn("prod")
+	c.Password = "database-secret"
+	c.SSH.Password = "ssh-secret"
+	c.Options = map[string]string{
+		"schema":           "analytics",
+		"access_token":     "oauth-secret",
+		"credentials_json": `{"private_key":"pem-secret"}`,
+	}
+	if err := s.SaveConnection(ctx, "", c); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := s.ExportJSON(ctx, &buf); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	for _, plaintext := range []string{"database-secret", "ssh-secret", "oauth-secret", "pem-secret"} {
+		if strings.Contains(buf.String(), plaintext) {
+			t.Fatalf("export contains plaintext %q: %s", plaintext, buf.String())
+		}
+	}
+	var exported config.File
+	if err := json.Unmarshal(buf.Bytes(), &exported); err != nil {
+		t.Fatalf("decode export: %v", err)
+	}
+	if len(exported.Connections) != 1 {
+		t.Fatalf("connections = %d, want 1", len(exported.Connections))
+	}
+	got := exported.Connections[0]
+	if got.Password != secret.RedactedPlaceholder || got.SSH.Password != secret.RedactedPlaceholder {
+		t.Fatalf("password placeholders = %q, %q", got.Password, got.SSH.Password)
+	}
+	if got.Options["access_token"] != secret.RedactedPlaceholder ||
+		got.Options["credentials_json"] != secret.RedactedPlaceholder {
+		t.Fatalf("option placeholders = %#v", got.Options)
+	}
+	if got.Options["schema"] != "analytics" {
+		t.Fatalf("ordinary option changed: %#v", got.Options)
+	}
+}
+
+func TestImportRedactedCredentialsPreservesExistingValues(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	ctx := context.Background()
+	existing := sampleConn("prod")
+	existing.Password = "database-secret"
+	existing.SSH.Password = "ssh-secret"
+	existing.Options = map[string]string{
+		"schema":       "old_schema",
+		"access_token": "oauth-secret",
+	}
+	if err := s.SaveConnection(ctx, "", existing); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	incoming := existing
+	incoming.Host = "new-host"
+	incoming.Password = secret.RedactedPlaceholder
+	incoming.SSH.Password = secret.RedactedPlaceholder
+	incoming.Options = map[string]string{
+		"schema":       "new_schema",
+		"access_token": secret.RedactedPlaceholder,
+		"clientSecret": secret.RedactedPlaceholder,
+	}
+	payload, err := json.Marshal(config.File{Connections: []config.Connection{incoming}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := s.ImportJSON(ctx, bytes.NewReader(payload)); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	got, err := s.GetConnection(ctx, "prod")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Host != "new-host" || got.Options["schema"] != "new_schema" {
+		t.Fatalf("ordinary fields not updated: %#v", got)
+	}
+	if got.Password != "database-secret" || got.SSH.Password != "ssh-secret" || got.Options["access_token"] != "oauth-secret" {
+		t.Fatalf("existing secrets not preserved: %#v", got)
+	}
+	if _, ok := got.Options["clientSecret"]; ok {
+		t.Fatalf("new redacted option was persisted: %#v", got.Options)
 	}
 }
 

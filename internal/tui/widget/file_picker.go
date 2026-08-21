@@ -204,7 +204,11 @@ func (fp *FilePicker) CycleExt(back bool) {
 // + Ext). The result is always absolute + cleaned.
 func (fp *FilePicker) Path() string {
 	dir := fp.resolvedDir()
-	name := strings.TrimSpace(fp.NameInput.String()) + fp.Ext()
+	name := strings.TrimSpace(fp.NameInput.String())
+	ext := fp.Ext()
+	if ext != "" && !strings.EqualFold(filepath.Ext(name), ext) {
+		name += ext
+	}
 	joined := filepath.Join(dir, name)
 	abs, err := filepath.Abs(joined)
 	if err != nil {

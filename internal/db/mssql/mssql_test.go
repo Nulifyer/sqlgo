@@ -1,11 +1,73 @@
 package mssql
 
 import (
+	"context"
+	stdsql "database/sql"
 	"net/url"
+	"regexp"
 	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 )
+
+func TestExplainInRestoresOriginalDatabase(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+
+	mock.ExpectPing()
+	mock.ExpectQuery(regexp.QuoteMeta(currentDatabaseQuery)).
+		WillReturnRows(sqlmock.NewRows([]string{"database"}).AddRow("source]db"))
+	mock.ExpectExec(regexp.QuoteMeta("USE [analytics]]db]")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("SET SHOWPLAN_XML ON")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1")).
+		WillReturnRows(sqlmock.NewRows([]string{"plan"}).AddRow("<ShowPlanXML/>"))
+	mock.ExpectExec(regexp.QuoteMeta("SET SHOWPLAN_XML OFF")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("USE [source]]db]")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectClose()
+
+	conn, err := db.OpenWith(context.Background(), Profile, db.Transport{
+		Name: "mssql",
+		Open: func(context.Context, db.Config) (*stdsql.DB, func() error, error) {
+			return sqlDB, nil, nil
+		},
+	}, db.Config{})
+	if err != nil {
+		t.Fatalf("OpenWith: %v", err)
+	}
+	explainer, ok := conn.(db.DatabaseExplainer)
+	if !ok {
+		t.Fatal("connection does not implement DatabaseExplainer")
+	}
+	rows, err := explainer.ExplainIn(context.Background(), "analytics]db", "SELECT 1")
+	if err != nil {
+		t.Fatalf("ExplainIn: %v", err)
+	}
+	if len(rows) != 1 || len(rows[0]) != 1 || rows[0][0] != "<ShowPlanXML/>" {
+		t.Fatalf("ExplainIn rows = %#v", rows)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProfileSupportsNativeAndAzureSQLTransports(t *testing.T) {
+	t.Parallel()
+	for _, transport := range []string{"mssql", "azuresql"} {
+		if !Profile.SupportsTransport(transport) {
+			t.Errorf("Profile.SupportsTransport(%q) = false, want true", transport)
+		}
+	}
+	if Profile.SupportsTransport("tds") {
+		t.Error(`Profile.SupportsTransport("tds") = true, want false`)
+	}
+}
 
 func TestBuildDSN(t *testing.T) {
 	t.Parallel()
@@ -244,6 +306,29 @@ func TestBuildDSN(t *testing.T) {
 				if got := q.Get(k); got != v {
 					t.Errorf("query[%q] = %q, want %q", k, got, v)
 				}
+			}
+		})
+	}
+}
+
+func TestBuildDSNIPv6(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		host string
+		want string
+	}{
+		{name: "literal", host: "2001:db8::1", want: "2001:db8::1"},
+		{name: "bracketed", host: "[2001:db8::1]", want: "2001:db8::1"},
+		{name: "zone", host: "fe80::1%eth0", want: "fe80::1%eth0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse(buildDSN(db.Config{Host: tc.host, Port: 11433, User: "sa"}))
+			if err != nil {
+				t.Fatalf("parse built DSN: %v", err)
+			}
+			if u.Hostname() != tc.want || u.Port() != "11433" {
+				t.Fatalf("built DSN host/port = %q/%q, want %q/11433", u.Hostname(), u.Port(), tc.want)
 			}
 		})
 	}

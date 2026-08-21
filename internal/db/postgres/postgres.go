@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -37,7 +36,9 @@ func init() {
 }
 
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"pgx"},
+	PrepareConfig:       prepareConfig,
 	Capabilities: db.Capabilities{
 		SchemaDepth:          db.SchemaDepthSchemas,
 		LimitSyntax:          db.LimitSyntaxLimit,
@@ -69,6 +70,10 @@ type preset struct{}
 func (preset) Name() string                  { return driverName }
 func (preset) Capabilities() db.Capabilities { return Profile.Capabilities }
 func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
+	return db.OpenWith(ctx, Profile, PgxTransport, cfg)
+}
+
+func prepareConfig(ctx context.Context, cfg db.Config) (db.Config, error) {
 	// AWS RDS IAM auth: swap cfg.Password for a freshly-generated IAM
 	// auth token (15-min TTL) before the DSN is built. The flag and
 	// region are stripped from Options so they don't leak into the
@@ -76,11 +81,11 @@ func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	if rdsIAMEnabled(cfg.Options) {
 		mutated, err := applyRDSIAMToken(ctx, cfg)
 		if err != nil {
-			return nil, fmt.Errorf("rds iam token: %w", err)
+			return cfg, fmt.Errorf("rds iam token: %w", err)
 		}
-		cfg = mutated
+		return mutated, nil
 	}
-	return db.OpenWith(ctx, Profile, PgxTransport, cfg)
+	return cfg, nil
 }
 
 // rdsIAMEnabled reports whether the aws_rds_iam option is set to a
@@ -123,7 +128,7 @@ func applyRDSIAMToken(ctx context.Context, cfg db.Config) (db.Config, error) {
 	if port == 0 {
 		port = 5432
 	}
-	endpoint := host + ":" + strconv.Itoa(port)
+	endpoint := db.JoinHostPort(host, port)
 	token, err := rdsauth.BuildAuthToken(ctx, endpoint, awsCfg.Region, cfg.User, awsCfg.Credentials)
 	if err != nil {
 		return cfg, fmt.Errorf("build rds auth token: %w", err)
@@ -283,7 +288,7 @@ func buildDSN(cfg db.Config) string {
 	u := url.URL{
 		Scheme: "postgres",
 		User:   url.UserPassword(cfg.User, cfg.Password),
-		Host:   host + ":" + strconv.Itoa(port),
+		Host:   db.JoinHostPort(host, port),
 	}
 	if cfg.Database != "" {
 		u.Path = "/" + cfg.Database

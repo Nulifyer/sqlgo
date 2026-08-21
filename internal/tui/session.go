@@ -46,16 +46,12 @@ func newResultTab(title string) *resultTab {
 // swaps this pointer. results is the ordered list of tabs for the current
 // query; activeResult indexes into it.
 //
-// Async callback ownership rule: when a goroutine posts a closure to
-// a.asyncCh that touches a session, it MUST re-read the session pointer
-// from m.sessions[...] inside the callback rather than closing over a
-// captured *session at spawn time. By the time the callback runs the
-// user may have closed the tab or switched the active session, and a
-// captured pointer will silently write to an abandoned session (stale
-// row counts, ghost "running…" states). The query-runner path in
-// main_layer.go is the canonical example: it captures the session
-// *index* and the pre-spawn conn, then dereferences both inside the
-// callback and drops the event if either has changed.
+// Async callback ownership rule: callbacks that touch a session must either
+// re-resolve it from the current main-layer state or carry an explicit
+// generation fence. Query events use the latter: they capture *session plus
+// runGen, and handleQueryEvent drops events after cancellation, tab closure,
+// or a newer run. Other callbacks also compare their captured connection with
+// the active connection before applying results.
 type session struct {
 	// title is the label shown on the query tab strip ("Query 1",
 	// "Query 2", ...). Auto-generated on new tab; not user-editable yet.
@@ -67,11 +63,10 @@ type session struct {
 	results      []*resultTab
 	activeResult int
 
-	// Per-session query runner state. Moved off the app so a long
-	// query in one tab does not block the Run action in another. The
-	// *sql.DB pool underlying every adapter is already goroutine-safe,
-	// so parallel queries just need independent cancel handles.
+	// Per-session query runner state. Runs are independently cancellable,
+	// while app.connOps serializes their shared db.Conn leases.
 	running                bool
+	runGen                 uint64
 	runnerFrame            string
 	runnerDone             chan struct{}
 	cancel                 context.CancelFunc

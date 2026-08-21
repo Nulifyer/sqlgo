@@ -10,6 +10,7 @@
 package sshtunnel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -51,6 +52,13 @@ type Tunnel struct {
 // returns a Tunnel ready to forward. Errors tear down any
 // partial state.
 func Open(cfg Config) (*Tunnel, error) {
+	return OpenContext(context.Background(), cfg)
+}
+
+// OpenContext is Open with caller-controlled cancellation and deadlines for
+// establishing the TCP and SSH connections. Once it returns a Tunnel, the
+// caller owns the tunnel's lifetime and must call Close.
+func OpenContext(ctx context.Context, cfg Config) (*Tunnel, error) {
 	if cfg.SSHHost == "" {
 		return nil, errors.New("ssh tunnel: empty ssh host")
 	}
@@ -79,8 +87,25 @@ func Open(cfg Config) (*Tunnel, error) {
 		HostKeyCallback: hostKeyCb,
 	}
 	sshAddr := net.JoinHostPort(cfg.SSHHost, strconv.Itoa(cfg.SSHPort))
-	client, err := ssh.Dial("tcp", sshAddr, clientCfg)
+	rawConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", sshAddr)
 	if err != nil {
+		return nil, fmt.Errorf("ssh dial %s: %w", sshAddr, err)
+	}
+
+	// ssh.NewClientConn has no context-aware variant. Closing the raw socket
+	// on cancellation interrupts a stalled version exchange or handshake.
+	handshakeDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = rawConn.Close()
+		case <-handshakeDone:
+		}
+	}()
+	sshConn, chans, reqs, err := ssh.NewClientConn(rawConn, sshAddr, clientCfg)
+	close(handshakeDone)
+	if err != nil {
+		_ = rawConn.Close()
 		// Surface the known-host sentinels unwrapped so callers
 		// can type-check without peeling an fmt.Errorf wrapper.
 		var unknown *UnknownHostError
@@ -91,12 +116,25 @@ func Open(cfg Config) (*Tunnel, error) {
 		if errors.As(err, &mismatch) {
 			return nil, mismatch
 		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("ssh dial %s: %w", sshAddr, ctxErr)
+		}
+		return nil, fmt.Errorf("ssh dial %s: %w", sshAddr, err)
+	}
+	client := ssh.NewClient(sshConn, chans, reqs)
+	if err := ctx.Err(); err != nil {
+		_ = client.Close()
 		return nil, fmt.Errorf("ssh dial %s: %w", sshAddr, err)
 	}
 
 	// Loopback-only so the forwarded port isn't exposed on the LAN.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
 	if err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("ssh tunnel listen: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		_ = listener.Close()
 		_ = client.Close()
 		return nil, fmt.Errorf("ssh tunnel listen: %w", err)
 	}

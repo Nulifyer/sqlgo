@@ -3,9 +3,11 @@ package db
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 )
 
 type sqlOptions struct {
@@ -40,7 +42,8 @@ type sqlOptions struct {
 	// driven by Capabilities.ExplainFormat. MSSQL supplies its own so it
 	// can pin a *sql.Conn across `SET SHOWPLAN_XML ON` + the target
 	// statement.
-	ExplainRunner func(ctx context.Context, db *sql.DB, sql string) ([][]any, error)
+	ExplainRunner     func(ctx context.Context, db *sql.DB, sql string) ([][]any, error)
+	ExplainConnRunner func(ctx context.Context, conn *sql.Conn, sql string) ([][]any, error)
 
 	// OnClose, if set, runs after the underlying *sql.DB is closed.
 	// Used by the file driver to delete a temp on-disk SQLite database
@@ -52,17 +55,16 @@ type sqlOptions struct {
 	// Enables Conn.ListDatabases via DatabaseLister.
 	DatabaseListQuery string
 
+	// CurrentDatabaseQuery returns the database currently selected on one
+	// pinned connection. Cross-database operations use it to restore the
+	// exact prior session state before returning that connection to the pool.
+	CurrentDatabaseQuery string
+
 	// UseDatabaseStmt, if set, produces the statement that switches a
 	// pinned connection's default database (MSSQL/Sybase: "USE [name]";
 	// MySQL: "USE `name`"). Required together with DatabaseListQuery for
 	// SchemaForDatabase to function.
 	UseDatabaseStmt func(name string) string
-
-	// DefaultDatabase is the database from the connection config. When
-	// set, SchemaForDatabase restores USE <DefaultDatabase> on the
-	// pinned connection before releasing it to the pool, so subsequent
-	// non-pinned Exec/Query calls don't inherit a switched context.
-	DefaultDatabase string
 }
 
 // SQLQuerier is the subset of *sql.DB and *sql.Conn that profile metadata
@@ -276,6 +278,90 @@ func (c *sqlConn) Columns(ctx context.Context, t TableRef) ([]Column, error) {
 	return columnsFrom(ctx, c.db, c.opts, t, "")
 }
 
+const pinnedDatabaseRestoreTimeout = 5 * time.Second
+
+// withPinnedDatabase runs fn on one physical database connection after
+// switching that session to database. It restores the session's original
+// database on every return path. A connection whose restoration fails is
+// marked driver.ErrBadConn so database/sql closes it instead of pooling a
+// session with contaminated state.
+func withPinnedDatabase[T any](ctx context.Context, c *sqlConn, database, operation string, fn func(*sql.Conn) (T, error)) (result T, err error) {
+	pinned, err := c.db.Conn(ctx)
+	if err != nil {
+		return result, fmt.Errorf("%s pin: %w", operation, err)
+	}
+
+	original, hasOriginal, err := currentDatabase(ctx, pinned, c.opts)
+	if err != nil {
+		_ = pinned.Close()
+		return result, fmt.Errorf("%s current database: %w", operation, err)
+	}
+
+	switched := !hasOriginal || original != database
+	defer func() {
+		if switched && hasOriginal {
+			restoreCtx, cancel := context.WithTimeout(context.Background(), pinnedDatabaseRestoreTimeout)
+			restoreErr := restoreDatabase(restoreCtx, pinned, c.opts, original)
+			cancel()
+			if restoreErr != nil {
+				var zero T
+				result = zero
+				err = errors.Join(err, fmt.Errorf("%s restore database %q: %w", operation, original, restoreErr))
+				if discardErr := discardPinnedConn(pinned); discardErr != nil {
+					err = errors.Join(err, fmt.Errorf("%s discard contaminated connection: %w", operation, discardErr))
+				}
+			}
+		} else if switched {
+			// Some engines can report no selected database (notably MySQL
+			// when its DSN omits DBName) but provide no inverse of USE. Discard
+			// the switched physical connection so the next checkout starts from
+			// a fresh, unselected session.
+			if discardErr := discardPinnedConn(pinned); discardErr != nil {
+				var zero T
+				result = zero
+				err = errors.Join(err, fmt.Errorf("%s discard connection with no original database: %w", operation, discardErr))
+			}
+		}
+		if closeErr := pinned.Close(); closeErr != nil && !errors.Is(closeErr, sql.ErrConnDone) {
+			err = errors.Join(err, fmt.Errorf("%s release connection: %w", operation, closeErr))
+		}
+	}()
+
+	if switched {
+		if _, err := pinned.ExecContext(ctx, c.opts.UseDatabaseStmt(database)); err != nil {
+			return result, fmt.Errorf("%s use %q: %w", operation, database, err)
+		}
+	}
+	return fn(pinned)
+}
+
+func currentDatabase(ctx context.Context, conn *sql.Conn, opts sqlOptions) (name string, selected bool, err error) {
+	if opts.CurrentDatabaseQuery == "" {
+		return "", false, errors.New("current database query not configured")
+	}
+	var current sql.NullString
+	if err := conn.QueryRowContext(ctx, opts.CurrentDatabaseQuery).Scan(&current); err != nil {
+		return "", false, err
+	}
+	if !current.Valid || current.String == "" {
+		return "", false, nil
+	}
+	return current.String, true, nil
+}
+
+func restoreDatabase(ctx context.Context, conn *sql.Conn, opts sqlOptions, database string) error {
+	_, err := conn.ExecContext(ctx, opts.UseDatabaseStmt(database))
+	return err
+}
+
+func discardPinnedConn(conn *sql.Conn) error {
+	err := conn.Raw(func(any) error { return driver.ErrBadConn })
+	if errors.Is(err, driver.ErrBadConn) {
+		return nil
+	}
+	return err
+}
+
 // ColumnsIn satisfies DatabaseColumner. Pins a *sql.Conn, applies
 // USE [database], then runs the driver's configured columns query on
 // the pinned conn so drivers whose query is session-scoped (MSSQL's
@@ -289,15 +375,9 @@ func (c *sqlConn) ColumnsIn(ctx context.Context, database string, t TableRef) ([
 	if useStmt == "" {
 		return c.Columns(ctx, t)
 	}
-	conn, err := c.db.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("columns pin: %w", err)
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, useStmt); err != nil {
-		return nil, fmt.Errorf("columns use %q: %w", database, err)
-	}
-	return columnsFrom(ctx, conn, c.opts, t, database)
+	return withPinnedDatabase(ctx, c, database, "columns", func(conn *sql.Conn) ([]Column, error) {
+		return columnsFrom(ctx, conn, c.opts, t, database)
+	})
 }
 
 func columnsFrom(ctx context.Context, q sqlQuerier, opts sqlOptions, t TableRef, database string) ([]Column, error) {
@@ -362,27 +442,21 @@ func (c *sqlConn) TableDesignIn(ctx context.Context, database string, t TableRef
 	if useStmt == "" {
 		return c.TableDesign(ctx, t)
 	}
-	conn, err := c.db.Conn(ctx)
-	if err != nil {
-		return TableDesign{}, fmt.Errorf("table design pin: %w", err)
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, useStmt); err != nil {
-		return TableDesign{}, fmt.Errorf("table design use %q: %w", database, err)
-	}
-	if c.opts.TableDesignFetcher != nil {
-		design, err := c.opts.TableDesignFetcher(ctx, conn, t)
+	return withPinnedDatabase(ctx, c, database, "table design", func(conn *sql.Conn) (TableDesign, error) {
+		if c.opts.TableDesignFetcher != nil {
+			design, err := c.opts.TableDesignFetcher(ctx, conn, t)
+			if err != nil {
+				return TableDesign{}, err
+			}
+			design.Table = t
+			return design, nil
+		}
+		cols, err := columnsFrom(ctx, conn, c.opts, t, database)
 		if err != nil {
 			return TableDesign{}, err
 		}
-		design.Table = t
-		return design, nil
-	}
-	cols, err := columnsFrom(ctx, conn, c.opts, t, database)
-	if err != nil {
-		return TableDesign{}, err
-	}
-	return BasicTableDesign(t, cols), nil
+		return BasicTableDesign(t, cols), nil
+	})
 }
 
 func (c *sqlConn) Definition(ctx context.Context, kind, schema, name string) (string, error) {
@@ -430,23 +504,20 @@ func (c *sqlConn) ExplainIn(ctx context.Context, database, query string) ([][]an
 	if useStmt == "" {
 		return c.Explain(ctx, query)
 	}
-	if c.opts.ExplainRunner != nil {
-		return c.opts.ExplainRunner(ctx, c.db, useStmt+";\n"+query)
-	}
-	conn, err := c.db.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("explain pin: %w", err)
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, useStmt); err != nil {
-		return nil, fmt.Errorf("explain use: %w", err)
-	}
-	wrapped := wrapExplainSQL(format, query)
-	rows, err := conn.QueryContext(ctx, wrapped)
-	if err != nil {
-		return nil, fmt.Errorf("explain: %w", err)
-	}
-	return scanExplainRows(rows)
+	return withPinnedDatabase(ctx, c, database, "explain", func(conn *sql.Conn) ([][]any, error) {
+		if c.opts.ExplainConnRunner != nil {
+			return c.opts.ExplainConnRunner(ctx, conn, query)
+		}
+		if c.opts.ExplainRunner != nil {
+			return nil, errors.New("explain: custom runner does not support pinned connections")
+		}
+		wrapped := wrapExplainSQL(format, query)
+		rows, err := conn.QueryContext(ctx, wrapped)
+		if err != nil {
+			return nil, fmt.Errorf("explain: %w", err)
+		}
+		return scanExplainRows(rows)
+	})
 }
 
 func scanExplainRows(rows *sql.Rows) ([][]any, error) {
@@ -524,62 +595,49 @@ func (c *sqlConn) SchemaForDatabase(ctx context.Context, database string) (*Sche
 	if c.opts.UseDatabaseStmt == nil {
 		return nil, fmt.Errorf("schema for database: unsupported by driver %s", c.opts.DriverName)
 	}
-	pinned, err := c.db.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("pin conn: %w", err)
-	}
-	defer func() {
-		// Restore default database so the released conn doesn't
-		// leak the switched context to a later pool consumer.
-		if c.opts.DefaultDatabase != "" {
-			_, _ = pinned.ExecContext(context.Background(), c.opts.UseDatabaseStmt(c.opts.DefaultDatabase))
+	return withPinnedDatabase(ctx, c, database, "schema", func(pinned *sql.Conn) (*SchemaInfo, error) {
+		info := &SchemaInfo{Status: map[string]ObjectKindStatus{}}
+		if c.opts.SchemaQuery == "" {
+			info.Status["tables"] = ObjectKindUnsupported
+		} else {
+			tables, err := loadTablesFrom(ctx, pinned, c.opts.SchemaQuery)
+			switch {
+			case err == nil:
+				info.Tables = tables
+			case c.isDenied(err):
+				info.Status["tables"] = ObjectKindDenied
+			default:
+				return nil, err
+			}
 		}
-		_ = pinned.Close()
-	}()
-	if _, err := pinned.ExecContext(ctx, c.opts.UseDatabaseStmt(database)); err != nil {
-		return nil, fmt.Errorf("use %q: %w", database, err)
-	}
-	info := &SchemaInfo{Status: map[string]ObjectKindStatus{}}
-	if c.opts.SchemaQuery == "" {
-		info.Status["tables"] = ObjectKindUnsupported
-	} else {
-		tables, err := loadTablesFrom(ctx, pinned, c.opts.SchemaQuery)
-		switch {
-		case err == nil:
-			info.Tables = tables
-		case c.isDenied(err):
-			info.Status["tables"] = ObjectKindDenied
-		default:
-			return nil, err
+		if c.opts.RoutinesQuery == "" {
+			info.Status["routines"] = ObjectKindUnsupported
+		} else {
+			routines, err := loadRoutinesFrom(ctx, pinned, c.opts.RoutinesQuery)
+			switch {
+			case err == nil:
+				info.Routines = routines
+			case c.isDenied(err):
+				info.Status["routines"] = ObjectKindDenied
+			default:
+				return nil, err
+			}
 		}
-	}
-	if c.opts.RoutinesQuery == "" {
-		info.Status["routines"] = ObjectKindUnsupported
-	} else {
-		routines, err := loadRoutinesFrom(ctx, pinned, c.opts.RoutinesQuery)
-		switch {
-		case err == nil:
-			info.Routines = routines
-		case c.isDenied(err):
-			info.Status["routines"] = ObjectKindDenied
-		default:
-			return nil, err
+		if c.opts.TriggersQuery == "" {
+			info.Status["triggers"] = ObjectKindUnsupported
+		} else {
+			triggers, err := loadTriggersFrom(ctx, pinned, c.opts.TriggersQuery)
+			switch {
+			case err == nil:
+				info.Triggers = triggers
+			case c.isDenied(err):
+				info.Status["triggers"] = ObjectKindDenied
+			default:
+				return nil, err
+			}
 		}
-	}
-	if c.opts.TriggersQuery == "" {
-		info.Status["triggers"] = ObjectKindUnsupported
-	} else {
-		triggers, err := loadTriggersFrom(ctx, pinned, c.opts.TriggersQuery)
-		switch {
-		case err == nil:
-			info.Triggers = triggers
-		case c.isDenied(err):
-			info.Status["triggers"] = ObjectKindDenied
-		default:
-			return nil, err
-		}
-	}
-	return info, nil
+		return info, nil
+	})
 }
 
 func (c *sqlConn) Close() error {

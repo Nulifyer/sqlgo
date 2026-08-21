@@ -118,6 +118,16 @@ func TestBuildDSN(t *testing.T) {
 			wantPrefix: "SQLGO:p@private-link.snowflakecomputing.com:443/SQLGO_DB",
 		},
 		{
+			name: "ipv6_host_without_port",
+			cfg: db.Config{
+				Host:     "2001:db8::1",
+				User:     "SQLGO",
+				Password: "p",
+				Database: "SQLGO_DB",
+			},
+			wantPrefix: "SQLGO:p@[2001:db8::1]/SQLGO_DB",
+		},
+		{
 			name: "empty_option_absent",
 			cfg: db.Config{
 				Host:     "xy12345.us-east-1",

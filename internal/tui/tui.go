@@ -75,6 +75,7 @@ const (
 // gives the main loop a single select-case for everything query-related.
 type queryEvent struct {
 	kind      queryEventKind
+	runGen    uint64
 	loaded    int
 	capped    bool
 	capReason string
@@ -127,6 +128,8 @@ type app struct {
 	conn       db.Conn
 	connErr    error
 	activeConn *config.Connection
+	connOps    connCoordinator
+	connGen    uint64
 	// tunnel is the SSH jump connection, if the active connection
 	// routes through one. Closed in disconnect() after the db.Conn,
 	// so any lingering reads on the forwarded socket get the right
@@ -143,15 +146,20 @@ type app struct {
 	// history record, etc.) so the UI never blocks on IO. Callbacks run
 	// on the main goroutine and can safely touch UI state.
 	asyncCh chan func(*app)
+	doneCh  chan struct{}
 
 	// columnCache memoizes editor autocomplete lookups.
 	// Cleared on disconnect so fresh schema wins.
 	columnCache *columnCache
 
-	// schemaLoading is set while loadSchema has a fetch in flight so a
-	// second R-press (or rapid reconnect) doesn't spawn a second
-	// goroutine racing the first. Cleared by the completion callback.
+	// Connection and schema generations fence asynchronous work. A newer
+	// connection attempt cancels its predecessor; schema state belongs to
+	// exactly one installed connection generation.
+	connectGen    uint64
+	connectCancel context.CancelFunc
 	schemaLoading bool
+	schemaGen     uint64
+	schemaCancel  context.CancelFunc
 
 	// metadataBusy is set while a broad metadata operation, such as
 	// explorer deep-search column loading, is using the active Conn. The
@@ -188,29 +196,101 @@ func (a *app) resolvePassword(c config.Connection) (string, error) {
 	return pass, nil
 }
 
+type keyringChange struct {
+	account  string
+	previous string
+	existed  bool
+}
+
+// keyringChanges records enough state to undo a sequence of keyring writes.
+// A rollback restores overwritten credentials and deletes only accounts that
+// did not exist before the save attempt.
+type keyringChanges struct {
+	store   secret.Store
+	changes []keyringChange
+}
+
+func (k *keyringChanges) set(account, value string) error {
+	previous, err := k.store.Get(account)
+	existed := true
+	if err != nil {
+		if !secret.IsNotFound(err) {
+			return fmt.Errorf("read prior keyring account %q: %w", account, err)
+		}
+		existed = false
+	}
+	if err := k.store.Set(account, value); err != nil {
+		return err
+	}
+	k.changes = append(k.changes, keyringChange{
+		account: account, previous: previous, existed: existed,
+	})
+	return nil
+}
+
+func (k *keyringChanges) rollback() error {
+	var rollbackErr error
+	for i := len(k.changes) - 1; i >= 0; i-- {
+		change := k.changes[i]
+		var err error
+		if change.existed {
+			err = k.store.Set(change.account, change.previous)
+		} else {
+			err = k.store.Delete(change.account)
+		}
+		if err != nil {
+			rollbackErr = errors.Join(rollbackErr,
+				fmt.Errorf("restore keyring account %q: %w", change.account, err))
+		}
+	}
+	return rollbackErr
+}
+
+func rollbackKeyring(changes *keyringChanges, cause error) error {
+	return errors.Join(cause, changes.rollback())
+}
+
 // persistConnection upserts a connection via the store and, when the
 // OS keyring is available, also rewrites the row to use the sqlgo
 // keyring placeholder so the plaintext password never lands on disk.
 // oldName carries any pre-rename identifier so the store's atomic
 // rename path is used.
 //
-// On keyring failure we fall through to plaintext-on-disk: this is a
-// deliberate fallback-and-warn choice so the app stays usable on hosts
-// without a secret backend. The ok return lets callers surface the
-// warning exactly once per save.
+// A new database password may still fall back to plaintext when no keyring is
+// available. An SSH password entered while editing a keyring-backed database
+// connection does not: persisting that form fails instead of silently writing
+// the new SSH secret to sqlite. The ok return lets callers surface the storage
+// choice exactly once per save.
 func (a *app) persistConnection(ctx context.Context, oldName string, c config.Connection) (usedKeyring bool, err error) {
-	// If the caller handed us the placeholder, the secret is already
-	// in the keyring (edit path with no password change). Save the
-	// row as-is.
+	// A placeholder DB password means that secret is already in the
+	// keyring, but an edited form may still contain a newly entered SSH
+	// password. Move that SSH secret before saving the row; the previous
+	// early return wrote it to sqlite as plaintext.
 	if c.Password == secret.Placeholder {
-		return true, a.store.SaveConnection(ctx, oldName, c)
+		rowCopy := c
+		changes := &keyringChanges{store: a.secrets}
+		if rowCopy.SSH.Password != "" && rowCopy.SSH.Password != secret.Placeholder {
+			if !a.secretsAvailable || a.secrets == nil {
+				return false, fmt.Errorf("store SSH password: keyring unavailable")
+			}
+			account := connectutil.SSHKeyringAccount(c.Name)
+			if err := changes.set(account, rowCopy.SSH.Password); err != nil {
+				return false, fmt.Errorf("store SSH password in keyring: %w", err)
+			}
+			rowCopy.SSH.Password = secret.Placeholder
+		}
+		if err := a.store.SaveConnection(ctx, oldName, rowCopy); err != nil {
+			return false, rollbackKeyring(changes, err)
+		}
+		return true, nil
 	}
 
 	if a.secretsAvailable && a.secrets != nil {
+		changes := &keyringChanges{store: a.secrets}
 		// Best-effort: write the secret first, then the row with the
 		// placeholder. If the secret write fails, fall back to
 		// plaintext rather than losing the password entirely.
-		if werr := a.secrets.Set(c.Name, c.Password); werr == nil {
+		if werr := changes.set(c.Name, c.Password); werr == nil {
 			rowCopy := c
 			rowCopy.Password = secret.Placeholder
 
@@ -219,17 +299,15 @@ func (a *app) persistConnection(ctx context.Context, oldName string, c config.Co
 			// a keyring. Empty SSH passwords and placeholder values
 			// (edit path with no change) are left alone.
 			if rowCopy.SSH.Password != "" && rowCopy.SSH.Password != secret.Placeholder {
-				if err := a.secrets.Set(connectutil.SSHKeyringAccount(c.Name), rowCopy.SSH.Password); err == nil {
-					rowCopy.SSH.Password = secret.Placeholder
+				if err := changes.set(connectutil.SSHKeyringAccount(c.Name), rowCopy.SSH.Password); err != nil {
+					cause := fmt.Errorf("store SSH password in keyring: %w", err)
+					return false, rollbackKeyring(changes, cause)
 				}
+				rowCopy.SSH.Password = secret.Placeholder
 			}
 
 			if sErr := a.store.SaveConnection(ctx, oldName, rowCopy); sErr != nil {
-				// Store write failed after secret write: try to undo
-				// both secret writes so we don't leak orphan entries.
-				_ = a.secrets.Delete(c.Name)
-				_ = a.secrets.Delete(connectutil.SSHKeyringAccount(c.Name))
-				return false, sErr
+				return false, rollbackKeyring(changes, sErr)
 			}
 			// If this was a rename, delete the old keyring entries.
 			if oldName != "" && oldName != c.Name {
@@ -348,6 +426,7 @@ func Run(opts Options) error {
 		// stall the drain goroutine on a non-blocking progress send.
 		resultCh:         make(chan queryEvent, resultChanBuf),
 		asyncCh:          make(chan func(*app), asyncChanBuf),
+		doneCh:           make(chan struct{}),
 		clipboard:        clipboard.System(),
 		secrets:          sec,
 		secretsAvailable: secAvail,
@@ -386,6 +465,11 @@ func Run(opts Options) error {
 	}
 
 	defer func() {
+		a.cancelConnectAttempt()
+		a.invalidateSchemaLoad()
+		a.stopAllQueries()
+		release := a.connOps.acquire()
+		defer release()
 		if a.conn != nil {
 			_ = a.conn.Close()
 		}
@@ -399,7 +483,9 @@ func Run(opts Options) error {
 		a.scr.TeardownView()
 	}()
 
-	return a.loop()
+	loopErr := a.loop()
+	close(a.doneCh)
+	return loopErr
 }
 
 func (a *app) loop() error {
@@ -474,6 +560,21 @@ func (a *app) loop() error {
 // then composites them bottom-to-top and diffs against the prior frame
 // on flush, so only changed cells get emitted as ANSI.
 func (a *app) draw() {
+	if a.term.width < 40 || a.term.height < 10 {
+		b := a.scr.LayerBuf(0)
+		msg := "terminal too small (need 40x10)"
+		row := a.term.height / 2
+		if row < 1 {
+			row = 1
+		}
+		col := (a.term.width-displayWidth(msg))/2 + 1
+		if col < 1 {
+			col = 1
+		}
+		b.WriteAt(row, col, truncate(msg, a.term.width))
+		a.scr.Composite([]*cellbuf{b})
+		return
+	}
 	bufs := make([]*cellbuf, len(a.layers))
 	for i, l := range a.layers {
 		b := a.scr.LayerBuf(i)
@@ -505,7 +606,7 @@ func (a *app) handleInput(m InputMsg) {
 // is handled here (not in a layer) so it's reachable from any modal.
 func (a *app) handleKey(k Key) {
 	if k.Ctrl && k.Rune == 'q' {
-		a.quit = true
+		a.requestQuit()
 		return
 	}
 	if k.Kind == KeyF1 {
@@ -537,10 +638,22 @@ func (a *app) handleKey(k Key) {
 // closed only after the new one is established, so a failed switch doesn't
 // leave us disconnected.
 func (a *app) connectTo(c config.Connection) {
+	a.connectGen++
+	gen := a.connectGen
+	if a.connectCancel != nil {
+		a.connectCancel()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
+	a.connectCancel = cancel
+
 	pl, _ := a.topLayer().(*pickerLayer)
 	runtime := connectutil.DefaultRuntimeDeps(a.secrets)
 	resolved, err := connectutil.ResolveSavedConnection(c, runtime)
 	if err != nil {
+		cancel()
+		if a.connectGen == gen {
+			a.connectCancel = nil
+		}
 		if pl != nil {
 			pl.setStatus(err.Error())
 		}
@@ -569,14 +682,30 @@ func (a *app) connectTo(c config.Connection) {
 		}
 	})
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 		defer cancel()
 		conn, tunnel, err := connectutil.OpenResolvedConnection(ctx, resolved, runtime)
 		close(done)
-		a.asyncCh <- func(a *app) {
-			a.finishConnect(c, conn, tunnel, err)
+		select {
+		case a.asyncCh <- func(a *app) {
+			a.finishConnect(gen, c, conn, tunnel, err)
+		}:
+		case <-a.doneCh:
+			if conn != nil {
+				_ = conn.Close()
+			}
+			if tunnel != nil {
+				_ = tunnel.Close()
+			}
 		}
 	}()
+}
+
+func (a *app) cancelConnectAttempt() {
+	a.connectGen++
+	if a.connectCancel != nil {
+		a.connectCancel()
+		a.connectCancel = nil
+	}
 }
 
 // spinnerFrames re-exports widget.SpinnerFrames so existing call sites
@@ -601,7 +730,17 @@ func runSpinner(a *app, done <-chan struct{}, apply func(a *app, frame string)) 
 // the same commit/teardown logic the original synchronous connectTo
 // used, but now has to tolerate the picker having been dismissed or
 // swapped in the meantime.
-func (a *app) finishConnect(c config.Connection, conn db.Conn, tunnel *sshtunnel.Tunnel, err error) {
+func (a *app) finishConnect(gen uint64, c config.Connection, conn db.Conn, tunnel *sshtunnel.Tunnel, err error) {
+	if gen != a.connectGen {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		if tunnel != nil {
+			_ = tunnel.Close()
+		}
+		return
+	}
+	a.connectCancel = nil
 	pl, _ := a.topLayer().(*pickerLayer)
 	if err != nil {
 		if tunnel != nil {
@@ -625,15 +764,13 @@ func (a *app) finishConnect(c config.Connection, conn db.Conn, tunnel *sshtunnel
 		return
 	}
 
-	if a.conn != nil {
-		_ = a.conn.Close()
-	}
-	if a.tunnel != nil {
-		_ = a.tunnel.Close()
-	}
+	oldConn, oldTunnel := a.conn, a.tunnel
+	a.stopAllQueries()
+	a.invalidateSchemaLoad()
 	if a.columnCache != nil {
 		a.columnCache.clear()
 	}
+	a.connGen++
 	a.conn = conn
 	a.tunnel = tunnel
 	a.metadataBusy = false
@@ -647,7 +784,6 @@ func (a *app) finishConnect(c config.Connection, conn db.Conn, tunnel *sshtunnel
 	}
 	m := a.mainLayerPtr()
 	m.status = "connected"
-	m.editor.buf.Clear()
 	m.editor.ClearErrorLocation()
 	m.resetResults()
 	m.explorer.ResetDatabases()
@@ -655,56 +791,70 @@ func (a *app) finishConnect(c config.Connection, conn db.Conn, tunnel *sshtunnel
 		s.activeCatalog = ""
 	}
 	m.focus = FocusExplorer
+	a.retireConnection(oldConn, oldTunnel)
 	a.loadSchema()
+}
+
+func (a *app) stopAllQueries() {
+	m := a.mainLayerPtr()
+	if m != nil {
+		for _, s := range m.sessions {
+			s.runGen++
+			if s.running && s.cancel != nil {
+				s.cancel()
+			}
+			s.running = false
+			s.runnerDone = nil
+			s.runnerFrame = ""
+			s.cancel = nil
+		}
+	}
+}
+
+func (a *app) invalidateSchemaLoad() {
+	if a.schemaCancel != nil {
+		a.schemaCancel()
+		a.schemaCancel = nil
+	}
+	a.schemaLoading = false
+	a.schemaGen++
+}
+
+func (a *app) retireConnection(conn db.Conn, tunnel *sshtunnel.Tunnel) {
+	if conn == nil && tunnel == nil {
+		return
+	}
+	go func() {
+		release := a.connOps.acquire()
+		defer release()
+		if conn != nil {
+			_ = conn.Close()
+		}
+		if tunnel != nil {
+			_ = tunnel.Close()
+		}
+	}()
 }
 
 func (a *app) disconnect() {
 	if a.conn == nil {
 		return
 	}
-	// Cancel any in-flight queries so their goroutines unblock on the
-	// soon-to-be-closed conn and exit instead of lingering to write
-	// stale events into the new connection's channel.
 	m := a.mainLayerPtr()
-	if m != nil {
-		for _, s := range m.sessions {
-			if s.running && s.cancel != nil {
-				s.cancel()
-			}
-			// Clear running/cancel here too: after we swap a.resultCh
-			// below, any late evtDone from the cancelled goroutine lands
-			// in the abandoned channel and never reaches handleQueryEvent,
-			// so without this the session stays "running" forever and F5
-			// is locked on the next connection.
-			s.running = false
-			if s.runnerDone != nil {
-				close(s.runnerDone)
-				s.runnerDone = nil
-			}
-			s.runnerFrame = ""
-			s.cancel = nil
-		}
-	}
-	_ = a.conn.Close()
+	oldConn, oldTunnel := a.conn, a.tunnel
+	a.stopAllQueries()
+	a.invalidateSchemaLoad()
+	a.connGen++
 	a.conn = nil
 	a.metadataBusy = false
 	// Close the tunnel after the db conn so any lingering reads on
 	// the forwarded socket get the driver's "closed" error first.
-	if a.tunnel != nil {
-		_ = a.tunnel.Close()
-		a.tunnel = nil
-	}
+	a.tunnel = nil
 	a.activeConn = nil
 	// Drop cached columns -- belonged to the old schema.
 	if a.columnCache != nil {
 		a.columnCache.clear()
 	}
-	// Swap the result channel so any stragglers from the old connection's
-	// query goroutines write into an abandoned buffer rather than landing
-	// in the new connection's dispatch loop. The old goroutines captured
-	// their own resultCh pointer at spawn time (tui.go runQueryAsync) so
-	// this swap can't desync a live writer from its channel.
-	a.resultCh = make(chan queryEvent, resultChanBuf)
 	if m != nil {
 		m.resetResults()
 		m.explorer.SetSchema(nil, db.SchemaDepthSchemas)
@@ -715,6 +865,7 @@ func (a *app) disconnect() {
 			s.activeCatalog = ""
 		}
 	}
+	a.retireConnection(oldConn, oldTunnel)
 }
 
 // loadSchema fetches the schema list from the active connection and hands it
@@ -732,6 +883,9 @@ func (a *app) loadSchema() {
 		return
 	}
 	a.schemaLoading = true
+	a.schemaGen++
+	schemaGen := a.schemaGen
+	connGen := a.connGen
 	// Capture the current conn so a disconnect+reconnect during the
 	// fetch can't apply stale schema to the new connection.
 	conn := a.conn
@@ -746,6 +900,8 @@ func (a *app) loadSchema() {
 		if ok {
 			m.explorer.SetLoading()
 			done := make(chan struct{})
+			ctx, cancel := context.WithTimeout(context.Background(), schemaTimeout)
+			a.schemaCancel = cancel
 			go runSpinner(a, done, func(a *app, frame string) {
 				if a.conn != conn {
 					return
@@ -753,15 +909,17 @@ func (a *app) loadSchema() {
 				a.mainLayerPtr().explorer.SetLoadingFrame(frame)
 			})
 			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), schemaTimeout)
-				defer cancel()
+				release := a.connOps.acquire()
 				names, err := lister.ListDatabases(ctx)
+				release()
+				cancel()
 				close(done)
 				a.asyncCh <- func(a *app) {
-					a.schemaLoading = false
-					if a.conn != conn {
+					if a.conn != conn || a.connGen != connGen || a.schemaGen != schemaGen {
 						return
 					}
+					a.schemaLoading = false
+					a.schemaCancel = nil
 					m := a.mainLayerPtr()
 					if err != nil {
 						m.explorer.SetError(err.Error())
@@ -777,6 +935,8 @@ func (a *app) loadSchema() {
 
 	m.explorer.SetLoading()
 	done := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), schemaTimeout)
+	a.schemaCancel = cancel
 	go runSpinner(a, done, func(a *app, frame string) {
 		// Only animate if this goroutine's fetch is still the active one
 		// (conn unchanged). A stale tick on a swapped connection would
@@ -787,16 +947,17 @@ func (a *app) loadSchema() {
 		a.mainLayerPtr().explorer.SetLoadingFrame(frame)
 	})
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), schemaTimeout)
-		defer cancel()
+		release := a.connOps.acquire()
 		info, err := conn.Schema(ctx)
+		release()
+		cancel()
 		close(done)
 		a.asyncCh <- func(a *app) {
-			a.schemaLoading = false
-			// Drop the result if the connection has changed underneath us.
-			if a.conn != conn {
+			if a.conn != conn || a.connGen != connGen || a.schemaGen != schemaGen {
 				return
 			}
+			a.schemaLoading = false
+			a.schemaCancel = nil
 			m := a.mainLayerPtr()
 			if err != nil {
 				m.explorer.SetError(err.Error())
@@ -820,6 +981,8 @@ func (a *app) loadDatabaseSchema(catalog string) {
 		return
 	}
 	conn := a.conn
+	connGen := a.connGen
+	schemaGen := a.schemaGen
 	m := a.mainLayerPtr()
 	m.explorer.SetDatabaseLoading(catalog, spinnerFrames[0])
 
@@ -833,10 +996,12 @@ func (a *app) loadDatabaseSchema(catalog string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), schemaTimeout)
 		defer cancel()
+		release := a.connOps.acquire()
 		info, err := lister.SchemaForDatabase(ctx, catalog)
+		release()
 		close(done)
 		a.asyncCh <- func(a *app) {
-			if a.conn != conn {
+			if a.conn != conn || a.connGen != connGen || a.schemaGen != schemaGen {
 				return
 			}
 			m := a.mainLayerPtr()
@@ -936,8 +1101,11 @@ func (a *app) runQueryUnsafe() {
 	ctx, cancel := context.WithCancel(context.Background())
 	sess.cancel = cancel
 	sess.running = true
+	sess.runGen++
+	runGen := sess.runGen
 	sess.runnerFrame = spinnerFrames[0]
-	sess.runnerDone = make(chan struct{})
+	runnerDone := make(chan struct{})
+	sess.runnerDone = runnerDone
 	sess.lastQueryDriver = a.conn.Driver()
 	sess.lastQueryBufferText = bufferText
 	sess.lastQuerySQL = sql
@@ -947,7 +1115,7 @@ func (a *app) runQueryUnsafe() {
 	sess.resetResults()
 	sess.editor.ClearErrorLocation()
 	sess.status = "running query…"
-	go runSpinner(a, sess.runnerDone, func(a *app, frame string) {
+	go runSpinner(a, runnerDone, func(a *app, frame string) {
 		m := a.mainLayerPtr()
 		if m.session != sess || !sess.running {
 			return
@@ -961,21 +1129,35 @@ func (a *app) runQueryUnsafe() {
 	resultCh := a.resultCh
 	go func() {
 		defer cancel()
+		defer close(runnerDone)
+		send := func(e queryEvent) bool {
+			e.runGen = runGen
+			select {
+			case resultCh <- e:
+				return true
+			case <-a.doneCh:
+				return false
+			}
+		}
+		release := a.connOps.acquire()
+		defer release()
 		rows, err := conn.Query(ctx, sentSQL)
 		if err != nil {
 			// Attach the error to the seeded placeholder tab so it renders
 			// in the results pane (same path as mid-stream errors) rather
 			// than only flashing on the status line.
 			firstTab.table.Done(err)
-			resultCh <- queryEvent{
+			if !send(queryEvent{
 				kind:    evtResultSetDone,
 				sess:    sess,
 				tab:     firstTab,
 				err:     err,
 				errInfo: db.ParseErrorInfo(conn.Driver(), err, sentSQL),
 				elapsed: time.Since(start),
+			}) {
+				return
 			}
-			resultCh <- queryEvent{kind: evtDone, sess: sess, err: err, elapsed: time.Since(start)}
+			send(queryEvent{kind: evtDone, sess: sess, err: err, elapsed: time.Since(start)})
 			return
 		}
 		defer rows.Close()
@@ -994,7 +1176,9 @@ func (a *app) runQueryUnsafe() {
 				tab = newResultTab(nextResultTitle(setIdx))
 			}
 			tab.table.Init(rows.Columns())
-			resultCh <- queryEvent{kind: evtResultSetStart, sess: sess, tab: tab, elapsed: time.Since(start)}
+			if !send(queryEvent{kind: evtResultSetStart, sess: sess, tab: tab, elapsed: time.Since(start)}) {
+				return
+			}
 
 			loaded := 0
 			lastReport := time.Now()
@@ -1004,7 +1188,7 @@ func (a *app) runQueryUnsafe() {
 				row, scanErr := rows.Scan()
 				if scanErr != nil {
 					tab.table.Done(scanErr)
-					resultCh <- queryEvent{
+					if !send(queryEvent{
 						kind:    evtResultSetDone,
 						sess:    sess,
 						tab:     tab,
@@ -1012,8 +1196,10 @@ func (a *app) runQueryUnsafe() {
 						errInfo: db.ParseErrorInfo(conn.Driver(), scanErr, sentSQL),
 						loaded:  loaded,
 						elapsed: time.Since(start),
+					}) {
+						return
 					}
-					resultCh <- queryEvent{kind: evtDone, sess: sess, err: scanErr, loaded: totalLoaded + loaded, elapsed: time.Since(start)}
+					send(queryEvent{kind: evtDone, sess: sess, err: scanErr, loaded: totalLoaded + loaded, elapsed: time.Since(start)})
 					return
 				}
 				if !tab.table.Append(row) {
@@ -1024,7 +1210,7 @@ func (a *app) runQueryUnsafe() {
 				loaded++
 				if time.Since(lastReport) > progressThrottle {
 					select {
-					case resultCh <- queryEvent{kind: evtProgress, sess: sess, loaded: totalLoaded + loaded}:
+					case resultCh <- queryEvent{kind: evtProgress, runGen: runGen, sess: sess, loaded: totalLoaded + loaded}:
 					default:
 					}
 					lastReport = time.Now()
@@ -1032,7 +1218,7 @@ func (a *app) runQueryUnsafe() {
 			}
 			if rerr := rows.Err(); rerr != nil {
 				tab.table.Done(rerr)
-				resultCh <- queryEvent{
+				if !send(queryEvent{
 					kind:    evtResultSetDone,
 					sess:    sess,
 					tab:     tab,
@@ -1040,13 +1226,17 @@ func (a *app) runQueryUnsafe() {
 					errInfo: db.ParseErrorInfo(conn.Driver(), rerr, sentSQL),
 					loaded:  loaded,
 					elapsed: time.Since(start),
+				}) {
+					return
 				}
-				resultCh <- queryEvent{kind: evtDone, sess: sess, err: rerr, loaded: totalLoaded + loaded, elapsed: time.Since(start)}
+				send(queryEvent{kind: evtDone, sess: sess, err: rerr, loaded: totalLoaded + loaded, elapsed: time.Since(start)})
 				return
 			}
 			tab.table.Done(nil)
 			totalLoaded += loaded
-			resultCh <- queryEvent{kind: evtResultSetDone, sess: sess, tab: tab, loaded: loaded, capped: capped, capReason: capReason, elapsed: time.Since(start)}
+			if !send(queryEvent{kind: evtResultSetDone, sess: sess, tab: tab, loaded: loaded, capped: capped, capReason: capReason, elapsed: time.Since(start)}) {
+				return
+			}
 
 			if capped {
 				break
@@ -1055,7 +1245,7 @@ func (a *app) runQueryUnsafe() {
 				break
 			}
 		}
-		resultCh <- queryEvent{kind: evtDone, sess: sess, loaded: totalLoaded, elapsed: time.Since(start)}
+		send(queryEvent{kind: evtDone, sess: sess, loaded: totalLoaded, elapsed: time.Since(start)})
 	}()
 }
 
@@ -1079,6 +1269,9 @@ func (a *app) cancelQuery() {
 func (a *app) handleQueryEvent(e queryEvent) {
 	sess := e.sess
 	if sess == nil {
+		return
+	}
+	if e.runGen != 0 && e.runGen != sess.runGen {
 		return
 	}
 	switch e.kind {
@@ -1142,10 +1335,7 @@ func (a *app) handleQueryEvent(e queryEvent) {
 		}
 	case evtDone:
 		sess.running = false
-		if sess.runnerDone != nil {
-			close(sess.runnerDone)
-			sess.runnerDone = nil
-		}
+		sess.runnerDone = nil
 		sess.runnerFrame = ""
 		sess.cancel = nil
 		if e.err != nil {

@@ -5,11 +5,12 @@ package mssql
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
+	"time"
 
 	mssqldb "github.com/microsoft/go-mssqldb"
 	// Side-effect imports register the "krb5" and "ntlm" integrated-auth
@@ -80,7 +81,8 @@ func init() {
 // listing. Transport-free so it can pair with a non-native transport
 // (ODBC bridge) via the "Other..." picker.
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"mssql", "azuresql"},
 	Capabilities: db.Capabilities{
 		SchemaDepth:           db.SchemaDepthSchemas,
 		LimitSyntax:           db.LimitSyntaxSelectTop,
@@ -92,16 +94,18 @@ var Profile = db.Profile{
 		SupportsTransactions:  true,
 		SupportsCrossDatabase: true,
 	},
-	SchemaQuery:        schemaQuery,
-	ColumnsQuery:       columnsQuery,
-	RoutinesQuery:      routinesQuery,
-	TriggersQuery:      triggersQuery,
-	IsPermissionDenied: isPermissionDenied,
-	DefinitionFetcher:  fetchDefinition,
-	ExplainRunner:      runExplain,
-	TableDesignFetcher: fetchTableDesign,
-	DatabaseListQuery:  databaseListQuery,
-	UseDatabaseStmt:    useDatabaseStmt,
+	SchemaQuery:          schemaQuery,
+	ColumnsQuery:         columnsQuery,
+	RoutinesQuery:        routinesQuery,
+	TriggersQuery:        triggersQuery,
+	IsPermissionDenied:   isPermissionDenied,
+	DefinitionFetcher:    fetchDefinition,
+	ExplainRunner:        runExplain,
+	ExplainConnRunner:    runExplainOnConn,
+	TableDesignFetcher:   fetchTableDesign,
+	DatabaseListQuery:    databaseListQuery,
+	CurrentDatabaseQuery: currentDatabaseQuery,
+	UseDatabaseStmt:      useDatabaseStmt,
 }
 
 // MSSQLTransport wraps microsoft/go-mssqldb (registered as "sqlserver").
@@ -196,6 +200,8 @@ FROM sys.databases
 WHERE database_id > 4 AND state = 0
 ORDER BY name;
 `
+
+const currentDatabaseQuery = `SELECT DB_NAME()`
 
 // useDatabaseStmt quotes the DB name with brackets. `]` inside a name
 // must be doubled.
@@ -326,15 +332,19 @@ func fetchDefinition(ctx context.Context, sqlDB *sql.DB, kind, schema, name stri
 // SHOWPLAN_XML is session state; a *sql.DB may hand the next call a
 // different pooled connection. Returns the single XML row as rows[0][0].
 func runExplain(ctx context.Context, sqlDB *sql.DB, query string) ([][]any, error) {
-	trimmed := strings.TrimRight(strings.TrimSpace(query), "; \t\r\n")
-	if trimmed == "" {
-		return nil, fmt.Errorf("explain: empty query")
-	}
 	conn, err := sqlDB.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("explain pin conn: %w", err)
 	}
 	defer conn.Close()
+	return runExplainOnConn(ctx, conn, query)
+}
+
+func runExplainOnConn(ctx context.Context, conn *sql.Conn, query string) (out [][]any, err error) {
+	trimmed := strings.TrimRight(strings.TrimSpace(query), "; \t\r\n")
+	if trimmed == "" {
+		return nil, fmt.Errorf("explain: empty query")
+	}
 	if _, err := conn.ExecContext(ctx, "SET SHOWPLAN_XML ON"); err != nil {
 		return nil, fmt.Errorf("set showplan_xml on: %w", err)
 	}
@@ -342,14 +352,22 @@ func runExplain(ctx context.Context, sqlDB *sql.DB, query string) ([][]any, erro
 	// the pool, even if the target query failed. Uses a background ctx
 	// so a cancelled parent doesn't leave the session in SHOWPLAN mode.
 	defer func() {
-		_, _ = conn.ExecContext(context.Background(), "SET SHOWPLAN_XML OFF")
+		offErr := func() error {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := conn.ExecContext(cleanupCtx, "SET SHOWPLAN_XML OFF")
+			return err
+		}()
+		if offErr != nil {
+			err = errors.Join(err, fmt.Errorf("set showplan_xml off: %w", offErr))
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
 	}()
 	rows, err := conn.QueryContext(ctx, trimmed)
 	if err != nil {
 		return nil, fmt.Errorf("explain query: %w", err)
 	}
 	defer rows.Close()
-	var out [][]any
 	for rows.Next() {
 		var xml sql.NullString
 		if err := rows.Scan(&xml); err != nil {
@@ -395,7 +413,7 @@ func buildDSN(cfg db.Config) string {
 	u := url.URL{
 		Scheme: "sqlserver",
 		User:   url.UserPassword(cfg.User, cfg.Password),
-		Host:   host + ":" + strconv.Itoa(port),
+		Host:   db.JoinHostPort(host, port),
 	}
 	q := u.Query()
 	if cfg.Database != "" {

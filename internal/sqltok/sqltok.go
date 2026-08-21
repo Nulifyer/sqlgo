@@ -375,6 +375,8 @@ func (l *lexer) run() []Token {
 		case c == '\'' || c == '"' || c == '`':
 			l.scanString(c)
 			l.emit(String, start)
+		case c == '$' && l.scanDollarQuoted():
+			l.emit(String, start)
 		case (c == 'N' || c == 'n' || c == 'B' || c == 'b' || c == 'X' || c == 'x') && l.peek(1) == '\'':
 			// MSSQL Unicode (N'...'), SQL-92 bit string (B'...') and
 			// hex string (X'...') literal prefixes. Absorb the prefix
@@ -467,6 +469,37 @@ func (l *lexer) scanString(quote rune) {
 		}
 		l.i++
 	}
+}
+
+func (l *lexer) scanDollarQuoted() bool {
+	start := l.i
+	endTag := start + 1
+	if endTag >= len(l.src) {
+		return false
+	}
+	if l.src[endTag] != '$' {
+		if !isIdentStart(l.src[endTag]) {
+			return false
+		}
+		endTag++
+		for endTag < len(l.src) && isIdentCont(l.src[endTag]) {
+			endTag++
+		}
+	}
+	if endTag >= len(l.src) || l.src[endTag] != '$' {
+		return false
+	}
+	delimiter := l.src[start : endTag+1]
+	l.i = endTag + 1
+	for l.i+len(delimiter) <= len(l.src) {
+		if string(l.src[l.i:l.i+len(delimiter)]) == string(delimiter) {
+			l.i += len(delimiter)
+			return true
+		}
+		l.i++
+	}
+	l.i = len(l.src)
+	return true
 }
 
 func (l *lexer) scanBracketed() {

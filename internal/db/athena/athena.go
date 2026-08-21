@@ -69,7 +69,8 @@ func init() {
 // LIMIT/OFFSET, SHOW CREATE TABLE/VIEW and information_schema layout
 // all match Trino. EXPLAIN returns a text plan.
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"athena"},
 	Capabilities: db.Capabilities{
 		SchemaDepth:          db.SchemaDepthSchemas,
 		LimitSyntax:          db.LimitSyntaxLimit,

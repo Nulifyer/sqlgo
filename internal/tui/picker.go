@@ -14,6 +14,7 @@ import (
 type picker struct {
 	conns    []config.Connection
 	selected int
+	scroll   int
 	status   string
 
 	// lastListTop / lastVisible record the last-rendered list geometry
@@ -35,6 +36,9 @@ func (p *picker) setConns(cs []config.Connection) {
 	}
 	if p.selected < 0 {
 		p.selected = 0
+	}
+	if p.scroll > p.selected {
+		p.scroll = p.selected
 	}
 }
 
@@ -115,20 +119,32 @@ func (p *picker) draw(s *cellbuf, termW, termH int) {
 		if p.lastVisible > len(p.conns) {
 			p.lastVisible = len(p.conns)
 		}
-		for i, c := range p.conns {
-			if i >= maxRows {
-				break
-			}
+		if p.selected < p.scroll {
+			p.scroll = p.selected
+		}
+		if p.selected >= p.scroll+maxRows {
+			p.scroll = p.selected - maxRows + 1
+		}
+		maxScroll := len(p.conns) - maxRows
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if p.scroll > maxScroll {
+			p.scroll = maxScroll
+		}
+		for rowIdx := 0; rowIdx < maxRows && p.scroll+rowIdx < len(p.conns); rowIdx++ {
+			i := p.scroll + rowIdx
+			c := p.conns[i]
 			line := formatConn(c)
 			if len(line) > boxW-6 {
 				line = line[:boxW-6]
 			}
 			if i == p.selected {
 				s.SetFg(colorBorderFocused)
-				s.WriteAt(listTop+i, innerCol, "▶ "+line)
+				s.WriteAt(listTop+rowIdx, innerCol, "▶ "+line)
 				s.ResetStyle()
 			} else {
-				s.WriteAt(listTop+i, innerCol, "  "+line)
+				s.WriteAt(listTop+rowIdx, innerCol, "  "+line)
 			}
 		}
 	}
@@ -179,6 +195,7 @@ func (pl *pickerLayer) HandleKey(a *app, k Key) {
 		// trapped first-run users with no saved connections in a modal
 		// they couldn't satisfy. Main view handles the no-conn state
 		// fine and Ctrl+K then c reopens the picker.
+		a.cancelConnectAttempt()
 		a.popLayer()
 		return
 	}
@@ -188,6 +205,16 @@ func (pl *pickerLayer) HandleKey(a *app, k Key) {
 		return
 	case KeyDown:
 		pl.p.moveDown()
+		return
+	case KeyPgUp:
+		for i := 0; i < 10; i++ {
+			pl.p.moveUp()
+		}
+		return
+	case KeyPgDn:
+		for i := 0; i < 10; i++ {
+			pl.p.moveDown()
+		}
 		return
 	case KeyEnter:
 		if len(pl.p.conns) == 0 {
@@ -284,6 +311,16 @@ func (pl *pickerLayer) HandleInput(a *app, msg InputMsg) bool {
 	if !ok {
 		return false
 	}
+	if mm.Button == MouseButtonWheelUp {
+		p := pl.p
+		p.moveUp()
+		return true
+	}
+	if mm.Button == MouseButtonWheelDown {
+		p := pl.p
+		p.moveDown()
+		return true
+	}
 	if mm.Button != MouseButtonLeft || mm.Action != MouseActionPress {
 		return false
 	}
@@ -295,7 +332,7 @@ func (pl *pickerLayer) HandleInput(a *app, msg InputMsg) bool {
 	if rowIdx < 0 || rowIdx >= p.lastVisible {
 		return false
 	}
-	p.selected = rowIdx
+	p.selected = p.scroll + rowIdx
 	count := pl.clicks.bump(mm)
 	if count >= 2 && len(p.conns) > 0 {
 		a.connectTo(p.conns[p.selected])
@@ -319,7 +356,7 @@ func (pl *pickerLayer) Hints(a *app) string {
 	hasList := len(pl.p.conns) > 0
 	return joinHints(
 		"Ctrl+Q=quit",
-		hintIf(hasList, "↑/↓=move"),
+		hintIf(hasList, "↑/↓/PgUp/PgDn=move"),
 		hintIf(hasList, "↵=connect"),
 		"a=add",
 		hintIf(hasList, "e=edit"),

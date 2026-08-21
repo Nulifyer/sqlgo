@@ -12,7 +12,13 @@ import (
 func openOtherPicker(a *app, onDone func(profile, transport string)) {
 	profiles := db.RegisteredProfiles()
 	a.pushLayer(newDriverPickerLayer(profiles, func(profile string) {
-		transports := db.RegisteredTransports()
+		transports, err := db.RegisteredTransportsForProfile(profile)
+		if err != nil {
+			if m := a.mainLayerPtr(); m != nil {
+				m.status = "load transports: " + err.Error()
+			}
+			return
+		}
 		a.pushLayer(newTransportPickerLayer(transports, profile, func(transport string) {
 			onDone(profile, transport)
 		}))

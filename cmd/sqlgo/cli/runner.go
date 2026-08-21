@@ -33,10 +33,11 @@ type runOptions struct {
 	timeout         time.Duration
 	maxRows         int
 
-	openConn func(ctx context.Context) (db.Conn, io.Closer, error)
-	out      io.Writer
-	outClose func() error // non-nil when out is a file we opened
-	stderr   io.Writer
+	openConn  func(ctx context.Context) (db.Conn, io.Closer, error)
+	out       io.Writer
+	outClose  func() error // cleanup hook for callers that build without running
+	outFinish func(commit bool) error
+	stderr    io.Writer
 }
 
 // buildRunOptions centralises the flag → runOptions translation shared
@@ -175,12 +176,13 @@ func buildRunOptions(flags *commonFlags, stdin io.Reader, stdout, stderr io.Writ
 	opts.format = format
 
 	if flags.Output != "" {
-		fp, err := os.Create(flags.Output)
+		atomic, err := createAtomicOutput(flags.Output)
 		if err != nil {
 			return nil, ExitUsage, fmt.Errorf("create %s: %w", flags.Output, err)
 		}
-		opts.out = fp
-		opts.outClose = fp.Close
+		opts.out = atomic.Writer()
+		opts.outClose = func() error { return atomic.Finish(false) }
+		opts.outFinish = atomic.Finish
 	} else {
 		opts.out = stdout
 	}
@@ -192,11 +194,21 @@ func buildRunOptions(flags *commonFlags, stdin io.Reader, stdout, stderr io.Writ
 // and streams each result set to the selected writer. It honors the
 // unsafe-mutation gate before any work starts so a destructive batch
 // aborts early.
-func run(ctx context.Context, opts *runOptions) ExitCode {
+func run(ctx context.Context, opts *runOptions) (exit ExitCode) {
 	started := time.Now()
 	defer func() {
-		if opts.outClose != nil {
-			_ = opts.outClose()
+		if opts.outFinish != nil {
+			commit := exit == ExitOK || exit == ExitRowCap
+			if err := opts.outFinish(commit); err != nil {
+				stderrf(opts.stderr, "output: %v", err)
+				exit = ExitQuery
+			}
+			opts.outClose = nil
+		} else if opts.outClose != nil {
+			if err := opts.outClose(); err != nil {
+				stderrf(opts.stderr, "output: %v", err)
+				exit = ExitQuery
+			}
 		}
 	}()
 
@@ -226,46 +238,86 @@ func run(ctx context.Context, opts *runOptions) ExitCode {
 	// Feed the driver the whole batch via Query; NextResultSet handles
 	// multi-statement. This matches what the TUI does, so the CLI's
 	// behaviour around `;` boundaries and driver quirks is identical.
-	stmtCtx := ctx
-	if opts.timeout > 0 {
-		var c context.CancelFunc
-		stmtCtx, c = context.WithTimeout(ctx, opts.timeout)
-		defer c()
-	}
-
-	rows, err := conn.Query(stmtCtx, opts.sql)
-	if err != nil {
-		if opts.recordHistory {
-			recordHistory(ctx, opts, err, 0, time.Since(started))
-		}
-		stderrf(opts.stderr, "query: %v", err)
-		return ExitQuery
-	}
-	defer rows.Close()
-
-	exit := ExitOK
-	first := true
+	exit = ExitOK
 	totalRows := int64(0)
-	for {
-		if !first {
-			if !rows.NextResultSet() {
-				break
-			}
+	var runErr error
+	renderer := invocationOutput{writer: opts.out, format: opts.format}
+	queries := []string{opts.sql}
+	if opts.continueOnError {
+		queries = sqltok.SplitStatements(opts.sql)
+		if len(queries) == 0 {
+			queries = []string{opts.sql}
 		}
-		first = false
+	}
 
-		n, ec := streamResultSet(opts, rows)
-		totalRows += n
-		if ec != ExitOK {
+	markFailure := func(code ExitCode, err error) {
+		if err != nil && runErr == nil {
+			runErr = err
+		}
+		if exit == ExitOK || code == ExitQuery {
+			exit = code
+		}
+	}
+	stop := false
+	for _, query := range queries {
+		if opts.maxRows > 0 && totalRows >= int64(opts.maxRows) {
+			break
+		}
+		queryCtx := ctx
+		cancelQuery := func() {}
+		if opts.timeout > 0 {
+			queryCtx, cancelQuery = context.WithTimeout(ctx, opts.timeout)
+		}
+		rows, err := conn.Query(queryCtx, query)
+		if err != nil {
+			cancelQuery()
+			stderrf(opts.stderr, "query: %v", err)
+			markFailure(ExitQuery, err)
 			if !opts.continueOnError {
-				exit = ec
 				break
 			}
-			exit = ec
+			continue
 		}
+
+		first := true
+		for {
+			if !first && !rows.NextResultSet() {
+				break
+			}
+			first = false
+			remaining := 0
+			if opts.maxRows > 0 {
+				remaining = opts.maxRows - int(totalRows)
+			}
+			n, code, resultErr := streamResultSet(opts, &renderer, rows, remaining)
+			totalRows += n
+			if code == ExitOK {
+				continue
+			}
+			markFailure(code, resultErr)
+			if code == ExitRowCap || !opts.continueOnError {
+				stop = true
+				break
+			}
+		}
+		if err := rows.Close(); err != nil {
+			stderrf(opts.stderr, "rows close: %v", err)
+			markFailure(ExitQuery, fmt.Errorf("rows close: %w", err))
+			if !opts.continueOnError {
+				stop = true
+			}
+		}
+		cancelQuery()
+		if stop {
+			break
+		}
+	}
+	if err := renderer.Finish(); err != nil {
+		stderrf(opts.stderr, "write: %v", err)
+		markFailure(ExitQuery, err)
 	}
 	if opts.recordHistory {
-		recordHistory(ctx, opts, nil, totalRows, time.Since(started))
+		recordHistory(ctx, opts, runErr, totalRows, time.Since(started))
 	}
 	return exit
 }
@@ -273,42 +325,90 @@ func run(ctx context.Context, opts *runOptions) ExitCode {
 // streamResultSet drains a single result set into the output writer
 // using the selected format. For formats that buffer (table, json,
 // markdown) it collects rows first; delimited/jsonl stream directly.
-func streamResultSet(opts *runOptions, rows db.Rows) (int64, ExitCode) {
+func streamResultSet(opts *runOptions, renderer *invocationOutput, rows db.Rows, rowLimit int) (int64, ExitCode, error) {
 	cols := rows.Columns()
-	buf := make([][]string, 0, 128)
+	var buf [][]string
+	var stream *output.RowStream
+	if output.StreamsRows(opts.format) {
+		var err error
+		stream, err = output.NewRowStream(opts.out, cols, opts.format)
+		if err != nil {
+			stderrf(opts.stderr, "write: %v", err)
+			return 0, ExitQuery, err
+		}
+	} else {
+		buf = make([][]string, 0, 128)
+	}
 	count := 0
 	for rows.Next() {
 		vals, err := rows.Scan()
 		if err != nil {
+			if stream != nil {
+				_ = stream.Close()
+			}
 			stderrf(opts.stderr, "scan: %v", err)
-			return int64(count), ExitQuery
+			return int64(count), ExitQuery, fmt.Errorf("scan: %w", err)
 		}
-		buf = append(buf, stringifyRow(vals))
+		row := stringifyRow(vals)
+		if stream != nil {
+			if err := stream.WriteRow(row); err != nil {
+				_ = stream.Close()
+				stderrf(opts.stderr, "write: %v", err)
+				return int64(count), ExitQuery, err
+			}
+		} else {
+			buf = append(buf, row)
+		}
 		count++
-		if opts.maxRows > 0 && count >= opts.maxRows {
+		if rowLimit > 0 && count >= rowLimit {
 			break
 		}
 	}
+	flush := func() error {
+		if stream != nil {
+			return stream.Close()
+		}
+		return renderer.WriteResult(cols, buf)
+	}
 	if err := rows.Err(); err != nil {
 		// Still try to flush what we have so the user sees partial results.
-		_ = output.Write(opts.out, cols, buf, opts.format)
+		_ = flush()
 		stderrf(opts.stderr, "rows: %v", err)
-		if errors.Is(err, context.DeadlineExceeded) {
-			return int64(count), ExitQuery
-		}
-		return int64(count), ExitQuery
+		return int64(count), ExitQuery, err
 	}
-	if opts.maxRows > 0 && count >= opts.maxRows {
-		stderrf(opts.stderr, "row cap %d reached; truncating output", opts.maxRows)
-	}
-	if err := output.Write(opts.out, cols, buf, opts.format); err != nil {
+	if err := flush(); err != nil {
 		stderrf(opts.stderr, "write: %v", err)
-		return int64(count), ExitQuery
+		return int64(count), ExitQuery, err
 	}
-	if opts.maxRows > 0 && count >= opts.maxRows {
-		return int64(count), ExitRowCap
+	if rowLimit > 0 && count >= rowLimit {
+		stderrf(opts.stderr, "row cap %d reached; truncating output", opts.maxRows)
+		return int64(count), ExitRowCap, fmt.Errorf("row cap %d reached", opts.maxRows)
 	}
-	return int64(count), ExitOK
+	return int64(count), ExitOK, nil
+}
+
+type invocationOutput struct {
+	writer  io.Writer
+	format  output.Format
+	results []output.Result
+}
+
+func (o *invocationOutput) WriteResult(cols []db.Column, rows [][]string) error {
+	if o.format == output.JSON || o.format == output.HTML {
+		o.results = append(o.results, output.Result{
+			Columns: append([]db.Column(nil), cols...),
+			Rows:    rows,
+		})
+		return nil
+	}
+	return output.Write(o.writer, cols, rows, o.format)
+}
+
+func (o *invocationOutput) Finish() error {
+	if len(o.results) == 0 {
+		return nil
+	}
+	return output.WriteResults(o.writer, o.results, o.format)
 }
 
 // stringifyRow coerces driver-supplied values to the string row shape
@@ -379,6 +479,7 @@ func recordHistory(ctx context.Context, opts *runOptions, runErr error, rowCount
 	}
 	if runErr != nil {
 		entry.Error = runErr.Error()
+		entry.RowCount = -1
 	}
 	if err := st.RecordHistory(ctx, entry); err != nil {
 		stderrf(opts.stderr, "history: %v", err)

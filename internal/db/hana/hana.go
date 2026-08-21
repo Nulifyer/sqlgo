@@ -39,7 +39,8 @@ func init() {
 // views, but EXPLAIN_PLAN writes to SYS tables rather than returning
 // a plan inline, so ExplainFormat stays None here.
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"hana"},
 	Capabilities: db.Capabilities{
 		SchemaDepth:          db.SchemaDepthSchemas,
 		LimitSyntax:          db.LimitSyntaxLimit,
@@ -122,7 +123,7 @@ func buildConnector(mode string, cfg db.Config) (*hdbdriver.Connector, error) {
 	if port == 0 {
 		port = 39017
 	}
-	addr := host + ":" + strconv.Itoa(port)
+	addr := db.JoinHostPort(host, port)
 
 	var (
 		c   *hdbdriver.Connector
@@ -356,7 +357,7 @@ func buildDSN(cfg db.Config) string {
 	u := url.URL{
 		Scheme: "hdb",
 		User:   userinfo,
-		Host:   host + ":" + strconv.Itoa(port),
+		Host:   db.JoinHostPort(host, port),
 	}
 
 	q := u.Query()

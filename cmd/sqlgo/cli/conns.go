@@ -65,7 +65,7 @@ subcommands:
   rm      NAME                 delete a saved connection
   test    NAME                 dial the connection and ping
   import  [-i FILE]            import connections from JSON (stdin if -i absent)
-  export  [-o FILE]            export all connections as JSON; keyring-backed secrets stay as placeholders
+  export  [-o FILE]            export all connections as JSON; secrets stay as placeholders
 `)
 }
 
@@ -168,7 +168,11 @@ func connsShow(argv []string, stdout, stderr io.Writer) ExitCode {
 	if len(c.Options) > 0 {
 		keys := sortedKeys(c.Options)
 		for _, k := range keys {
-			fmt.Fprintf(stdout, "option:   %s=%s\n", k, c.Options[k])
+			value := c.Options[k]
+			if value != "" && secret.IsSensitiveOption(k) {
+				value = "***"
+			}
+			fmt.Fprintf(stdout, "option:   %s=%s\n", k, value)
 		}
 	}
 	if c.SSH.Host != "" {
@@ -330,12 +334,11 @@ func connsAdd(argv []string, stdin io.Reader, stderr io.Writer, update bool) Exi
 		return ExitUsage
 	}
 	secrets := secretStoreFactory()
-	var cleanupAccounts []string
+	var keyringChanges []keyringChange
 	if pwSet {
 		if useKeyring {
-			if err := secrets.Set(name, pw); err == nil {
+			if err := setKeyringSecret(secrets, &keyringChanges, name, pw); err == nil {
 				c.Password = secret.Placeholder
-				cleanupAccounts = append(cleanupAccounts, name)
 			} else {
 				// Refuse the silent fallback: anyone who asked for keyring
 				// storage deserves to know it failed, not to discover months
@@ -352,14 +355,14 @@ func connsAdd(argv []string, stdin io.Reader, stderr io.Writer, update bool) Exi
 	if sshPWSet {
 		if useKeyring {
 			account := connectutil.SSHKeyringAccount(name)
-			if err := secrets.Set(account, sshPW); err == nil {
+			if err := setKeyringSecret(secrets, &keyringChanges, account, sshPW); err == nil {
 				c.SSH.Password = secret.Placeholder
-				cleanupAccounts = append(cleanupAccounts, account)
 			} else {
-				for _, created := range cleanupAccounts {
-					_ = secrets.Delete(created)
+				if rollbackErr := rollbackKeyringChanges(secrets, keyringChanges); rollbackErr != nil {
+					stderrf(stderr, "keyring unavailable: %v\nkeyring rollback failed: %v", err, rollbackErr)
+				} else {
+					stderrf(stderr, "keyring unavailable: %v\nrerun with --keyring=false to store in plaintext", err)
 				}
-				stderrf(stderr, "keyring unavailable: %v\nrerun with --keyring=false to store in plaintext", err)
 				return ExitConn
 			}
 		} else {
@@ -372,8 +375,9 @@ func connsAdd(argv []string, stdin io.Reader, stderr io.Writer, update bool) Exi
 		oldName = existing.Name
 	}
 	if err := st.SaveConnection(ctx, oldName, c); err != nil {
-		for _, created := range cleanupAccounts {
-			_ = secrets.Delete(created)
+		if rollbackErr := rollbackKeyringChanges(secrets, keyringChanges); rollbackErr != nil {
+			stderrf(stderr, "%v\nkeyring rollback failed: %v", err, rollbackErr)
+			return ExitConn
 		}
 		stderrf(stderr, "%v", err)
 		return ExitConn
@@ -541,16 +545,6 @@ func connsExport(argv []string, stdout, stderr io.Writer) ExitCode {
 	if err := fs.Parse(argv); err != nil {
 		return ExitUsage
 	}
-	var w io.Writer = stdout
-	if out != "" {
-		fp, err := os.Create(out)
-		if err != nil {
-			stderrf(stderr, "create %s: %v", out, err)
-			return ExitUsage
-		}
-		defer fp.Close()
-		w = fp
-	}
 	ctx := context.Background()
 	st, err := openStore(ctx)
 	if err != nil {
@@ -558,9 +552,26 @@ func connsExport(argv []string, stdout, stderr io.Writer) ExitCode {
 		return ExitConn
 	}
 	defer st.Close()
+	var w io.Writer = stdout
+	var atomic *atomicOutput
+	if out != "" {
+		atomic, err = createAtomicOutput(out)
+		if err != nil {
+			stderrf(stderr, "create %s: %v", out, err)
+			return ExitUsage
+		}
+		defer atomic.Finish(false)
+		w = atomic.Writer()
+	}
 	if err := st.ExportJSON(ctx, w); err != nil {
 		stderrf(stderr, "%v", err)
 		return ExitConn
+	}
+	if atomic != nil {
+		if err := atomic.Finish(true); err != nil {
+			stderrf(stderr, "output: %v", err)
+			return ExitConn
+		}
 	}
 	return ExitOK
 }
@@ -688,4 +699,46 @@ func sortedKeys(m map[string]string) []string {
 		}
 	}
 	return keys
+}
+
+type keyringChange struct {
+	account     string
+	previous    string
+	hadPrevious bool
+}
+
+func setKeyringSecret(secrets secret.Store, changes *[]keyringChange, account, value string) error {
+	previous, err := secrets.Get(account)
+	change := keyringChange{account: account}
+	switch {
+	case err == nil:
+		change.previous = previous
+		change.hadPrevious = true
+	case secret.IsNotFound(err):
+		// A new account is removed if a later step fails.
+	default:
+		return err
+	}
+	if err := secrets.Set(account, value); err != nil {
+		return err
+	}
+	*changes = append(*changes, change)
+	return nil
+}
+
+func rollbackKeyringChanges(secrets secret.Store, changes []keyringChange) error {
+	var firstErr error
+	for i := len(changes) - 1; i >= 0; i-- {
+		change := changes[i]
+		var err error
+		if change.hadPrevious {
+			err = secrets.Set(change.account, change.previous)
+		} else {
+			err = secrets.Delete(change.account)
+		}
+		if err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("restore %q: %w", change.account, err)
+		}
+	}
+	return firstErr
 }

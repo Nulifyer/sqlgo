@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
 
 	_ "github.com/Nulifyer/go-tds"
@@ -28,7 +27,8 @@ func init() {
 // queries, master..sysdatabases listing. Transport-free so an "Other..."
 // connection can pair it with a non-TDS wire (JDBC bridge, ODBC, ...).
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"tds"},
 	Capabilities: db.Capabilities{
 		SchemaDepth:           db.SchemaDepthSchemas,
 		LimitSyntax:           db.LimitSyntaxSelectTop,
@@ -40,13 +40,14 @@ var Profile = db.Profile{
 		SupportsTransactions:  true,
 		SupportsCrossDatabase: true,
 	},
-	SchemaQuery:       schemaQuery,
-	ColumnsQuery:      columnsQuery,
-	RoutinesQuery:     routinesQuery,
-	TriggersQuery:     triggersQuery,
-	DefinitionFetcher: fetchDefinition,
-	DatabaseListQuery: databaseListQuery,
-	UseDatabaseStmt:   useDatabaseStmt,
+	SchemaQuery:          schemaQuery,
+	ColumnsQuery:         columnsQuery,
+	RoutinesQuery:        routinesQuery,
+	TriggersQuery:        triggersQuery,
+	DefinitionFetcher:    fetchDefinition,
+	DatabaseListQuery:    databaseListQuery,
+	CurrentDatabaseQuery: currentDatabaseQuery,
+	UseDatabaseStmt:      useDatabaseStmt,
 }
 
 // TDSTransport wraps the Nulifyer/go-tds wire driver (TDS 5.0). ASE's
@@ -197,6 +198,8 @@ WHERE name NOT IN ('master','model','tempdb','sybsystemprocs','sybsystemdb','dbc
 ORDER BY name
 `
 
+const currentDatabaseQuery = `select db_name()`
+
 // useDatabaseStmt emits `use [dbname]`. ASE 15+ accepts bracketed
 // identifiers without requiring `set quoted_identifier on`. `]` inside
 // a name is doubled defensively; ASE disallows it in practice.
@@ -227,7 +230,7 @@ func buildDSN(cfg db.Config) string {
 	u := url.URL{
 		Scheme: "tds",
 		User:   url.UserPassword(cfg.User, cfg.Password),
-		Host:   host + ":" + strconv.Itoa(port),
+		Host:   db.JoinHostPort(host, port),
 	}
 	if cfg.Database != "" {
 		u.Path = "/" + cfg.Database

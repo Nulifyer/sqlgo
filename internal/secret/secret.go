@@ -36,6 +36,12 @@ const serviceName = "sqlgo"
 // plaintext, surface a warning, and keep going.
 var ErrUnavailable = errors.New("secret: keyring backend unavailable")
 
+// IsNotFound reports whether err means the requested keyring account does not
+// exist. It keeps callers independent of the concrete keyring package.
+func IsNotFound(err error) bool {
+	return errors.Is(err, keyring.ErrNotFound)
+}
+
 // Store is the minimal interface sqlgo needs from a secret backend.
 // Accounts are free-form strings -- sqlgo keys them by connection
 // name, so a rename has to follow up with Delete(old) + Set(new).

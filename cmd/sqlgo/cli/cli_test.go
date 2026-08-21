@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Nulifyer/sqlgo/internal/config"
@@ -419,7 +420,7 @@ func TestBuildRunOptionsSavedConnectionUsesSSHTunnel(t *testing.T) {
 		GetDriver: func(name string) (db.Driver, error) {
 			return testRegisteredDriver{name: name}, nil
 		},
-		OpenTunnel: func(cfg sshtunnel.Config) (*sshtunnel.Tunnel, error) {
+		OpenTunnel: func(_ context.Context, cfg sshtunnel.Config) (*sshtunnel.Tunnel, error) {
 			openedTunnel = cfg
 			return nil, tunnelErr
 		},
@@ -523,6 +524,80 @@ func TestConnsRmDeletesDBAndSSHSecrets(t *testing.T) {
 	}
 }
 
+func TestConnsShowRedactsSensitiveOptions(t *testing.T) {
+	st := &fakeCLIStore{getConnectionValue: config.Connection{
+		Name:   "prod",
+		Driver: "snowflake",
+		Options: map[string]string{
+			"schema":                 "analytics",
+			"token":                  "oauth-secret",
+			"private_key_passphrase": "key-secret",
+			"jwt_token_file":         "/run/secrets/jwt",
+		},
+	}}
+	restoreStore := stubOpenStore(t, st)
+	defer restoreStore()
+
+	var stdout, stderr bytes.Buffer
+	if code := connsShow([]string{"prod"}, &stdout, &stderr); code != ExitOK {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	got := stdout.String()
+	for _, plaintext := range []string{"oauth-secret", "key-secret"} {
+		if strings.Contains(got, plaintext) {
+			t.Fatalf("show output contains %q: %s", plaintext, got)
+		}
+	}
+	for _, visible := range []string{
+		"option:   schema=analytics",
+		"option:   token=***",
+		"option:   private_key_passphrase=***",
+		"option:   jwt_token_file=/run/secrets/jwt",
+	} {
+		if !strings.Contains(got, visible) {
+			t.Fatalf("show output missing %q: %s", visible, got)
+		}
+	}
+}
+
+func TestConnsSetRestoresKeyringSecretWhenSaveFails(t *testing.T) {
+	saveErr := errors.New("save failed")
+	st := &fakeCLIStore{
+		getConnectionValue: config.Connection{
+			Name:     "prod",
+			Driver:   "postgres",
+			Password: secret.Placeholder,
+		},
+		saveErr: saveErr,
+	}
+	secrets := secret.NewMemory()
+	if err := secrets.Set("prod", "old-secret"); err != nil {
+		t.Fatalf("seed keyring: %v", err)
+	}
+	restoreStore := stubOpenStore(t, st)
+	defer restoreStore()
+	restoreSecrets := stubSecretStoreFactory(t, secrets)
+	defer restoreSecrets()
+
+	var stderr bytes.Buffer
+	code := connsAdd(
+		[]string{"prod", "--driver", "postgres", "--password-stdin"},
+		strings.NewReader("new-secret\n"),
+		&stderr,
+		true,
+	)
+	if code != ExitConn || !strings.Contains(stderr.String(), saveErr.Error()) {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	got, err := secrets.Get("prod")
+	if err != nil {
+		t.Fatalf("get restored keyring secret: %v", err)
+	}
+	if got != "old-secret" {
+		t.Fatalf("restored secret = %q, want old-secret", got)
+	}
+}
+
 func TestConnsTestUsesOpenWithForSavedConnection(t *testing.T) {
 	mem := secret.NewMemory()
 	if err := mem.Set("other", "db-pass"); err != nil {
@@ -602,7 +677,7 @@ func TestConnsTestUsesSSHTunnelSettings(t *testing.T) {
 		GetDriver: func(name string) (db.Driver, error) {
 			return testRegisteredDriver{name: name}, nil
 		},
-		OpenTunnel: func(cfg sshtunnel.Config) (*sshtunnel.Tunnel, error) {
+		OpenTunnel: func(_ context.Context, cfg sshtunnel.Config) (*sshtunnel.Tunnel, error) {
 			openedTunnel = cfg
 			return nil, tunnelErr
 		},
@@ -625,6 +700,7 @@ func TestConnsTestUsesSSHTunnelSettings(t *testing.T) {
 type fakeCLIStore struct {
 	getConnectionValue config.Connection
 	getConnectionErr   error
+	saveErr            error
 	saveCalls          []saveCall
 	deleteCalls        []string
 }
@@ -652,6 +728,9 @@ func (f *fakeCLIStore) ListConnections(ctx context.Context) ([]config.Connection
 
 func (f *fakeCLIStore) SaveConnection(ctx context.Context, oldName string, c config.Connection) error {
 	f.saveCalls = append(f.saveCalls, saveCall{oldName: oldName, conn: c})
+	if f.saveErr != nil {
+		return f.saveErr
+	}
 	f.getConnectionValue = c
 	return nil
 }

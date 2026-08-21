@@ -21,6 +21,16 @@ type Profile struct {
 	// name when a profile is the default for one engine.
 	Name string
 
+	// SupportedTransports contains the transport names this profile may be
+	// composed with. A nil slice leaves deliberate ad-hoc and test profiles
+	// unrestricted; registered production profiles declare their transports.
+	SupportedTransports []string
+
+	// PrepareConfig performs profile-specific configuration before a transport
+	// opens the connection. Authentication preparation belongs here so preset
+	// and profile/transport routes behave identically.
+	PrepareConfig func(context.Context, Config) (Config, error)
+
 	Capabilities Capabilities
 
 	SchemaQuery    string
@@ -34,9 +44,17 @@ type Profile struct {
 	DefinitionFetcher  func(ctx context.Context, db *sql.DB, kind, schema, name string) (string, error)
 	ExplainRunner      func(ctx context.Context, db *sql.DB, sql string) ([][]any, error)
 	TableDesignFetcher func(ctx context.Context, q SQLQuerier, t TableRef) (TableDesign, error)
+	// ExplainConnRunner is the pinned-connection form of ExplainRunner for
+	// profiles whose EXPLAIN flow changes session state. Cross-database
+	// ExplainIn calls it after switching the same physical connection.
+	ExplainConnRunner func(ctx context.Context, conn *sql.Conn, sql string) ([][]any, error)
 
 	DatabaseListQuery string
-	UseDatabaseStmt   func(name string) string
+	// CurrentDatabaseQuery returns the database selected on the current
+	// physical connection. It is required with UseDatabaseStmt so temporary
+	// cross-database work can restore the exact prior session state.
+	CurrentDatabaseQuery string
+	UseDatabaseStmt      func(name string) string
 
 	// OnClose, if set, runs after the underlying *sql.DB is closed.
 	// Used by transports backed by ephemeral resources (temp files,
@@ -49,20 +67,22 @@ type Profile struct {
 // transport-agnostic.
 func (p Profile) sqlOptions(driverName string) sqlOptions {
 	return sqlOptions{
-		DriverName:         driverName,
-		Capabilities:       p.Capabilities,
-		SchemaQuery:        p.SchemaQuery,
-		ColumnsQuery:       p.ColumnsQuery,
-		ColumnsBuilder:     p.ColumnsBuilder,
-		RoutinesQuery:      p.RoutinesQuery,
-		TriggersQuery:      p.TriggersQuery,
-		IsPermissionDenied: p.IsPermissionDenied,
-		DefinitionFetcher:  p.DefinitionFetcher,
-		ExplainRunner:      p.ExplainRunner,
-		TableDesignFetcher: p.TableDesignFetcher,
-		DatabaseListQuery:  p.DatabaseListQuery,
-		UseDatabaseStmt:    p.UseDatabaseStmt,
-		OnClose:            p.OnClose,
+		DriverName:           driverName,
+		Capabilities:         p.Capabilities,
+		SchemaQuery:          p.SchemaQuery,
+		ColumnsQuery:         p.ColumnsQuery,
+		ColumnsBuilder:       p.ColumnsBuilder,
+		RoutinesQuery:        p.RoutinesQuery,
+		TriggersQuery:        p.TriggersQuery,
+		IsPermissionDenied:   p.IsPermissionDenied,
+		DefinitionFetcher:    p.DefinitionFetcher,
+		ExplainRunner:        p.ExplainRunner,
+		ExplainConnRunner:    p.ExplainConnRunner,
+		TableDesignFetcher:   p.TableDesignFetcher,
+		DatabaseListQuery:    p.DatabaseListQuery,
+		CurrentDatabaseQuery: p.CurrentDatabaseQuery,
+		UseDatabaseStmt:      p.UseDatabaseStmt,
+		OnClose:              p.OnClose,
 	}
 }
 
@@ -102,6 +122,16 @@ type Transport struct {
 // (the existing one-struct-per-engine) will also migrate to this to
 // kill their duplicated Open bodies.
 func OpenWith(ctx context.Context, p Profile, t Transport, cfg Config) (Conn, error) {
+	if err := ValidateProfileTransport(p, t); err != nil {
+		return nil, err
+	}
+	if p.PrepareConfig != nil {
+		prepared, err := p.PrepareConfig(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("%s profile prepare config: %w", p.Name, err)
+		}
+		cfg = prepared
+	}
 	var (
 		sqlDB   *sql.DB
 		cleanup func() error
@@ -119,7 +149,6 @@ func OpenWith(ctx context.Context, p Profile, t Transport, cfg Config) (Conn, er
 		return nil, fmt.Errorf("%s/%s open: %w", p.Name, t.Name, err)
 	}
 	opts := p.sqlOptions(t.SQLDriverName)
-	opts.DefaultDatabase = cfg.Database
 	if cleanup != nil {
 		prev := opts.OnClose
 		opts.OnClose = func() error {
@@ -134,6 +163,30 @@ func OpenWith(ctx context.Context, p Profile, t Transport, cfg Config) (Conn, er
 		}
 	}
 	return openSQL(ctx, sqlDB, opts)
+}
+
+// SupportsTransport reports whether p may be composed with transportName.
+// A nil allow-list intentionally keeps unregistered test and ad-hoc profiles
+// compatible with arbitrary transports.
+func (p Profile) SupportsTransport(transportName string) bool {
+	if p.SupportedTransports == nil {
+		return true
+	}
+	for _, name := range p.SupportedTransports {
+		if name == transportName {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateProfileTransport rejects unsupported profile/transport pairs before
+// authentication preparation, tunnel setup, or network work begins.
+func ValidateProfileTransport(p Profile, t Transport) error {
+	if !p.SupportsTransport(t.Name) {
+		return fmt.Errorf("db: profile %q does not support transport %q", p.Name, t.Name)
+	}
+	return nil
 }
 
 // --- profile/transport registries ------------------------------------------
@@ -206,4 +259,23 @@ func RegisteredTransports() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// RegisteredTransportsForProfile returns registered transport names that the
+// named profile supports. Unknown profiles return an error.
+func RegisteredTransportsForProfile(profileName string) ([]string, error) {
+	regMu.RLock()
+	defer regMu.RUnlock()
+	p, ok := profiles[profileName]
+	if !ok {
+		return nil, fmt.Errorf("db: profile %q not registered", profileName)
+	}
+	names := make([]string, 0, len(transports))
+	for name := range transports {
+		if p.SupportsTransport(name) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }

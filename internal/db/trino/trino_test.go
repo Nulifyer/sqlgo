@@ -215,6 +215,29 @@ func TestBuildDSN(t *testing.T) {
 	}
 }
 
+func TestBuildDSNIPv6(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		host string
+		want string
+	}{
+		{name: "literal", host: "2001:db8::1", want: "2001:db8::1"},
+		{name: "bracketed", host: "[2001:db8::1]", want: "2001:db8::1"},
+		{name: "zone", host: "fe80::1%eth0", want: "fe80::1%eth0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse(buildDSN(db.Config{Host: tc.host, Port: 18080, User: "sqlgo"}))
+			if err != nil {
+				t.Fatalf("parse built DSN: %v", err)
+			}
+			if u.Hostname() != tc.want || u.Port() != "18080" {
+				t.Fatalf("built DSN host/port = %q/%q, want %q/18080", u.Hostname(), u.Port(), tc.want)
+			}
+		})
+	}
+}
+
 // TestPreset_Capabilities pins the capability fingerprint so silent
 // drift in Profile -> preset wiring surfaces as a test failure.
 func TestPreset_Capabilities(t *testing.T) {

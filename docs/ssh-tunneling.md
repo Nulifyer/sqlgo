@@ -8,7 +8,7 @@ Code: [internal/sshtunnel/](../internal/sshtunnel/).
 
 ## How it works
 
-1. `sshtunnel.Open` dials the SSH server and opens a listener on
+1. `sshtunnel.OpenContext` dials the SSH server within the caller's deadline and opens a listener on
    `127.0.0.1:0` (loopback only -- the forwarded port is never
    exposed on the LAN).
 2. Each accepted local socket triggers a remote `ssh.Dial` to

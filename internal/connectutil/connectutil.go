@@ -25,7 +25,7 @@ type RuntimeDeps struct {
 	GetProfile   func(name string) (db.Profile, bool)
 	GetTransport func(name string) (db.Transport, bool)
 	OpenWith     func(ctx context.Context, p db.Profile, t db.Transport, cfg db.Config) (db.Conn, error)
-	OpenTunnel   func(cfg sshtunnel.Config) (*sshtunnel.Tunnel, error)
+	OpenTunnel   func(ctx context.Context, cfg sshtunnel.Config) (*sshtunnel.Tunnel, error)
 }
 
 // DefaultRuntimeDeps returns the production dependency set.
@@ -36,7 +36,7 @@ func DefaultRuntimeDeps(secrets secret.Store) RuntimeDeps {
 		GetProfile:   db.GetProfile,
 		GetTransport: db.GetTransport,
 		OpenWith:     db.OpenWith,
-		OpenTunnel:   sshtunnel.Open,
+		OpenTunnel:   sshtunnel.OpenContext,
 	}
 }
 
@@ -85,6 +85,9 @@ func ResolveSavedConnection(c config.Connection, deps RuntimeDeps) (ResolvedConn
 		if !ok {
 			return ResolvedConnection{}, fmt.Errorf("unknown transport: %s", c.Transport)
 		}
+		if err := db.ValidateProfileTransport(profile, transport); err != nil {
+			return ResolvedConnection{}, err
+		}
 		resolved.UseOpenWith = true
 		resolved.Profile = profile
 		resolved.Transport = transport
@@ -128,13 +131,18 @@ func ResolveSavedConnection(c config.Connection, deps RuntimeDeps) (ResolvedConn
 // configured, the SSH tunnel that fronts it. Tunnel setup is torn down
 // automatically if the DB open fails.
 func OpenResolvedConnection(ctx context.Context, resolved ResolvedConnection, deps RuntimeDeps) (db.Conn, *sshtunnel.Tunnel, error) {
+	if resolved.UseOpenWith {
+		if err := db.ValidateProfileTransport(resolved.Profile, resolved.Transport); err != nil {
+			return nil, nil, err
+		}
+	}
 	cfg := resolved.Config
 	var tunnel *sshtunnel.Tunnel
 	if resolved.Tunnel != nil {
 		if deps.OpenTunnel == nil {
 			return nil, nil, fmt.Errorf("ssh tunnel: open function not configured")
 		}
-		t, err := deps.OpenTunnel(*resolved.Tunnel)
+		t, err := deps.OpenTunnel(ctx, *resolved.Tunnel)
 		if err != nil {
 			return nil, nil, err
 		}

@@ -13,7 +13,6 @@ package azuresql
 import (
 	"context"
 	"net/url"
-	"strconv"
 	"strings"
 
 	// Registers the "azuresql" driver name with database/sql. The package
@@ -126,7 +125,7 @@ func buildDSN(cfg db.Config) string {
 
 	u := url.URL{
 		Scheme: "sqlserver",
-		Host:   host + ":" + strconv.Itoa(port),
+		Host:   db.JoinHostPort(host, port),
 	}
 	q := u.Query()
 	if cfg.Database != "" {

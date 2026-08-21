@@ -30,7 +30,8 @@ func init() {
 }
 
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"firebirdsql"},
 	Capabilities: db.Capabilities{
 		SchemaDepth:          db.SchemaDepthFlat,
 		LimitSyntax:          db.LimitSyntaxFetchFirst,
@@ -246,9 +247,9 @@ func buildDSN(cfg db.Config) string {
 		host = "localhost"
 	}
 	port := cfg.Port
-	hostPart := host
+	hostPart := db.BracketIPv6Host(host)
 	if port != 0 {
-		hostPart = fmt.Sprintf("%s:%d", host, port)
+		hostPart = db.JoinHostPort(host, port)
 	}
 	user := url.QueryEscape(cfg.User)
 	pass := url.QueryEscape(cfg.Password)

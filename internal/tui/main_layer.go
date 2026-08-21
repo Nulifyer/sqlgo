@@ -200,7 +200,7 @@ func (m *mainLayer) handleMouse(a *app, msg MouseMsg) bool {
 			if msg.Y == strip.Row {
 				for _, h := range m.queryTabHits(strip) {
 					if msg.X >= h.startCol && msg.X <= h.endCol {
-						m.closeTab(h.idx)
+						m.requestCloseTab(a, h.idx)
 						break
 					}
 				}
@@ -543,9 +543,12 @@ func (m *mainLayer) closeTab(idx int) {
 		return
 	}
 	s := m.sessions[idx]
-	if s.running && s.cancel != nil {
+	s.runGen++
+	if s.cancel != nil {
 		s.cancel()
 	}
+	s.running = false
+	s.cancel = nil
 	m.sessions = append(m.sessions[:idx], m.sessions[idx+1:]...)
 	if len(m.sessions) == 0 {
 		m.detachQueryFrame(s.activeCatalog)
@@ -557,6 +560,17 @@ func (m *mainLayer) closeTab(idx int) {
 		m.activeTab--
 	}
 	m.session = m.sessions[m.activeTab]
+}
+
+func (m *mainLayer) requestCloseTab(a *app, idx int) {
+	if idx < 0 || idx >= len(m.sessions) {
+		return
+	}
+	if m.sessions[idx].IsDirty() {
+		a.pushLayer(newDirtyCloseLayer(idx))
+		return
+	}
+	m.closeTab(idx)
 }
 
 func (m *mainLayer) Draw(a *app, c *cellbuf) {
@@ -828,6 +842,12 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		m.handleMenuPrefix(a, k)
 		return
 	}
+	// F6 cancels the active tab's query from every panel. Ctrl+C remains
+	// available for editor copy and is also accepted from Results.
+	if k.Kind == KeyF6 && m.running {
+		a.cancelQuery()
+		return
+	}
 	// Ctrl+C cancels a running query only from the Results pane. Query
 	// focus keeps Ctrl+C available for editor copy even while a run is
 	// in flight.
@@ -901,7 +921,7 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 		return
 	}
 	if k.Ctrl && k.Kind == KeyRune && k.Rune == 'w' && m.focus == FocusQuery {
-		m.closeTab(m.activeTab)
+		m.requestCloseTab(a, m.activeTab)
 		return
 	}
 	// Ctrl+PgUp / Ctrl+PgDn cycle the "tab-like thing" in the focused
@@ -1248,7 +1268,9 @@ func (m *mainLayer) editObjectFromExplorer(a *app) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		release := a.connOps.acquire()
 		body, err := conn.Definition(ctx, kind, schema, name)
+		release()
 		close(done)
 		a.asyncCh <- func(a *app) {
 			mm := a.mainLayerPtr()
@@ -1718,6 +1740,8 @@ func (a *app) prefillSelectWithFetchedColumns(t db.TableRef) {
 	fetch := func() (db.TableDesign, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		defer cancel()
+		release := a.connOps.acquire()
+		defer release()
 		return fetchTableDesign(ctx, conn, t)
 	}
 	if a.asyncCh == nil {
@@ -1852,6 +1876,8 @@ func (m *mainLayer) openTableDesign(a *app, t db.TableRef) {
 	fetch := func() (db.TableDesign, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		defer cancel()
+		release := a.connOps.acquire()
+		defer release()
 		return fetchTableDesign(ctx, conn, t)
 	}
 	if a.asyncCh == nil {
@@ -1921,6 +1947,8 @@ func (m *mainLayer) openGeneratedSQLWithDesign(a *app, t db.TableRef, kind strin
 	fetch := func() (db.TableDesign, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		defer cancel()
+		release := a.connOps.acquire()
+		defer release()
 		return fetchTableDesign(ctx, conn, t)
 	}
 	if a.asyncCh == nil {
@@ -2013,6 +2041,8 @@ func (a *app) loadExplorerColumns(t db.TableRef) {
 	fetch := func() (db.TableDesign, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		defer cancel()
+		release := a.connOps.acquire()
+		defer release()
 		return fetchTableDesign(ctx, conn, t)
 	}
 	if a.asyncCh == nil {
@@ -2081,6 +2111,8 @@ func (a *app) deepSearchExplorerColumns() {
 	loadOne := func(t db.TableRef) (db.TableDesign, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		defer cancel()
+		release := a.connOps.acquire()
+		defer release()
 		return fetchTableDesign(ctx, conn, t)
 	}
 	if a.asyncCh == nil {
@@ -2207,7 +2239,7 @@ func (m *mainLayer) handleMenuPrefix(a *app, k Key) {
 		hl.reload(a)
 		a.pushLayer(hl)
 	case 'q':
-		a.quit = true
+		a.requestQuit()
 	}
 }
 
@@ -2402,6 +2434,7 @@ func (m *mainLayer) queryHints(a *app) string {
 		"Ctrl+Q=quit",
 		hintIf(m.sessionNeedsDatabase(m.session), "Alt+D=select DB"),
 		hintIf(connected && !running, "F5=run"),
+		hintIf(running, "F6=cancel"),
 		hintIf(hasText, "Alt+F=format"),
 		hintIf(hasText || hasSource, "Ctrl+S=save"),
 		hintIf(hasSource, "Ctrl+K S=save as"),
@@ -2428,6 +2461,7 @@ func (m *mainLayer) resultsHints(a *app) string {
 		"Ctrl+Q=quit",
 		hintIf(m.table.HasColumns(), "Ctrl+F=filter"),
 		hintIf(m.running, "Ctrl+C=cancel"),
+		hintIf(m.running, "F6=cancel"),
 		hintIf(hasRows, "↵=inspect"),
 		hintIf(hasRows, "y=copy"),
 		hintIf(m.table.HasColumns(), "Alt+A=copy TSV"),

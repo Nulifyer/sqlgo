@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -42,7 +41,9 @@ func init() {
 }
 
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"mysql"},
+	PrepareConfig:       prepareConfig,
 	Capabilities: db.Capabilities{
 		SchemaDepth:           db.SchemaDepthSchemas,
 		LimitSyntax:           db.LimitSyntaxLimit,
@@ -54,14 +55,15 @@ var Profile = db.Profile{
 		SupportsTransactions:  true,
 		SupportsCrossDatabase: true,
 	},
-	SchemaQuery:        schemaQuery,
-	ColumnsQuery:       columnsQuery,
-	RoutinesQuery:      routinesQuery,
-	TriggersQuery:      triggersQuery,
-	IsPermissionDenied: isPermissionDenied,
-	DefinitionFetcher:  fetchDefinition,
-	DatabaseListQuery:  databaseListQuery,
-	UseDatabaseStmt:    useDatabaseStmt,
+	SchemaQuery:          schemaQuery,
+	ColumnsQuery:         columnsQuery,
+	RoutinesQuery:        routinesQuery,
+	TriggersQuery:        triggersQuery,
+	IsPermissionDenied:   isPermissionDenied,
+	DefinitionFetcher:    fetchDefinition,
+	DatabaseListQuery:    databaseListQuery,
+	CurrentDatabaseQuery: currentDatabaseQuery,
+	UseDatabaseStmt:      useDatabaseStmt,
 }
 
 var MySQLTransport = db.Transport{
@@ -77,6 +79,10 @@ type preset struct{}
 func (preset) Name() string                  { return driverName }
 func (preset) Capabilities() db.Capabilities { return Profile.Capabilities }
 func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
+	return db.OpenWith(ctx, Profile, MySQLTransport, cfg)
+}
+
+func prepareConfig(ctx context.Context, cfg db.Config) (db.Config, error) {
 	// AWS RDS IAM auth: swap cfg.Password for a freshly-generated IAM
 	// auth token (15-min TTL) before the DSN is built. RDS IAM requires
 	// the mysql_clear_password client plugin (token exceeds the 79-char
@@ -85,11 +91,11 @@ func (preset) Open(ctx context.Context, cfg db.Config) (db.Conn, error) {
 	if rdsIAMEnabled(cfg.Options) {
 		mutated, err := applyRDSIAMToken(ctx, cfg)
 		if err != nil {
-			return nil, fmt.Errorf("rds iam token: %w", err)
+			return cfg, fmt.Errorf("rds iam token: %w", err)
 		}
-		cfg = mutated
+		return mutated, nil
 	}
-	return db.OpenWith(ctx, Profile, MySQLTransport, cfg)
+	return cfg, nil
 }
 
 // rdsIAMEnabled reports whether the aws_rds_iam option is set to a
@@ -132,7 +138,7 @@ func applyRDSIAMToken(ctx context.Context, cfg db.Config) (db.Config, error) {
 	if port == 0 {
 		port = 3306
 	}
-	endpoint := host + ":" + strconv.Itoa(port)
+	endpoint := db.JoinHostPort(host, port)
 	token, err := rdsauth.BuildAuthToken(ctx, endpoint, awsCfg.Region, cfg.User, awsCfg.Credentials)
 	if err != nil {
 		return cfg, fmt.Errorf("build rds auth token: %w", err)
@@ -200,6 +206,8 @@ FROM information_schema.SCHEMATA
 WHERE SCHEMA_NAME NOT IN ('information_schema','mysql','performance_schema','sys')
 ORDER BY SCHEMA_NAME;
 `
+
+const currentDatabaseQuery = `SELECT DATABASE()`
 
 // useDatabaseStmt quotes the DB name with backticks. Embedded backticks
 // must be doubled per mysql identifier rules.
@@ -290,7 +298,7 @@ func buildDSN(cfg db.Config) string {
 	if port == 0 {
 		port = 3306
 	}
-	mc.Addr = host + ":" + strconv.Itoa(port)
+	mc.Addr = db.JoinHostPort(host, port)
 	mc.DBName = cfg.Database
 	// parseTime=true so DATETIME comes back as time.Time, not []byte.
 	mc.ParseTime = true

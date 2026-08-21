@@ -186,6 +186,12 @@ func (a *app) openCatalogLayer() {
 	}
 	names := append([]string(nil), m.explorer.databases...)
 	if len(names) == 0 {
+		for _, sess := range m.sessions {
+			if sess.running {
+				m.status = "query running; press F6 to cancel before loading databases"
+				return
+			}
+		}
 		lister, ok := a.conn.(db.DatabaseLister)
 		if !ok {
 			m.status = "driver does not list databases"
@@ -193,7 +199,9 @@ func (a *app) openCatalogLayer() {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), storeReadTimeout)
 		defer cancel()
+		release := a.connOps.acquire()
 		got, err := lister.ListDatabases(ctx)
+		release()
 		if err != nil {
 			m.status = "list databases: " + err.Error()
 			return

@@ -4,10 +4,10 @@
 // the user can query flat data with SQL.
 //
 // Format is dispatched by extension (.csv, .tsv, .jsonl, .ndjson).
-// Column types are inferred in a single pass by promoting along
-// INTEGER -> REAL -> TEXT: the first non-integer value demotes the
-// column to REAL, and the first non-numeric value demotes it to
-// TEXT. Empty strings are treated as NULL and don't affect typing.
+// The first pass infers columns and types by promoting along INTEGER -> REAL
+// -> TEXT. The second pass streams rows into one transaction, so memory use
+// depends on column count rather than file size. Empty strings are treated as
+// NULL and do not affect typing.
 package fileimport
 
 import (
@@ -86,75 +86,96 @@ func TableName(path string) string {
 }
 
 // loadDelimited handles CSV/TSV. The first record is treated as
-// header. Column types are inferred from all data rows.
+// header. Column types are inferred from all data rows before a second pass
+// streams the records into SQLite.
 func loadDelimited(ctx context.Context, sqlDB *sql.DB, path, table string, delim rune) error {
+	header, types, err := inferDelimited(ctx, path, delim)
+	if err != nil {
+		return err
+	}
+	cols := sanitizeColumns(header)
+
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
 	}
 	defer f.Close()
-
 	r := csv.NewReader(bufio.NewReader(f))
 	r.Comma = delim
 	r.FieldsPerRecord = -1
 	r.LazyQuotes = true
-
-	header, err := r.Read()
-	if err != nil {
+	if _, err := r.Read(); err != nil {
 		return fmt.Errorf("read header: %w", err)
 	}
-	cols := sanitizeColumns(header)
+	return writeTable(ctx, sqlDB, table, cols, types, func() ([]any, bool, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		rec, err := r.Read()
+		if err == io.EOF {
+			return nil, false, nil
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("read: %w", err)
+		}
+		out := make([]any, len(cols))
+		for i := range cols {
+			if i < len(rec) {
+				out[i] = rec[i]
+			}
+		}
+		return out, true, nil
+	})
+}
 
-	types := make([]ColumnType, len(cols))
+func inferDelimited(ctx context.Context, path string, delim rune) ([]string, []ColumnType, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open: %w", err)
+	}
+	defer f.Close()
+	r := csv.NewReader(bufio.NewReader(f))
+	r.Comma = delim
+	r.FieldsPerRecord = -1
+	r.LazyQuotes = true
+	header, err := r.Read()
+	if err != nil {
+		return nil, nil, fmt.Errorf("read header: %w", err)
+	}
+	types := make([]ColumnType, len(header))
 	for i := range types {
 		types[i] = TypeInteger
 	}
-	var rows [][]string
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, nil, err
 		}
 		rec, err := r.Read()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("read: %w", err)
+			return nil, nil, fmt.Errorf("read: %w", err)
 		}
-		if len(rec) < len(cols) {
-			pad := make([]string, len(cols))
-			copy(pad, rec)
-			rec = pad
+		for i := range types {
+			if i < len(rec) {
+				types[i] = promote(types[i], rec[i])
+			}
 		}
-		for i := 0; i < len(cols); i++ {
-			types[i] = promote(types[i], rec[i])
-		}
-		rows = append(rows, rec)
 	}
-	return writeTable(ctx, sqlDB, table, cols, types, delimitedRows(rows))
-}
-
-// delimitedRows adapts [][]string to the rowIter shape used by writeTable.
-func delimitedRows(rows [][]string) rowIter {
-	i := 0
-	return func() ([]any, bool) {
-		if i >= len(rows) {
-			return nil, false
-		}
-		r := rows[i]
-		i++
-		out := make([]any, len(r))
-		for j, v := range r {
-			out[j] = v
-		}
-		return out, true
-	}
+	return header, types, nil
 }
 
 // loadJSONL handles JSONL/NDJSON. One object per line. Column set
 // is the union of top-level keys across all lines. Type inference
 // walks each value; mixed-type columns demote to TEXT.
 func loadJSONL(ctx context.Context, sqlDB *sql.DB, path, table string) error {
+	cols, types, err := inferJSONL(ctx, path)
+	if err != nil {
+		return err
+	}
+	sanitized := sanitizeColumns(cols)
+
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
@@ -163,12 +184,40 @@ func loadJSONL(ctx context.Context, sqlDB *sql.DB, path, table string) error {
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	return writeTable(ctx, sqlDB, table, sanitized, types, func() ([]any, bool, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if line == "" {
+				continue
+			}
+			var obj map[string]any
+			if err := json.Unmarshal([]byte(line), &obj); err != nil {
+				return nil, false, fmt.Errorf("parse line: %w", err)
+			}
+			return jsonObjectRow(cols, obj), true, nil
+		}
+		if err := sc.Err(); err != nil {
+			return nil, false, fmt.Errorf("scan: %w", err)
+		}
+		return nil, false, nil
+	})
+}
 
-	var rows []map[string]any
-	colSet := map[string]struct{}{}
+func inferJSONL(ctx context.Context, path string) ([]string, []ColumnType, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open: %w", err)
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	typeByColumn := map[string]ColumnType{}
 	for sc.Scan() {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, nil, err
 		}
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
@@ -176,73 +225,55 @@ func loadJSONL(ctx context.Context, sqlDB *sql.DB, path, table string) error {
 		}
 		var obj map[string]any
 		if err := json.Unmarshal([]byte(line), &obj); err != nil {
-			return fmt.Errorf("parse line: %w", err)
+			return nil, nil, fmt.Errorf("parse line: %w", err)
 		}
-		rows = append(rows, obj)
-		for k := range obj {
-			colSet[k] = struct{}{}
+		for key, value := range obj {
+			current, exists := typeByColumn[key]
+			if !exists {
+				current = TypeInteger
+			}
+			if value != nil {
+				current = promoteValue(current, value)
+			}
+			typeByColumn[key] = current
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return fmt.Errorf("scan: %w", err)
+		return nil, nil, fmt.Errorf("scan: %w", err)
 	}
-
-	cols := make([]string, 0, len(colSet))
-	for k := range colSet {
-		cols = append(cols, k)
+	cols := make([]string, 0, len(typeByColumn))
+	for key := range typeByColumn {
+		cols = append(cols, key)
 	}
 	sort.Strings(cols)
-	sanitized := sanitizeColumns(cols)
-
 	types := make([]ColumnType, len(cols))
-	for i := range types {
-		types[i] = TypeInteger
+	for i, key := range cols {
+		types[i] = typeByColumn[key]
 	}
-	for _, obj := range rows {
-		for i, k := range cols {
-			v, ok := obj[k]
-			if !ok || v == nil {
-				continue
-			}
-			types[i] = promoteValue(types[i], v)
-		}
-	}
-
-	return writeTable(ctx, sqlDB, table, sanitized, types, jsonlRows(cols, rows))
+	return cols, types, nil
 }
 
-// jsonlRows adapts parsed JSONL records to rowIter, pulling each
-// column by the original (un-sanitized) key.
-func jsonlRows(cols []string, rows []map[string]any) rowIter {
-	i := 0
-	return func() ([]any, bool) {
-		if i >= len(rows) {
-			return nil, false
+func jsonObjectRow(cols []string, obj map[string]any) []any {
+	out := make([]any, len(cols))
+	for i, key := range cols {
+		value, ok := obj[key]
+		if !ok || value == nil {
+			continue
 		}
-		r := rows[i]
-		i++
-		out := make([]any, len(cols))
-		for j, k := range cols {
-			v, ok := r[k]
-			if !ok || v == nil {
-				out[j] = nil
-				continue
-			}
-			switch vv := v.(type) {
-			case string, float64, bool:
-				out[j] = vv
-			default:
-				// objects, arrays: re-encode as JSON text.
-				b, _ := json.Marshal(vv)
-				out[j] = string(b)
-			}
+		switch value := value.(type) {
+		case string, float64, bool:
+			out[i] = value
+		default:
+			encoded, _ := json.Marshal(value)
+			out[i] = string(encoded)
 		}
-		return out, true
 	}
+	return out
 }
 
-// rowIter yields one row per call. Returns ok=false when exhausted.
-type rowIter func() ([]any, bool)
+// rowIter yields one row per call. Returns ok=false when exhausted and an
+// error when the source fails after table creation has begun.
+type rowIter func() ([]any, bool, error)
 
 // writeTable creates the target table and inserts rows in batches.
 // Uses a single transaction for atomicity and speed.
@@ -289,7 +320,10 @@ func writeTable(ctx context.Context, sqlDB *sql.DB, table string, cols []string,
 	defer stmt.Close()
 
 	for {
-		row, ok := next()
+		row, ok, err := next()
+		if err != nil {
+			return err
+		}
 		if !ok {
 			break
 		}

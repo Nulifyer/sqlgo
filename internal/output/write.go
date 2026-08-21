@@ -1,7 +1,6 @@
 package output
 
 import (
-	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -46,21 +45,16 @@ func WriteWith(w io.Writer, cols []db.Column, rows [][]string, format Format, op
 }
 
 func writeJSONL(w io.Writer, cols []db.Column, rows [][]string) error {
-	enc := json.NewEncoder(w)
-	for i, row := range rows {
-		rec := make(map[string]string, len(cols))
-		for j, c := range cols {
-			if j < len(row) {
-				rec[c.Name] = row[j]
-			} else {
-				rec[c.Name] = ""
-			}
-		}
-		if err := enc.Encode(rec); err != nil {
-			return fmt.Errorf("output jsonl row %d: %w", i, err)
+	stream, err := NewRowStream(w, cols, JSONL)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if err := stream.WriteRow(row); err != nil {
+			return err
 		}
 	}
-	return nil
+	return stream.Close()
 }
 
 func writeTable(w io.Writer, cols []db.Column, rows [][]string) error {
@@ -119,18 +113,20 @@ func runeLen(s string) int {
 }
 
 func writeDelimited(w io.Writer, cols []db.Column, rows [][]string, comma rune) error {
-	cw := csv.NewWriter(w)
-	cw.Comma = comma
-	if err := cw.Write(columnNames(cols)); err != nil {
-		return fmt.Errorf("output header: %w", err)
+	format := CSV
+	if comma == '\t' {
+		format = TSV
 	}
-	for i, row := range rows {
-		if err := cw.Write(padRow(row, len(cols))); err != nil {
-			return fmt.Errorf("output row %d: %w", i, err)
+	stream, err := NewRowStream(w, cols, format)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if err := stream.WriteRow(row); err != nil {
+			return err
 		}
 	}
-	cw.Flush()
-	return cw.Error()
+	return stream.Close()
 }
 
 // jsonResult is the on-disk JSON shape. The top-level "columns" slice
@@ -143,6 +139,16 @@ type jsonResult struct {
 }
 
 func writeJSON(w io.Writer, cols []db.Column, rows [][]string) error {
+	out := makeJSONResult(cols, rows)
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(&out); err != nil {
+		return fmt.Errorf("output json: %w", err)
+	}
+	return nil
+}
+
+func makeJSONResult(cols []db.Column, rows [][]string) jsonResult {
 	out := jsonResult{
 		Columns: columnNames(cols),
 		Rows:    make([]map[string]string, 0, len(rows)),
@@ -158,12 +164,7 @@ func writeJSON(w io.Writer, cols []db.Column, rows [][]string) error {
 		}
 		out.Rows = append(out.Rows, rec)
 	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(&out); err != nil {
-		return fmt.Errorf("output json: %w", err)
-	}
-	return nil
+	return out
 }
 
 func writeMarkdown(w io.Writer, cols []db.Column, rows [][]string) error {
@@ -307,8 +308,24 @@ func writeSQLInsert(w io.Writer, cols []db.Column, rows [][]string, table string
 // No CSS -- consumers paste it into a styled report or an email; any
 // structural tweaks belong in the enclosing template, not here.
 func writeHTML(w io.Writer, cols []db.Column, rows [][]string) error {
+	return writeHTMLResults(w, []Result{{Columns: cols, Rows: rows}})
+}
+
+func writeHTMLResults(w io.Writer, results []Result) error {
 	var b strings.Builder
-	b.WriteString("<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>results</title></head><body>\n<table>\n<thead><tr>")
+	b.WriteString("<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>results</title></head><body>\n")
+	for _, result := range results {
+		writeHTMLTable(&b, result.Columns, result.Rows)
+	}
+	b.WriteString("</body></html>\n")
+	if _, err := io.WriteString(w, b.String()); err != nil {
+		return fmt.Errorf("output html: %w", err)
+	}
+	return nil
+}
+
+func writeHTMLTable(b *strings.Builder, cols []db.Column, rows [][]string) {
+	b.WriteString("<table>\n<thead><tr>")
 	for _, c := range cols {
 		b.WriteString("<th>")
 		b.WriteString(escapeHTML(c.Name))
@@ -328,11 +345,7 @@ func writeHTML(w io.Writer, cols []db.Column, rows [][]string) error {
 		}
 		b.WriteString("</tr>\n")
 	}
-	b.WriteString("</tbody>\n</table>\n</body></html>\n")
-	if _, err := io.WriteString(w, b.String()); err != nil {
-		return fmt.Errorf("output html: %w", err)
-	}
-	return nil
+	b.WriteString("</tbody>\n</table>\n")
 }
 
 func escapeHTML(s string) string {

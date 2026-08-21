@@ -160,6 +160,44 @@ func TestBuildClientOptions(t *testing.T) {
 	}
 }
 
+func TestEndpointForHostPort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		host    string
+		port    int
+		want    string
+		wantErr bool
+	}{
+		{name: "hostname", host: "localhost", port: 9050, want: "http://localhost:9050"},
+		{name: "ipv4", host: "127.0.0.1", port: 9050, want: "http://127.0.0.1:9050"},
+		{name: "ipv6", host: "2001:db8::1", port: 9050, want: "http://[2001:db8::1]:9050"},
+		{name: "bracketed_ipv6", host: "[2001:db8::1]", port: 9050, want: "http://[2001:db8::1]:9050"},
+		{name: "ipv6_without_port", host: "2001:db8::1", want: "http://[2001:db8::1]"},
+		{name: "ipv6_zone_url", host: "http://[fe80::1%25eth0]", port: 9050, want: "http://[fe80::1%25eth0]:9050"},
+		{name: "scheme_preserved", host: "https://proxy.example.com", port: 9443, want: "https://proxy.example.com:9443"},
+		{name: "scheme_missing_hostname", host: "http://", port: 9050, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := endpointForHostPort(tc.host, tc.port)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("endpointForHostPort(%q, %d) = %q, want error", tc.host, tc.port, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("endpointForHostPort(%q, %d): %v", tc.host, tc.port, err)
+			}
+			if got != tc.want {
+				t.Fatalf("endpointForHostPort(%q, %d) = %q, want %q", tc.host, tc.port, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestConvertValue covers the BigQuery-native types the Go client hands
 // back in []bigquery.Value row slices: nested ARRAY, nested RECORD/
 // STRUCT, time.Time, and simple scalar passthrough. Everything else

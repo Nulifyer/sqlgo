@@ -1,7 +1,9 @@
 package postgres
 
 import (
+	"context"
 	"net/url"
+	"reflect"
 	"testing"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
@@ -173,6 +175,29 @@ func TestBuildDSN(t *testing.T) {
 	}
 }
 
+func TestBuildDSNIPv6(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		host string
+		want string
+	}{
+		{name: "literal", host: "2001:db8::1", want: "2001:db8::1"},
+		{name: "bracketed", host: "[2001:db8::1]", want: "2001:db8::1"},
+		{name: "zone", host: "fe80::1%eth0", want: "fe80::1%eth0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse(buildDSN(db.Config{Host: tc.host, Port: 55432, User: "app"}))
+			if err != nil {
+				t.Fatalf("parse built DSN: %v", err)
+			}
+			if u.Hostname() != tc.want || u.Port() != "55432" {
+				t.Fatalf("built DSN host/port = %q/%q, want %q/55432", u.Hostname(), u.Port(), tc.want)
+			}
+		})
+	}
+}
+
 func TestRDSIAMEnabled(t *testing.T) {
 	t.Parallel()
 
@@ -199,6 +224,24 @@ func TestRDSIAMEnabled(t *testing.T) {
 				t.Errorf("rdsIAMEnabled(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestProfilePreparationDisabledLeavesConfigUnchanged(t *testing.T) {
+	t.Parallel()
+	cfg := db.Config{
+		Host:    "db.example.com",
+		Options: map[string]string{"sslmode": "verify-full"},
+	}
+	got, err := Profile.PrepareConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("PrepareConfig: %v", err)
+	}
+	if !reflect.DeepEqual(got, cfg) {
+		t.Fatalf("PrepareConfig = %#v, want %#v", got, cfg)
+	}
+	if !Profile.SupportsTransport(PgxTransport.Name) || Profile.SupportsTransport("mysql") {
+		t.Fatalf("profile transport compatibility = %v/%v", Profile.SupportsTransport(PgxTransport.Name), Profile.SupportsTransport("mysql"))
 	}
 }
 

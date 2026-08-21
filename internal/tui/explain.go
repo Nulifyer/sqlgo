@@ -47,6 +47,8 @@ func (a *app) runExplain(conn db.Conn, catalog, sql string) (*explainTree, error
 
 	ctx, cancel := context.WithTimeout(context.Background(), explainTimeout)
 	defer cancel()
+	release := a.connOps.acquire()
+	defer release()
 	var raw [][]any
 	var err error
 	if catalog != "" {

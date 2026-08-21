@@ -34,7 +34,8 @@ func init() {
 }
 
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"sqlite3"},
 	Capabilities: db.Capabilities{
 		SchemaDepth:          db.SchemaDepthFlat,
 		LimitSyntax:          db.LimitSyntaxLimit,

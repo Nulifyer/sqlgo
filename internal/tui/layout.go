@@ -30,12 +30,18 @@ type panels struct {
 }
 
 func computeLayout(termW, termH int) panels {
+	if termW < 0 {
+		termW = 0
+	}
+	if termH < 0 {
+		termH = 0
+	}
 	// Reserve one row at the bottom for the status line.
 	statusH := statusBarH
-	bodyH := termH - statusH
-	if bodyH < bodyMinH {
-		bodyH = bodyMinH
+	if statusH > termH {
+		statusH = termH
 	}
+	bodyH := termH - statusH
 
 	// Explorer takes ~25% width (min/max clamped).
 	explW := termW / 4
@@ -48,12 +54,21 @@ func computeLayout(termW, termH int) panels {
 	if explW > termW-explorerReserveR {
 		explW = termW - explorerReserveR
 	}
+	if explW < 0 {
+		explW = 0
+	}
+	if explW > termW {
+		explW = termW
+	}
 
 	rightW := termW - explW
 	// Query takes ~40% of body height, results the rest.
 	queryH := bodyH * 4 / 10
 	if queryH < queryMinH {
 		queryH = queryMinH
+	}
+	if queryH > bodyH {
+		queryH = bodyH
 	}
 	resultsH := bodyH - queryH
 

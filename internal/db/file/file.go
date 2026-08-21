@@ -46,7 +46,8 @@ func init() {
 // Profile mirrors sqlite. File-backed connections can't run EXPLAIN
 // usefully, so the format is SQLiteRows and the TUI handles it.
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"file"},
 	Capabilities: db.Capabilities{
 		SchemaDepth:          db.SchemaDepthFlat,
 		LimitSyntax:          db.LimitSyntaxLimit,

@@ -24,6 +24,14 @@ func TestBuildDSNDefaultHost(t *testing.T) {
 	}
 }
 
+func TestBuildDSNIPv6WithoutPort(t *testing.T) {
+	t.Parallel()
+	dsn := buildDSN(db.Config{User: "sysdba", Password: "pw", Host: "2001:db8::1", Database: "acme"})
+	if want := "sysdba:pw@[2001:db8::1]/acme"; dsn != want {
+		t.Fatalf("buildDSN = %q, want %q", dsn, want)
+	}
+}
+
 func TestBuildDSNOptions(t *testing.T) {
 	t.Parallel()
 	dsn := buildDSN(db.Config{User: "u", Password: "p", Database: "db", Options: map[string]string{"role": "READ_ONLY"}})

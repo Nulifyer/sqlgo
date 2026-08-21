@@ -171,14 +171,16 @@ func runOpen(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 
 	out := stdout
 	var outClose func() error
+	var outFinish func(bool) error
 	if outPath != "" {
-		fp, err := os.Create(outPath)
+		atomic, err := createAtomicOutput(outPath)
 		if err != nil {
 			stderrf(stderr, "create %s: %v", outPath, err)
 			return ExitUsage
 		}
-		out = fp
-		outClose = fp.Close
+		out = atomic.Writer()
+		outClose = func() error { return atomic.Finish(false) }
+		outFinish = atomic.Finish
 	}
 
 	runtime := runtimeDepsFactory()
@@ -193,6 +195,7 @@ func runOpen(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 		maxRows:         maxRows,
 		out:             out,
 		outClose:        outClose,
+		outFinish:       outFinish,
 		stderr:          stderr,
 	}
 	opts.openConn = func(ctx context.Context) (db.Conn, io.Closer, error) {

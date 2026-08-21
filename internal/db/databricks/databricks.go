@@ -37,7 +37,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
 
 	_ "github.com/databricks/databricks-sql-go"
@@ -59,7 +58,8 @@ func init() {
 // LIMIT/OFFSET, standard information_schema. EXPLAIN returns a text
 // plan (no JSON variant) so ExplainFormat stays None.
 var Profile = db.Profile{
-	Name: driverName,
+	Name:                driverName,
+	SupportedTransports: []string{"databricks"},
 	Capabilities: db.Capabilities{
 		SchemaDepth:          db.SchemaDepthSchemas,
 		LimitSyntax:          db.LimitSyntaxLimit,
@@ -189,7 +189,7 @@ func buildDSN(cfg db.Config) string {
 		port = 443
 	}
 	if host != "" {
-		host = host + ":" + strconv.Itoa(port)
+		host = db.JoinHostPort(host, port)
 	}
 
 	// http_path is required at connect-time but we leave validation to
