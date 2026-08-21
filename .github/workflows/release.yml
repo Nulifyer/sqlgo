@@ -40,11 +40,14 @@ jobs:
 
       # goreleaser-cross bundles cgo cross toolchains (linux, windows
       # via mingw, darwin via osxcross) so mattn/go-sqlite3 builds for
-      # every target. Pinned to a specific tag.
+      # every target. Pinned to the linux/amd64 image manifest used by
+      # ubuntu-latest so a moved registry tag cannot alter the release build.
       - name: Run GoReleaser (cross)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p "${HOME}/go/pkg/mod" "${HOME}/.cache/go-build"
-          docker run --rm --privileged \
+          docker run --rm \
             --user "$(id -u):$(id -g)" \
             --entrypoint goreleaser \
             -v "${PWD}:/src" \
@@ -55,6 +58,6 @@ jobs:
             -e GOMODCACHE=/tmp/gomodcache \
             -e GOCACHE=/tmp/gobuildcache \
             -e GOMAXPROCS=2 \
-            -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
-            ghcr.io/goreleaser/goreleaser-cross:v1.26 \
+            -e GITHUB_TOKEN \
+            ghcr.io/goreleaser/goreleaser-cross@sha256:3f182e45043d7e30be54696e2def57560527a8e5c561db0c20f8299e6ccbfe3c \
             release --clean --parallelism=5

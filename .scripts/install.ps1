@@ -11,9 +11,8 @@ $exe = "$installDir\sqlgo.exe"
 # Detect architecture
 $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
     "AMD64" { "amd64" }
-    "ARM64" { "arm64" }
     default {
-        Write-Host "Unsupported architecture: $env:PROCESSOR_ARCHITECTURE" -ForegroundColor Red
+        Write-Host "Unsupported architecture: $env:PROCESSOR_ARCHITECTURE. Releases currently provide Windows amd64 only." -ForegroundColor Red
         exit 1
     }
 }
@@ -33,6 +32,10 @@ if (-not $asset) {
     Write-Host "  ERROR: No Windows archive found in release $tag ($assetName)" -ForegroundColor Red
     exit 1
 }
+if (-not $checksumAsset) {
+    Write-Host "  ERROR: No checksum file found in release $tag" -ForegroundColor Red
+    exit 1
+}
 
 # 2. Download archive
 Write-Host "  Downloading $tag..."
@@ -41,23 +44,29 @@ $zipFile = "$installDir\sqlgo-update.zip"
 Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipFile
 
 # 3. Verify checksum
-if ($checksumAsset) {
-    Write-Host "  Verifying checksum..."
-    $checksums = (Invoke-WebRequest -Uri $checksumAsset.browser_download_url).Content
-    $expectedLine = ($checksums -split "`n") | Where-Object { $_ -like "*$assetName*" } | Select-Object -First 1
-    if ($expectedLine) {
-        $expectedHash = ($expectedLine -split "\s+")[0]
-        $actualHash = (Get-FileHash -Path $zipFile -Algorithm SHA256).Hash.ToLower()
-        if ($actualHash -ne $expectedHash) {
-            Remove-Item $zipFile -Force
-            Write-Host "  ERROR: Checksum mismatch!" -ForegroundColor Red
-            Write-Host "    Expected: $expectedHash" -ForegroundColor Red
-            Write-Host "    Got:      $actualHash" -ForegroundColor Red
-            exit 1
-        }
-        Write-Host "  Checksum verified" -ForegroundColor Green
-    }
+Write-Host "  Verifying checksum..."
+$checksums = (Invoke-WebRequest -Uri $checksumAsset.browser_download_url).Content
+$expectedLine = ($checksums -split "`n") | Where-Object {
+    $fields = $_.Trim() -split "\s+"
+    $fields.Count -ge 2 -and
+        $fields[0] -match '^[0-9a-fA-F]{64}$' -and
+        $fields[-1].TrimStart('*') -eq $assetName
+} | Select-Object -First 1
+if (-not $expectedLine) {
+    Remove-Item $zipFile -Force
+    Write-Host "  ERROR: No checksum found for $assetName" -ForegroundColor Red
+    exit 1
 }
+$expectedHash = (($expectedLine.Trim()) -split "\s+")[0].ToLower()
+$actualHash = (Get-FileHash -Path $zipFile -Algorithm SHA256).Hash.ToLower()
+if ($actualHash -ne $expectedHash) {
+    Remove-Item $zipFile -Force
+    Write-Host "  ERROR: Checksum mismatch!" -ForegroundColor Red
+    Write-Host "    Expected: $expectedHash" -ForegroundColor Red
+    Write-Host "    Got:      $actualHash" -ForegroundColor Red
+    exit 1
+}
+Write-Host "  Checksum verified" -ForegroundColor Green
 
 # 4. Extract
 $extractDir = "$installDir\sqlgo-extract"

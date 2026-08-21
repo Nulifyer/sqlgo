@@ -8,6 +8,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+if [ -n "$(git status --porcelain)" ]; then
+    echo "ERROR: working tree is not clean; commit or stash changes before releasing"
+    exit 1
+fi
+
+echo "Running release checks..."
+go test -tags sqlite_fts5 ./...
+go vet -tags sqlite_fts5 ./...
+
 B='\033[1m'
 D='\033[2m'
 G='\033[32m'

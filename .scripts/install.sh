@@ -44,38 +44,40 @@ CHECKSUM_URL="https://github.com/${REPO}/releases/download/${TAG}/${CHECKSUM_NAM
 echo "  Downloading ${TAG}..."
 mkdir -p "$INSTALL_DIR"
 TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
 curl -fsSL "$DOWNLOAD_URL" -o "${TMP_DIR}/archive.tar.gz"
-curl -fsSL "$CHECKSUM_URL" -o "${TMP_DIR}/checksums.txt" 2>/dev/null || true
+if ! curl -fsSL "$CHECKSUM_URL" -o "${TMP_DIR}/checksums.txt"; then
+    echo "  ERROR: Could not download release checksums"
+    exit 1
+fi
 
 # 3. Verify checksum
-if [ -f "${TMP_DIR}/checksums.txt" ]; then
-    echo "  Verifying checksum..."
-    EXPECTED=$(grep "$ARCHIVE_NAME" "${TMP_DIR}/checksums.txt" | awk '{print $1}')
-    if [ -n "$EXPECTED" ]; then
-        if command -v sha256sum &>/dev/null; then
-            ACTUAL=$(sha256sum "${TMP_DIR}/archive.tar.gz" | awk '{print $1}')
-        elif command -v shasum &>/dev/null; then
-            ACTUAL=$(shasum -a 256 "${TMP_DIR}/archive.tar.gz" | awk '{print $1}')
-        else
-            ACTUAL=""
-            echo "  WARNING: No sha256sum or shasum found, skipping verification"
-        fi
-        if [ -n "$ACTUAL" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
-            rm -rf "$TMP_DIR"
-            echo "  ERROR: Checksum mismatch!"
-            echo "    Expected: $EXPECTED"
-            echo "    Got:      $ACTUAL"
-            exit 1
-        fi
-        [ -n "$ACTUAL" ] && echo "  Checksum verified"
-    fi
+echo "  Verifying checksum..."
+EXPECTED=$(awk -v archive="$ARCHIVE_NAME" '$2 == archive || $2 == "*" archive { print $1; exit }' "${TMP_DIR}/checksums.txt")
+if [ -z "$EXPECTED" ]; then
+    echo "  ERROR: No checksum found for ${ARCHIVE_NAME}"
+    exit 1
 fi
+if command -v sha256sum &>/dev/null; then
+    ACTUAL=$(sha256sum "${TMP_DIR}/archive.tar.gz" | awk '{print $1}')
+elif command -v shasum &>/dev/null; then
+    ACTUAL=$(shasum -a 256 "${TMP_DIR}/archive.tar.gz" | awk '{print $1}')
+else
+    echo "  ERROR: sha256sum or shasum is required to verify the download"
+    exit 1
+fi
+if [ "$ACTUAL" != "$EXPECTED" ]; then
+    echo "  ERROR: Checksum mismatch!"
+    echo "    Expected: $EXPECTED"
+    echo "    Got:      $ACTUAL"
+    exit 1
+fi
+echo "  Checksum verified"
 
 # 4. Extract and install
 tar -xzf "${TMP_DIR}/archive.tar.gz" -C "$TMP_DIR"
 chmod +x "${TMP_DIR}/sqlgo"
 mv "${TMP_DIR}/sqlgo" "${INSTALL_DIR}/sqlgo"
-rm -rf "$TMP_DIR"
 echo "  Installed to ${INSTALL_DIR}/sqlgo"
 
 # 5. Migrate legacy data dir (~/.sqlgo) into XDG data home

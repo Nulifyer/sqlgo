@@ -6,6 +6,18 @@ $ErrorActionPreference = "Stop"
 
 Push-Location (Split-Path $PSScriptRoot)
 
+if (git status --porcelain) {
+    Write-Host "ERROR: working tree is not clean; commit or stash changes before releasing" -ForegroundColor Red
+    Pop-Location
+    exit 1
+}
+
+Write-Host "Running release checks..."
+go test -tags sqlite_fts5 ./...
+if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
+go vet -tags sqlite_fts5 ./...
+if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
+
 $e = [char]27
 $B = "$e[1m"
 $D = "$e[2m"
