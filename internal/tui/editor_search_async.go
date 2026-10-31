@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
@@ -16,6 +17,9 @@ func (e *editor) requestSearch(a *app, needle string) {
 	}
 	e.searchNeedle, e.lastSearch = needle, needle
 	e.searchGeneration++
+	if e.searchCancel != nil {
+		e.searchCancel()
+	}
 	e.matches = nil
 	e.matchRows = nil
 	e.currentMatch = -1
@@ -23,13 +27,17 @@ func (e *editor) requestSearch(a *app, needle string) {
 		return
 	}
 	e.searchBusy = true
+	ctx, cancel := context.WithCancel(context.Background())
+	e.searchCancel = cancel
 	rev, gen := e.buf.Revision(), e.searchGeneration
 	text := e.buf.Text()
 	matchCase, wholeWord := e.searchMatchCase, e.searchWholeWord
 	a.runBackground(func() func(*app) {
-		matches := findEditorMatches(splitBufferText(text), needle, matchCase, wholeWord)
+		defer cancel()
+		matches, limited := scanEditorMatches(ctx, splitBufferText(text), needle, matchCase, wholeWord)
 		return func(a *app) {
 			e.searchBusy = false
+			e.searchCancel = nil
 			if !e.HasSearch() {
 				return
 			}
@@ -38,6 +46,7 @@ func (e *editor) requestSearch(a *app, needle string) {
 				return
 			}
 			e.matches = matches
+			e.searchLimited = limited
 			e.indexMatches()
 			e.searchRevision = rev
 			e.currentMatch = e.firstMatchAtOrAfterCursor()
@@ -56,7 +65,13 @@ func (e *editor) replaceAllAsync(a *app, replacement string, done func(int, erro
 	matchCase, wholeWord := e.searchMatchCase, e.searchWholeWord
 	a.runBackground(func() func(*app) {
 		lines := splitBufferText(text)
-		matches := findEditorMatches(lines, needle, matchCase, wholeWord)
+		matches, limited := scanEditorMatches(context.Background(), lines, needle, matchCase, wholeWord)
+		if limited {
+			return func(a *app) {
+				e.replaceBusy = false
+				done(0, fmt.Errorf("more than %d matches; narrow the search before replacing all", maxEditorSearchMatches))
+			}
+		}
 		var out strings.Builder
 		index := 0
 		for row, line := range lines {

@@ -209,12 +209,13 @@ func useDatabaseStmt(name string) string {
 	return "USE [" + strings.ReplaceAll(name, "]", "]]") + "]"
 }
 
-// columnsQuery uses @p1/@p2 (go-mssqldb named placeholders).
+// Let SQL Server resolve unqualified names in the caller's default schema.
+// QUOTENAME keeps each supplied identifier a single name, including dots/brackets.
 const columnsQuery = `
-SELECT COLUMN_NAME, DATA_TYPE
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2
-ORDER BY ORDINAL_POSITION;
+SELECT c.name, TYPE_NAME(c.user_type_id)
+FROM sys.columns c
+WHERE c.object_id = OBJECT_ID(CASE WHEN @p1 = '' THEN QUOTENAME(@p2) ELSE QUOTENAME(@p1) + '.' + QUOTENAME(@p2) END)
+ORDER BY c.column_id;
 `
 
 const tableDesignQuery = `

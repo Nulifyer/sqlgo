@@ -1202,12 +1202,12 @@ func (a *app) gatherCompletionsCtx(ctx completionCtx) completionGatherResult {
 		items = append(items, afterTableKeywordCandidates(a)...)
 		items = append(items, a.aliasCandidates(ctx)...)
 	case clauseSelectList:
-		items = append(items, a.inScopeColumnCandidates(ctx)...)
+		items = append(items, a.inScopeColumnCandidates(&ctx)...)
 		items = append(items, a.aliasCandidates(ctx)...)
 		items = append(items, a.functionCandidates()...)
 		items = append(items, a.keywordItems("FROM", "DISTINCT", "TOP", "*")...)
 	case clauseWhereish, clauseGroupBy, clauseOrderBy:
-		items = append(items, a.inScopeColumnCandidates(ctx)...)
+		items = append(items, a.inScopeColumnCandidates(&ctx)...)
 		items = append(items, a.aliasCandidates(ctx)...)
 		items = append(items, a.functionCandidates()...)
 		items = append(items, a.keywordCandidates()...)
@@ -1215,14 +1215,14 @@ func (a *app) gatherCompletionsCtx(ctx completionCtx) completionGatherResult {
 		items = append(items, a.schemaCandidates()...)
 		items = append(items, a.tableCandidates()...)
 	case clauseInsertColumns:
-		items = append(items, a.targetColumnCandidates(ctx)...)
+		items = append(items, a.targetColumnCandidates(&ctx)...)
 	case clauseValuesList:
-		items = append(items, a.targetColumnCandidates(ctx)...)
+		items = append(items, a.targetColumnCandidates(&ctx)...)
 		items = append(items, a.functionCandidates()...)
 		items = append(items, a.keywordItems("DEFAULT", "NULL")...)
 	case clauseUpdateSet:
-		items = append(items, a.targetColumnCandidates(ctx)...)
-		items = append(items, a.inScopeColumnCandidates(ctx)...)
+		items = append(items, a.targetColumnCandidates(&ctx)...)
+		items = append(items, a.inScopeColumnCandidates(&ctx)...)
 		items = append(items, a.aliasCandidates(ctx)...)
 		items = append(items, a.functionCandidates()...)
 		items = append(items, a.keywordItems("DEFAULT", "NULL")...)
@@ -1233,6 +1233,7 @@ func (a *app) gatherCompletionsCtx(ctx completionCtx) completionGatherResult {
 		items = append(items, a.tableCandidates()...)
 	}
 	result.items = items
+	result.awaitingColumns = ctx.awaitingColumns
 	return result
 }
 
@@ -1509,7 +1510,7 @@ func (a *app) tableCandidates() []completionItem {
 // inScopeColumnCandidates fetches columns for every in-scope
 // table. CTE matches use declared columns instead of hitting the
 // DB (CTE isn't persisted).
-func (a *app) inScopeColumnCandidates(ctx completionCtx) []completionItem {
+func (a *app) inScopeColumnCandidates(ctx *completionCtx) []completionItem {
 	var out []completionItem
 	for _, t := range ctx.allScopeTables() {
 		// Derived subquery-FROM: pre-parsed cols win.
@@ -1568,7 +1569,7 @@ func (a *app) aliasCandidates(ctx completionCtx) []completionItem {
 	return out
 }
 
-func (a *app) targetColumnCandidates(ctx completionCtx) []completionItem {
+func (a *app) targetColumnCandidates(ctx *completionCtx) []completionItem {
 	if ctx.target.name == "" {
 		return nil
 	}
@@ -1586,7 +1587,8 @@ func (a *app) targetColumnCandidates(ctx completionCtx) []completionItem {
 		}
 		return out
 	}
-	cols, _ := a.fetchColumnsFor(ctx.target, ctx.signature())
+	cols, pending := a.fetchColumnsFor(ctx.target, ctx.signature())
+	ctx.awaitingColumns = ctx.awaitingColumns || pending
 	var out []completionItem
 	for _, c := range cols {
 		it := a.identifierCompletion(c.Name, completeColumn)
@@ -1614,14 +1616,15 @@ func (a *app) fetchColumnsFor(t tableScope, refreshSig string) ([]db.Column, boo
 	if t.catalog == "" {
 		t.catalog = a.completionCatalog()
 	}
+	ref := a.resolveTableRef(t)
+	if ref.Name == "" {
+		return nil, false
+	}
+	t.catalog, t.schema, t.name = ref.Catalog, ref.Schema, ref.Name
 	if cols, ok := a.columnCache.get(t); ok {
 		return cols, false
 	}
 	if a.conn == nil {
-		return nil, false
-	}
-	ref := a.resolveTableRef(t)
-	if ref.Name == "" {
 		return nil, false
 	}
 	// Tests construct *app without an asyncCh, and for them the async
@@ -1667,7 +1670,6 @@ func (a *app) fetchColumnsFor(t tableScope, refreshSig string) ([]db.Column, boo
 			err  error
 		)
 		release := a.connOps.acquire()
-		defer release()
 		// Route through ColumnsIn when the tab has a pinned catalog so
 		// the driver's session-scoped columns query (e.g. MSSQL's
 		// INFORMATION_SCHEMA.COLUMNS) runs against the right DB instead
@@ -1681,16 +1683,17 @@ func (a *app) fetchColumnsFor(t tableScope, refreshSig string) ([]db.Column, boo
 		} else {
 			cols, err = conn.Columns(ctx, ref)
 		}
-		a.asyncCh <- func(a *app) {
+		release()
+		callback := func(a *app) {
 			cache.clearInflight(t)
 			if a.conn != conn {
 				return
 			}
 			if err != nil {
 				cache.put(t, nil)
-				return
+			} else {
+				cache.put(t, cols)
 			}
-			cache.put(t, cols)
 			// Refresh the active editor's completion popup so the
 			// newly-arrived columns become visible without requiring
 			// another keystroke.
@@ -1702,6 +1705,11 @@ func (a *app) fetchColumnsFor(t tableScope, refreshSig string) ([]db.Column, boo
 				}
 			}
 		}
+		select {
+		case a.asyncCh <- callback:
+		case <-a.doneCh:
+			cache.clearInflight(t)
+		}
 	}()
 	return nil, true
 }
@@ -1709,24 +1717,30 @@ func (a *app) fetchColumnsFor(t tableScope, refreshSig string) ([]db.Column, boo
 // resolveTableRef attaches a schema to a bare tableScope using
 // the explorer's loaded schema info for the active catalog.
 func (a *app) resolveTableRef(t tableScope) db.TableRef {
-	tables := a.completionTablesFor(t.catalog)
-	if len(tables) == 0 {
-		return db.TableRef{Catalog: t.catalog, Schema: t.schema, Name: t.name}
-	}
-	if t.schema != "" {
-		for _, tr := range tables {
-			if strings.EqualFold(tr.Catalog, t.catalog) && strings.EqualFold(tr.Schema, t.schema) && strings.EqualFold(tr.Name, t.name) {
-				return tr
-			}
+	fallback := db.TableRef{Catalog: t.catalog, Schema: t.schema, Name: t.name}
+	var found *db.TableRef
+	for _, tr := range a.completionTablesFor(t.catalog) {
+		// The table list is already scoped to the requested/current catalog.
+		// Providers may omit Catalog in that scoped metadata.
+		if t.catalog != "" && tr.Catalog != "" && !strings.EqualFold(tr.Catalog, t.catalog) {
+			continue
 		}
-		return db.TableRef{Catalog: t.catalog, Schema: t.schema, Name: t.name}
-	}
-	for _, tr := range tables {
-		if strings.EqualFold(tr.Catalog, t.catalog) && strings.EqualFold(tr.Name, t.name) {
-			return tr
+		if !strings.EqualFold(tr.Name, t.name) || (t.schema != "" && !strings.EqualFold(tr.Schema, t.schema)) {
+			continue
 		}
+		copy := tr
+		if copy.Catalog == "" {
+			copy.Catalog = t.catalog
+		}
+		if found != nil && (!strings.EqualFold(found.Schema, copy.Schema) || !strings.EqualFold(found.Catalog, copy.Catalog)) {
+			return fallback
+		}
+		found = &copy
 	}
-	return db.TableRef{Catalog: t.catalog, Name: t.name}
+	if found != nil {
+		return *found
+	}
+	return fallback
 }
 
 func (ctx completionCtx) allScopeTables() []tableScope {

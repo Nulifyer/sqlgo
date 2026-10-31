@@ -2283,8 +2283,18 @@ func (m *mainLayer) queryRightInfo() string {
 	}
 	row, col := m.editor.buf.Cursor()
 	info := fmt.Sprintf("Ln %d, Col %d", row+1, col+1)
-	if m.editor.syntaxBusy {
+	if m.editor.automaticAnalysisLimited() {
+		info += " · large file: analysis limited"
+	} else if m.editor.syntaxLimited {
+		info += " · long-line highlighting limited"
+	} else if m.editor.syntaxBusy {
 		info += " · highlighting…"
+	}
+	if m.editor.occurrenceBusy {
+		info += " · selecting next occurrence…"
+	}
+	if m.editor.commandBusy {
+		info += " · editing selection…"
 	}
 	return info
 }

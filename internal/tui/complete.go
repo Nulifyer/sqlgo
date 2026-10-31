@@ -97,6 +97,13 @@ func (c *completionState) current() (completionItem, bool) {
 // filters by prefix, and shows the popup. No-op if the cursor is
 // in a string/comment or no candidates remain.
 func (e *editor) openCompletion(a *app) {
+	if e.automaticAnalysisLimited() || len(e.buf.Line(e.buf.row)) > maxSyntaxLineRunes {
+		e.complete = nil
+		if a != nil && len(a.layers) > 0 {
+			a.mainLayerPtr().status = "completion limited for this document size or line length"
+		}
+		return
+	}
 	row, col := e.buf.Cursor()
 	line := e.buf.Line(row)
 	word, startCol := wordBeforeCursor(line, col)
@@ -156,10 +163,12 @@ func (e *editor) showCompletion(a *app, ctx completionCtx, word string, startCol
 
 	var items []completionItem
 	var sig string
+	var awaiting bool
 	if a != nil {
 		result := a.gatherCompletionsCtx(ctx)
 		items = result.items
 		sig = result.signature
+		awaiting = result.awaitingColumns
 		if result.awaitingColumns && len(items) == 0 {
 			items = []completionItem{{
 				text:    "(loading columns)",
@@ -170,6 +179,9 @@ func (e *editor) showCompletion(a *app, ctx completionCtx, word string, startCol
 	}
 	if len(items) > 0 && !allCompletionItemsLoading(items) {
 		items = filterCompletions(items, word)
+	}
+	if len(items) == 0 && awaiting {
+		items = []completionItem{{text: "(loading columns)", kind: completeColumn, loading: true}}
 	}
 	if len(items) == 0 {
 		return

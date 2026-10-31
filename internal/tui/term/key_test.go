@@ -16,6 +16,10 @@ func TestFindNavigationFunctionKeyEncodings(t *testing.T) {
 		{"\x1b[1;2R", Key{Kind: KeyF3, Shift: true}},
 		{"\x1b[13;2~", Key{Kind: KeyF3, Shift: true}},
 		{"\x1bé", Key{Kind: KeyRune, Rune: 'é', Alt: true}},
+		{"\x15", Key{Kind: KeyRune, Rune: 'u', Ctrl: true}},
+		{"\x1bu", Key{Kind: KeyRune, Rune: 'u', Alt: true}},
+		{"\x1b/", Key{Kind: KeyRune, Rune: '/', Alt: true}},
+		{"\x1f", Key{Kind: KeyRune, Rune: '_', Ctrl: true}},
 	} {
 		got := readAll(t, tc.raw, 1)[0]
 		if got != tc.want {

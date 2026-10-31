@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"strconv"
 	"strings"
 
@@ -56,20 +57,30 @@ type editor struct {
 	searchMatchCase, searchWholeWord bool
 	searchRevision, searchGeneration uint64
 	searchBusy                       bool
+	searchCancel                     context.CancelFunc
+	searchLimited                    bool
 	matchRows                        map[int][]indexedMatch
 	pageHeight                       int
 	matches                          []matchRange
 	currentMatch                     int // -1 when empty
 
 	// extraCursors holds secondary cursor positions for column-
-	// add multi-cursor edits. Primary cursor lives on the
-	// buffer. v1 invariant: at most one cursor per row.
-	extraCursors   []cursorPos
-	syntax         []editorSyntaxLine
-	syntaxRevision uint64
-	syntaxBusy     bool
-	formatBusy     bool
-	replaceBusy    bool
+	// add and next-occurrence edits. Primary selection lives on the buffer.
+	extraCursors           []bufferCursor
+	syntax                 []editorSyntaxLine
+	syntaxRevision         uint64
+	syntaxBusy             bool
+	syntaxCancel           context.CancelFunc
+	syntaxLimited          bool
+	formatBusy             bool
+	replaceBusy            bool
+	cursorUndo, cursorRedo []editorNavigation
+	occurrenceBusy         bool
+	occurrenceQueued       int
+	occurrenceCancel       context.CancelFunc
+	commandBusy            bool
+	commandCancel          context.CancelFunc
+	commandContext         context.Context // only set on a worker-owned editor
 }
 
 // matchRange is one find/replace hit. row/col are rune indices;
@@ -81,7 +92,23 @@ type matchRange struct {
 }
 
 func newEditor() *editor {
-	return &editor{buf: newBuffer()}
+	e := &editor{buf: newBuffer()}
+	e.buf.onChange = func() {
+		if e.syntaxCancel != nil {
+			e.syntaxCancel()
+		}
+		if e.searchCancel != nil {
+			e.searchCancel()
+		}
+		if e.occurrenceCancel != nil {
+			e.occurrenceCancel()
+		}
+		if e.commandCancel != nil {
+			e.commandCancel()
+		}
+		e.cursorUndo, e.cursorRedo = nil, nil
+	}
+	return e
 }
 
 // replaceText is an undoable whole-document edit. Transient positions belong to
@@ -129,6 +156,22 @@ func (e *editor) hasErrorLocation() bool {
 // handleInsert applies one keypress. Returns true if consumed.
 // nil app is fine (tests); clipboard calls become no-ops.
 func (e *editor) handleInsert(a *app, k Key) bool {
+	if k.Kind == KeyRune && k.Rune == 'u' && (k.Ctrl || k.Alt) {
+		e.undoNavigation(k.Alt && !k.Ctrl)
+		return true
+	}
+	navBefore, navRevision := e.navigation(), e.buf.Revision()
+	defer func() {
+		if e.buf.Revision() == navRevision {
+			e.recordNavigation(navBefore)
+		}
+	}()
+	if k.Kind == KeyRune && ((k.Alt && k.Rune == '/') || (k.Ctrl && (k.Rune == '/' || k.Rune == '_'))) {
+		e.complete = nil
+		e.runSelectionCommand(a, func(ed *editor) { ed.toggleLineComments() })
+		return true
+	}
+
 	e.completionGeneration++
 	// Track buffer mutation cheaply while an error marker exists so the
 	// first edit can invalidate the marker without rebuilding the whole
@@ -182,8 +225,9 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 
 	// Esc collapses extras when popup is closed. Popup-open Esc
 	// is handled in the popup block below and takes precedence.
-	if e.complete == nil && k.Kind == KeyEsc && e.hasMultiCursor() {
+	if e.complete == nil && k.Kind == KeyEsc && (e.hasMultiCursor() || e.buf.HasSelection()) {
 		e.collapseCursors()
+		e.buf.ClearSelection()
 		return true
 	}
 
@@ -228,46 +272,41 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		e.complete = nil
 	}
 
-	// Shift+arrow: extend selection. Collapses multi-cursor
-	// first -- selection doesn't fan out in v1.
+	// Shift+arrow extends every selection.
 	if k.Shift {
-		switch k.Kind {
-		case KeyLeft, KeyRight, KeyUp, KeyDown, KeyHome, KeyEnd:
-			e.collapseCursors()
-		}
 		switch k.Kind {
 		case KeyLeft:
 			if k.Ctrl {
-				e.buf.SelectWordLeft()
+				e.applyToAllCursors(func() { e.buf.SelectWordLeft() })
 			} else {
-				e.buf.SelectLeft()
+				e.applyToAllCursors(func() { e.buf.SelectLeft() })
 			}
 			return true
 		case KeyRight:
 			if k.Ctrl {
-				e.buf.SelectWordRight()
+				e.applyToAllCursors(func() { e.buf.SelectWordRight() })
 			} else {
-				e.buf.SelectRight()
+				e.applyToAllCursors(func() { e.buf.SelectRight() })
 			}
 			return true
 		case KeyUp:
-			e.buf.SelectUp()
+			e.applyToAllCursors(func() { e.buf.SelectUp() })
 			return true
 		case KeyDown:
-			e.buf.SelectDown()
+			e.applyToAllCursors(func() { e.buf.SelectDown() })
 			return true
 		case KeyHome:
 			if k.Ctrl {
-				e.buf.SelectBufferStart()
+				e.applyToAllCursors(func() { e.buf.SelectBufferStart() })
 			} else {
-				e.buf.SelectHome()
+				e.applyToAllCursors(func() { e.buf.SelectHome() })
 			}
 			return true
 		case KeyEnd:
 			if k.Ctrl {
-				e.buf.SelectBufferEnd()
+				e.applyToAllCursors(func() { e.buf.SelectBufferEnd() })
 			} else {
-				e.buf.SelectEnd()
+				e.applyToAllCursors(func() { e.buf.SelectEnd() })
 			}
 			return true
 		}
@@ -283,12 +322,10 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 			e.applyToAllCursors(func() { e.buf.MoveWordRight() })
 			return true
 		case KeyBackspace:
-			e.collapseCursors() // word deletion may cross line boundary
-			e.buf.DeleteWordLeft()
+			e.applyToAllCursors(func() { e.buf.DeleteWordLeft() })
 			return true
 		case KeyDelete:
-			e.collapseCursors()
-			e.buf.DeleteWordRight()
+			e.applyToAllCursors(func() { e.buf.DeleteWordRight() })
 			return true
 		case KeyHome:
 			e.collapseCursors()
@@ -301,8 +338,7 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		}
 	}
 
-	// Ctrl+<letter> clipboard shortcuts. Multi-cursor collapses
-	// first; clipboard fan-out is out of scope for v1.
+	// Clipboard shortcuts act on the primary selection.
 	if k.Ctrl && k.Kind == KeyRune {
 		switch k.Rune {
 		case 'c':
@@ -342,41 +378,18 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 			// on Windows delivers ^Z as a raw byte, so Ctrl+Z is
 			// safe to use for undo.
 			if e.buf.Undo() {
-				e.extraCursors = append([]cursorPos(nil), e.buf.restoredExtras...)
+				e.extraCursors = append([]bufferCursor(nil), e.buf.restoredExtras...)
 				e.normalizeCursors()
 			}
 			return true
 		case 'y':
 			if e.buf.Redo() {
-				e.extraCursors = append([]cursorPos(nil), e.buf.restoredExtras...)
+				e.extraCursors = append([]bufferCursor(nil), e.buf.restoredExtras...)
 				e.normalizeCursors()
 			}
 			return true
 		case 'd':
-			// Ctrl+D: if no selection, select the word under the
-			// cursor. Matches VSCode's first press of "Add Selection
-			// To Next Find Match" (the multi-occurrence extension is
-			// out of scope for v1).
-			e.collapseCursors()
-			if e.buf.HasSelection() {
-				return true
-			}
-			row, col := e.buf.Cursor()
-			line := e.buf.Line(row)
-			start, end := wordBoundsAt(line, col)
-			if start == end {
-				return true
-			}
-			e.buf.SetCursor(row, start)
-			e.buf.SetAnchor(row, start)
-			e.buf.SetCursor(row, end)
-			return true
-		case 'u':
-			// Ctrl+U: clear selection, keeping the caret at its
-			// current position. Approximates VSCode's "shrink /
-			// undo cursor" without a cursor-op history.
-			e.collapseCursors()
-			e.buf.ClearSelection()
+			e.addNextOccurrence(a)
 			return true
 		}
 	}
@@ -389,6 +402,10 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 			return false
 		}
 		r := k.Rune
+		if close, ok := map[rune]rune{'(': ')', '[': ']', '{': '}', '\'': '\'', '"': '"', '`': '`'}[r]; ok && e.buf.HasSelection() {
+			e.runSelectionCommand(a, func(ed *editor) { ed.surroundSelection(r, close) })
+			return true
+		}
 		e.applyToAllCursors(func() { e.buf.Insert(r) })
 		// Auto-trigger completion when typing an identifier or '.'
 		// with a single cursor. Multi-cursor is skipped since accept
@@ -398,19 +415,19 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		}
 		return true
 	case KeyEnter:
-		// Newlines break the "at most one cursor per row"
-		// invariant. Collapse first.
-		e.collapseCursors()
-		row, col := e.buf.Cursor()
-		if e.buf.HasSelection() {
-			row, col, _, _ = e.buf.normalizedSelection()
-		}
-		line := e.buf.Line(row)
-		indent := 0
-		for indent < col && (line[indent] == ' ' || line[indent] == '\t') {
-			indent++
-		}
-		e.buf.InsertText("\n" + string(line[:indent]))
+		// Each cursor carries its own indentation into the new line.
+		e.applyToAllCursors(func() {
+			row, col := e.buf.Cursor()
+			if e.buf.HasSelection() {
+				row, col, _, _ = e.buf.normalizedSelection()
+			}
+			line := e.buf.Line(row)
+			indent := 0
+			for indent < col && (line[indent] == ' ' || line[indent] == '\t') {
+				indent++
+			}
+			e.buf.InsertText("\n" + string(line[:indent]))
+		})
 		return true
 	case KeyPgUp, KeyPgDn:
 		e.collapseCursors()
@@ -421,13 +438,13 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		for i := 0; i < page; i++ {
 			if k.Kind == KeyPgUp {
 				if k.Shift {
-					e.buf.SelectUp()
+					e.applyToAllCursors(func() { e.buf.SelectUp() })
 				} else {
 					e.buf.MoveUp()
 				}
 			} else {
 				if k.Shift {
-					e.buf.SelectDown()
+					e.applyToAllCursors(func() { e.buf.SelectDown() })
 				} else {
 					e.buf.MoveDown()
 				}
@@ -447,30 +464,10 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		}
 		return true
 	case KeyBackspace:
-		if e.hasMultiCursor() {
-			// Skip cursors at col 0 -- joining lines would
-			// break the invariant.
-			e.applyToAllCursors(func() {
-				_, col := e.buf.Cursor()
-				if col > 0 {
-					e.buf.Backspace()
-				}
-			})
-		} else {
-			e.buf.Backspace()
-		}
+		e.applyToAllCursors(func() { e.buf.Backspace() })
 		return true
 	case KeyDelete:
-		if e.hasMultiCursor() {
-			e.applyToAllCursors(func() {
-				row, col := e.buf.Cursor()
-				if col < len(e.buf.Line(row)) {
-					e.buf.Delete()
-				}
-			})
-		} else {
-			e.buf.Delete()
-		}
+		e.applyToAllCursors(func() { e.buf.Delete() })
 		return true
 	case KeyLeft:
 		e.applyToAllCursors(func() { e.buf.MoveLeft() })
@@ -479,20 +476,13 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		e.applyToAllCursors(func() { e.buf.MoveRight() })
 		return true
 	case KeyUp:
-		// Vertical moves break the row-uniqueness invariant.
-		// Collapse first.
-		e.collapseCursors()
-		e.buf.MoveUp()
+		e.applyToAllCursors(func() { e.buf.MoveUp() })
 		return true
 	case KeyDown:
-		e.collapseCursors()
-		e.buf.MoveDown()
+		e.applyToAllCursors(func() { e.buf.MoveDown() })
 		return true
 	case KeyHome:
-		// Smart Home: single-cursor toggles between the first
-		// non-whitespace column and column 0. Multi-cursor falls
-		// back to plain MoveHome (col 0) so the row-uniqueness
-		// invariant isn't tripped by fan-out logic.
+		// Smart Home toggles indent/column zero for the primary cursor.
 		if e.hasMultiCursor() {
 			e.applyToAllCursors(func() { e.buf.MoveHome() })
 			return true
@@ -529,7 +519,7 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 					end = r2 - 1
 				}
 				if end >= r1 {
-					e.buf.IndentRange(r1, end, softTabWidth)
+					e.runSelectionCommand(a, func(ed *editor) { ed.indentSelectedLines(false) })
 					return true
 				}
 			}
@@ -541,21 +531,7 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		})
 		return true
 	case KeyBackTab:
-		// Dedent: remove up to softTabWidth leading spaces from each
-		// line in the selection, or from the current line if there's
-		// no selection.
-		if e.buf.HasSelection() {
-			r1, _, r2, c2 := e.buf.normalizedSelection()
-			end := r2
-			if r1 != r2 && c2 == 0 {
-				end = r2 - 1
-			}
-			if end >= r1 {
-				e.buf.DedentRange(r1, end, softTabWidth)
-			}
-		} else {
-			e.applyToAllCursors(func() { row, _ := e.buf.Cursor(); e.buf.DedentRange(row, row, softTabWidth) })
-		}
+		e.runSelectionCommand(a, func(ed *editor) { ed.indentSelectedLines(true) })
 		return true
 	}
 	return false
@@ -620,11 +596,6 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 	}
 
 	selStyle := Style{FG: ansiDefault, BG: ansiDefaultBG, Attrs: attrReverse}
-	hasSel := e.buf.HasSelection()
-	var selR1, selC1, selR2, selC2 int
-	if hasSel {
-		selR1, selC1, selR2, selC2 = e.buf.normalizedSelection()
-	}
 
 	// Find highlights. Selection wins over matches.
 	matchBg := Style{FG: ansiDefault, BG: ansiBrightBlack}
@@ -678,7 +649,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 					}
 				}
 			}
-			if hasSel && inSelection(lineIdx, vcStart, selR1, selC1, selR2, selC2) {
+			if e.selectedAt(lineIdx, vcStart) {
 				st = selStyle
 			}
 			if markedLine && vcStart >= errStartCol && vcStart < errEndCol {
@@ -700,7 +671,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 		// Extend the selection highlight across trailing empty space
 		// on wrapped or short lines so a multi-line block selection
 		// looks continuous.
-		if hasSel && lineIdx >= selR1 && lineIdx < selR2 {
+		if e.selectedAt(lineIdx, len(line)) {
 			if colOut < 0 {
 				colOut = 0
 			}
@@ -713,7 +684,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 		if markedLine && errBlankCol >= 0 {
 			if blankOut := layout.column(errBlankCol) - layout.column(e.scrollCol); errBlankCol >= e.scrollCol && blankOut < bodyW {
 				st := defaultStyle()
-				if hasSel && inSelection(lineIdx, errBlankCol, selR1, selC1, selR2, selC2) {
+				if e.selectedAt(lineIdx, errBlankCol) {
 					st = selStyle
 				}
 				st = applyEditorErrorFallbackStyle(st)
@@ -1100,6 +1071,8 @@ func (e *editor) caretFromScreen(r rect, screenRow, screenCol int) (int, int, bo
 // existing selection to a point, 2 selects the word under the caret,
 // 3 selects the whole line.
 func (e *editor) clickAt(r rect, screenRow, screenCol, count int) {
+	before := e.navigation()
+	defer func() { e.recordNavigation(before) }()
 	row, col, ok := e.caretFromScreen(r, screenRow, screenCol)
 	if !ok {
 		return
@@ -1141,6 +1114,8 @@ func (e *editor) clickAt(r rect, screenRow, screenCol, count int) {
 // screenCol). Requires that clickAt (or another anchor-setting path)
 // has already run, so the anchor marks the drag origin.
 func (e *editor) dragTo(r rect, screenRow, screenCol int) {
+	before := e.navigation()
+	defer func() { e.recordNavigation(before) }()
 	row, col, ok := e.caretFromScreen(r, screenRow, screenCol)
 	if !ok {
 		return

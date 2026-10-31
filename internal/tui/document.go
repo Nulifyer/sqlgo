@@ -21,6 +21,7 @@ type loadedDocument struct {
 	Format      documentFormat
 	Fingerprint documentFingerprint
 	DiskKnown   bool
+	StateID     uint64
 	lines       [][]rune
 }
 
@@ -83,7 +84,7 @@ func (d documentService) ApplyLoaded(sess *session, doc loadedDocument) error {
 	sess.format = doc.Format
 	sess.diskFingerprint, sess.diskKnown = doc.Fingerprint, doc.DiskKnown
 	sess.sourcePath = doc.Path
-	sess.savedText = normalizeEditorLineEndings(doc.Text)
+	sess.setSavedIdentity(normalizeEditorLineEndings(doc.Text), sess.editor.buf.stateID)
 	sess.title = filepath.Base(doc.Path)
 	return nil
 }
@@ -95,6 +96,7 @@ type documentSnapshot struct {
 	Format        documentFormat
 	Expected      documentFingerprint
 	CheckExpected bool
+	StateID       uint64
 }
 type documentFingerprint struct {
 	Exists bool
@@ -121,7 +123,8 @@ func (d documentService) Snapshot(sess *session, path string) (documentSnapshot,
 	if path == "" {
 		return documentSnapshot{}, fmt.Errorf("path is required")
 	}
-	return documentSnapshot{Path: path, Text: sess.editor.buf.Text(), Format: sess.format,
+	sess.editor.buf.breakUndoGroup()
+	return documentSnapshot{StateID: sess.editor.buf.stateID, Path: path, Text: sess.editor.buf.Text(), Format: sess.format,
 		Expected: sess.diskFingerprint, CheckExpected: sess.diskKnown && path == sess.sourcePath}, nil
 }
 func (documentService) Write(snapshot documentSnapshot) (loadedDocument, error) {
@@ -155,11 +158,11 @@ func (documentService) Write(snapshot documentSnapshot) (loadedDocument, error) 
 		return loadedDocument{}, err
 	}
 	return loadedDocument{Path: snapshot.Path, Text: snapshot.Text, Size: len(data), Format: snapshot.Format,
-		Fingerprint: documentFingerprint{Exists: true, Hash: sha256.Sum256(data)}, DiskKnown: true}, nil
+		Fingerprint: documentFingerprint{Exists: true, Hash: sha256.Sum256(data)}, DiskKnown: true, StateID: snapshot.StateID}, nil
 }
 func (documentService) ApplySaved(sess *session, doc loadedDocument) {
 	sess.sourcePath = doc.Path
-	sess.savedText = doc.Text
+	sess.setSavedIdentity(doc.Text, doc.StateID)
 	sess.format = doc.Format
 	sess.diskFingerprint, sess.diskKnown = doc.Fingerprint, doc.DiskKnown
 	sess.title = filepath.Base(doc.Path)

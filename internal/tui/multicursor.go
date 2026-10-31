@@ -2,118 +2,152 @@ package tui
 
 import "sort"
 
-// cursorPos is one (row, col) pair used by the multi-cursor
-// apply loop. Kept private to the tui package.
-type cursorPos struct {
-	row, col int
-}
+type cursorPos struct{ row, col int }
 
-// hasMultiCursor reports whether there are any extra cursors
-// beyond the primary. Short-circuits non-multi paths.
+const maxEditorSelections = 256
+
 func (e *editor) hasMultiCursor() bool { return len(e.extraCursors) > 0 }
-
-// addCursorRelative adds a new cursor delta rows from the
-// primary at the primary's current column. Clamped to valid
-// range; duplicates with existing cursors are dropped.
+func (e *editor) collapseCursors()     { e.extraCursors = nil }
 func (e *editor) addCursorRelative(delta int) {
 	row, col := e.buf.Cursor()
 	target := row + delta
-	if target < 0 || target >= e.buf.LineCount() {
+	if target < 0 || target >= e.buf.LineCount() || len(e.extraCursors) >= maxEditorSelections-1 {
 		return
 	}
-	// Column-add follows the visible caret column, including tabs and wide glyphs.
 	tc := e.buf.lineLayout(target).runeColumn(e.buf.lineLayout(row).column(col))
-	// Skip duplicates (primary or existing extra at same pos).
-	if target == row && tc == col {
+	e.extraCursors = append(e.extraCursors, bufferCursor{row: target, col: tc})
+	e.normalizeCursors()
+}
+func cursorRange(s bufferCursor) (cursorPos, cursorPos) {
+	end := cursorPos{s.row, s.col}
+	if !s.anchorSet {
+		return end, end
+	}
+	start := cursorPos{s.anchorRow, s.anchorCol}
+	if lessPosition(end, start) {
+		return end, start
+	}
+	return start, end
+}
+func lessPosition(a, b cursorPos) bool { return a.row < b.row || a.row == b.row && a.col < b.col }
+func transformPosition(p cursorPos, c bufferChange) cursorPos {
+	if lessPosition(p, c.start) {
+		return p
+	}
+	if lessPosition(p, c.oldEnd) {
+		return c.newEnd
+	}
+	if p.row == c.oldEnd.row {
+		p.col += c.newEnd.col - c.oldEnd.col
+	}
+	p.row += c.newEnd.row - c.oldEnd.row
+	return p
+}
+func transformCursor(s bufferCursor, c bufferChange) bufferCursor {
+	p := transformPosition(cursorPos{s.row, s.col}, c)
+	s.row, s.col = p.row, p.col
+	if s.anchorSet {
+		p = transformPosition(cursorPos{s.anchorRow, s.anchorCol}, c)
+		s.anchorRow, s.anchorCol = p.row, p.col
+	}
+	return s
+}
+func (e *editor) selections() []bufferCursor {
+	return append([]bufferCursor{e.buf.cursorState()}, e.extraCursors...)
+}
+func (e *editor) setSelections(selections []bufferCursor) {
+	if len(selections) == 0 {
 		return
 	}
-	for _, c := range e.extraCursors {
-		if c.row == target {
-			return // v1: at most one cursor per row
-		}
-	}
-	e.extraCursors = append(e.extraCursors, cursorPos{row: target, col: tc})
+	e.buf.restoreCursor(selections[0])
+	e.extraCursors = append(e.extraCursors[:0], selections[1:]...)
+	e.normalizeCursors()
 }
 
-// collapseCursors drops all extra cursors, leaving the primary.
-func (e *editor) collapseCursors() {
-	e.extraCursors = nil
-}
-
-// applyToAllCursors runs fn at each cursor position (primary +
-// extras), walking highest-row-first so lower-row positions
-// stay valid. fn operates on the primary cursor at its current
-// position; this helper moves the primary between positions and
-// captures the resulting location.
-//
-// Precondition: v1 requires all cursors on DIFFERENT rows. The
-// constraint is enforced on addCursorRelative.
+// Apply independent selections from the end. Transform completed selections
+// through every earlier edit so multiple ranges on one row stay valid.
 func (e *editor) applyToAllCursors(fn func()) {
 	if !e.hasMultiCursor() {
 		fn()
 		return
 	}
-	e.buf.beginEdit(editNone)
-	e.buf.pending.beforeExtras = append([]cursorPos(nil), e.extraCursors...)
-	defer func() {
-		e.buf.pending.afterExtras = append([]cursorPos(nil), e.extraCursors...)
-		e.buf.endEdit()
-	}()
-
-	// Gather all positions.
-	row, col := e.buf.Cursor()
-	positions := make([]cursorPos, 0, len(e.extraCursors)+1)
-	positions = append(positions, cursorPos{row: row, col: col})
-	positions = append(positions, e.extraCursors...)
-
-	// Sort highest-row-first so mutations below don't shift
-	// rows that haven't run yet. Ties broken by col descending.
-	sort.Slice(positions, func(i, j int) bool {
-		if positions[i].row != positions[j].row {
-			return positions[i].row > positions[j].row
-		}
-		return positions[i].col > positions[j].col
-	})
-
-	// Run fn at each; capture new positions.
-	newPositions := make([]cursorPos, 0, len(positions))
-	for _, p := range positions {
-		e.buf.SetCursor(p.row, p.col)
-		fn()
-		nr, nc := e.buf.Cursor()
-		newPositions = append(newPositions, cursorPos{row: nr, col: nc})
-	}
-
-	// Sort ascending again, take lowest as primary.
-	sort.Slice(newPositions, func(i, j int) bool {
-		if newPositions[i].row != newPositions[j].row {
-			return newPositions[i].row < newPositions[j].row
-		}
-		return newPositions[i].col < newPositions[j].col
-	})
-	e.buf.SetCursor(newPositions[0].row, newPositions[0].col)
-	e.extraCursors = e.extraCursors[:0]
-	for _, p := range newPositions[1:] {
-		e.extraCursors = append(e.extraCursors, p)
-	}
 	e.normalizeCursors()
+	original := e.selections()
+	order := make([]int, len(original))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool {
+		a, _ := cursorRange(original[order[i]])
+		b, _ := cursorRange(original[order[j]])
+		return lessPosition(b, a)
+	})
+	e.buf.beginEdit(editNone)
+	e.buf.pending.beforeExtras = append([]bufferCursor(nil), e.extraCursors...)
+	results := make([]bufferCursor, len(original))
+	done := []int{}
+	for _, index := range order {
+		e.buf.restoreCursor(original[index])
+		before := len(e.buf.pending.changes)
+		fn()
+		for _, change := range e.buf.pending.changes[before:] {
+			for _, other := range done {
+				results[other] = transformCursor(results[other], change)
+			}
+		}
+		results[index] = e.buf.cursorState()
+		done = append(done, index)
+	}
+	e.setSelections(results)
+	e.buf.pending.afterExtras = append([]bufferCursor(nil), e.extraCursors...)
+	e.buf.endEdit()
 }
-
-// normalizeCursors enforces the current one-cursor-per-row contract after
-// movement, which can cross line boundaries even without changing the text.
 func (e *editor) normalizeCursors() {
-	row, _ := e.buf.Cursor()
-	seen := map[int]bool{row: true}
+	primary := e.buf.cursorState()
+	accepted := []bufferCursor{primary}
 	valid := e.extraCursors[:0]
-	for _, p := range e.extraCursors {
-		if p.row < 0 || p.row >= e.buf.LineCount() || seen[p.row] {
+	for _, s := range e.extraCursors {
+		if s.row < 0 || s.row >= e.buf.LineCount() {
 			continue
 		}
-		p.col = max(0, min(p.col, len(e.buf.Line(p.row))))
-		layout := e.buf.lineLayout(p.row)
-		p.col = layout.runeColumn(layout.column(p.col))
-		seen[p.row] = true
-		valid = append(valid, p)
+		s.col = max(0, min(s.col, len(e.buf.Line(s.row))))
+		l := e.buf.lineLayout(s.row)
+		s.col = l.runeColumn(l.column(s.col))
+		if s.anchorSet {
+			s.anchorRow = max(0, min(s.anchorRow, e.buf.LineCount()-1))
+			s.anchorCol = max(0, min(s.anchorCol, len(e.buf.Line(s.anchorRow))))
+			l = e.buf.lineLayout(s.anchorRow)
+			s.anchorCol = l.runeColumn(l.column(s.anchorCol))
+		}
+		a, z := cursorRange(s)
+		overlap := false
+		for _, other := range accepted {
+			b, y := cursorRange(other)
+			if a == b || z == y || lessPosition(a, y) && lessPosition(b, z) {
+				overlap = true
+				break
+			}
+		}
+		if overlap {
+			continue
+		}
+		accepted = append(accepted, s)
+		valid = append(valid, s)
 	}
 	e.extraCursors = valid
+}
+func (e *editor) selectedAt(row, col int) bool {
+	if e.buf.HasSelection() {
+		r1, c1, r2, c2 := e.buf.normalizedSelection()
+		if inSelection(row, col, r1, c1, r2, c2) {
+			return true
+		}
+	}
+	for _, s := range e.extraCursors {
+		a, z := cursorRange(s)
+		if a != z && inSelection(row, col, a.row, a.col, z.row, z.col) {
+			return true
+		}
+	}
+	return false
 }

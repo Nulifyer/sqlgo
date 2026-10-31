@@ -107,19 +107,16 @@ type session struct {
 	// sourcePath is the absolute filesystem path backing this tab when
 	// it was loaded from or saved to disk. Empty for scratch/query tabs
 	// that have never been written. savedText is the buffer contents at
-	// the last load/save; IsDirty compares it against editor.buf.Text().
+	// the last load/save; savedStateID identifies that undo history version.
 	sourcePath      string
 	savedText       string
+	savedStateID    uint64
 	format          documentFormat
 	diskFingerprint documentFingerprint
 	diskKnown       bool
 	docGen          uint64
 	saveGen         uint64
 	saveBusy        bool
-	dirtyRevision   uint64
-	dirtyBaseline   string
-	dirtyCached     bool
-	dirtyValue      bool
 
 	// activeCatalog is the SSMS-style per-tab current database for
 	// cross-DB drivers (MSSQL, MySQL, Sybase). Empty means "use the
@@ -131,20 +128,13 @@ type session struct {
 }
 
 // IsDirty reports whether the editor buffer has unsaved changes relative
-// to the last load or save. A scratch tab (no sourcePath) is dirty only
-// once the user has typed something; that way an empty fresh "Query 1"
-// doesn't render the unsaved marker.
+// to the last load or save. Undo restores version identities; revision numbers
+// remain monotonic for background-result fences.
 func (s *session) IsDirty() bool {
 	if s == nil || s.editor == nil {
 		return false
 	}
-	rev := s.editor.buf.Revision()
-	if s.dirtyCached && s.dirtyRevision == rev && s.dirtyBaseline == s.savedText {
-		return s.dirtyValue
-	}
-	s.dirtyValue = s.editor.buf.Text() != s.savedText
-	s.dirtyCached, s.dirtyRevision, s.dirtyBaseline = true, rev, s.savedText
-	return s.dirtyValue
+	return s.editor.buf.stateID != s.savedStateID
 }
 
 func newSession() *session {
@@ -198,4 +188,8 @@ func resultTabTitle(t *resultTab) string {
 // naming stable across drivers.
 func nextResultTitle(n int) string {
 	return fmt.Sprintf("Result %d", n)
+}
+
+func (s *session) setSavedIdentity(text string, id uint64) {
+	s.savedText, s.savedStateID = text, id
 }

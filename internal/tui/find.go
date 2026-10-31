@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"sort"
 	"unicode"
 )
@@ -13,6 +14,9 @@ type indexedMatch struct {
 // SetSearch installs a new needle, recomputes matches, snaps
 // currentMatch to the first hit at/after the cursor. Empty clears.
 func (e *editor) SetSearch(needle string) {
+	if e.searchCancel != nil {
+		e.searchCancel()
+	}
 	if needle == "" {
 		e.ClearSearch()
 		return
@@ -46,6 +50,10 @@ func (e *editor) RefreshMatches() {
 
 func (e *editor) ClearSearch() {
 	e.searchGeneration++
+	if e.searchCancel != nil {
+		e.searchCancel()
+	}
+	e.searchLimited = false
 	e.matchRows = nil
 	e.searchNeedle = ""
 	e.matches = nil
@@ -110,7 +118,7 @@ func (e *editor) ReplaceCurrent(replacement string) bool {
 // ReplaceAll walks matches in reverse so earlier positions stay
 // valid under shortening replacements.
 func (e *editor) ReplaceAll(replacement string) int {
-	if e.searchRevision != e.buf.Revision() {
+	if e.searchRevision != e.buf.Revision() || e.searchLimited {
 		return 0
 	}
 	if len(e.matches) == 0 {
@@ -144,9 +152,12 @@ func (e *editor) jumpToCurrentMatch() {
 	if e.currentMatch < 0 || e.currentMatch >= len(e.matches) {
 		return
 	}
+	before := e.navigation()
+	e.collapseCursors()
 	m := e.matches[e.currentMatch]
 	e.buf.ClearSelection()
 	e.buf.SetCursor(m.row, m.col)
+	e.recordNavigation(before)
 }
 
 // indexMatches groups sorted matches by row for bounded rendering lookups.
@@ -167,50 +178,76 @@ func (e *editor) matchStyleAt(row, col int) (bool, bool) {
 
 // computeMatches returns non-overlapping case-insensitive matches
 // per line. Matches don't cross newlines.
+const maxEditorSearchMatches = 20000
+
 func (e *editor) computeMatches(needle string) []matchRange {
-	return findEditorMatches(e.buf.lines, needle, e.searchMatchCase, e.searchWholeWord)
+	matches, limited := scanEditorMatches(context.Background(), e.buf.lines, needle, e.searchMatchCase, e.searchWholeWord)
+	e.searchLimited = limited
+	return matches
 }
-func findEditorMatches(lines [][]rune, needle string, matchCase, wholeWord bool) []matchRange {
+
+// KMP keeps searches linear even for repeated prefixes on very long lines.
+// Fold runes as they are visited rather than allocating a second document.
+func scanEditorMatches(ctx context.Context, lines [][]rune, needle string, matchCase, wholeWord bool) ([]matchRange, bool) {
 	if needle == "" {
-		return nil
+		return nil, false
 	}
-	needleRunes := []rune(needle)
-	for i, r := range needleRunes {
-		if !matchCase {
-			needleRunes[i] = toLowerRune(r)
+	fold := func(r rune) rune {
+		if matchCase {
+			return r
 		}
+		return toLowerRune(r)
+	}
+	pattern := []rune(needle)
+	prefix := make([]int, len(pattern))
+	for i := range pattern {
+		pattern[i] = fold(pattern[i])
+	}
+	for i, j := 1, 0; i < len(pattern); i++ {
+		if i%4096 == 0 && ctx.Err() != nil {
+			return nil, false
+		}
+		for j > 0 && pattern[i] != pattern[j] {
+			j = prefix[j-1]
+		}
+		if pattern[i] == pattern[j] {
+			j++
+		}
+		prefix[i] = j
 	}
 	var out []matchRange
 	for row, line := range lines {
-		lowered := make([]rune, len(line))
-		for i, r := range line {
-			lowered[i] = r
-			if !matchCase {
-				lowered[i] = toLowerRune(r)
-			}
+		if ctx.Err() != nil {
+			return nil, false
 		}
-		for col := 0; col+len(needleRunes) <= len(lowered); col++ {
-			match := true
-			for j, r := range needleRunes {
-				if lowered[col+j] != r {
-					match = false
-					break
-				}
+		j := 0
+		for i, r := range line {
+			if i%4096 == 0 && ctx.Err() != nil {
+				return nil, false
 			}
-			if match && wholeWord {
-				match = (col == 0 || !isWordChar(line[col-1])) && (col+len(needleRunes) == len(line) || !isWordChar(line[col+len(needleRunes)]))
+			r = fold(r)
+			for j > 0 && r != pattern[j] {
+				j = prefix[j-1]
 			}
-			if match {
-				out = append(out, matchRange{
-					row:    row,
-					col:    col,
-					length: len(needleRunes),
-				})
-				col += len(needleRunes) - 1
+			if r == pattern[j] {
+				j++
 			}
+			if j != len(pattern) {
+				continue
+			}
+			col := i + 1 - j
+			if wholeWord && ((col > 0 && isWordChar(line[col-1])) || (i+1 < len(line) && isWordChar(line[i+1]))) {
+				j = prefix[j-1]
+				continue
+			}
+			if len(out) == maxEditorSearchMatches {
+				return out, true
+			}
+			out = append(out, matchRange{row: row, col: col, length: j})
+			j = 0 // accepted matches do not overlap
 		}
 	}
-	return out
+	return out, false
 }
 
 // firstMatchAtOrAfterCursor returns the index of the first match

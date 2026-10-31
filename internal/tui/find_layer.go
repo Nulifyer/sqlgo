@@ -112,6 +112,9 @@ func (fl *findLayer) defaultStatus(ed *editor) string {
 	if ed.MatchCount() == 0 {
 		return "no matches"
 	}
+	if ed.searchLimited {
+		return "first " + itoa(ed.MatchCount()) + " matches; narrow search to replace all"
+	}
 	return "match " + itoa(ed.CurrentMatchIndex()) + " of " + itoa(ed.MatchCount())
 }
 
@@ -172,6 +175,10 @@ func (fl *findLayer) HandleKey(a *app, k Key) {
 	if k.Ctrl && k.Kind == KeyRune && (k.Rune == 'r' || k.Rune == 'R') {
 		if ed.searchBusy {
 			fl.status = "searching…"
+			return
+		}
+		if ed.searchLimited {
+			fl.status = "too many matches; narrow the search before replacing all"
 			return
 		}
 		if ed.largeAnalysis() && a.asyncCh != nil {

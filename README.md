@@ -192,9 +192,11 @@ Open the command menu with `Ctrl+K` for global actions (connect, disconnect, his
 | | `Ctrl+Alt+↑ / ↓` | Add multi-cursor line |
 | | `Alt+↑ / ↓` | Move line up / down |
 | | `Shift+Alt+↑ / ↓` | Duplicate line up / down |
-| | `Esc` | Collapse multi-cursor |
-| | `Ctrl+D` | Select word under cursor |
-| | `Ctrl+U` | Clear selection |
+| | `Esc` | Collapse extra cursors and clear selection |
+| | `Ctrl+D` | Select word; repeat to add the next occurrence |
+| | `Ctrl+U` / `Alt+U` | Undo / redo cursor and selection movement |
+| | `Alt+/` / `Ctrl+/` | Toggle SQL line comments (`Ctrl+_` also works) |
+| | `(` / `[` / `{` / quotes | Surround selected text |
 | | `Home` | Smart home (toggle indent / col 0) |
 | | `↑` / `↓` / `←` / `→` / `End` | Move caret |
 | | `PgUp` / `PgDn` | Move one editor page; add Shift to select |
@@ -310,12 +312,26 @@ an error. Saves use a synced temporary file and reject changes made on disk sinc
 the file was loaded or last saved; use Save As to choose a different destination.
 
 Opening, saving, recovery writes, formatting, and large-document analysis run in
-the background. Navigation and editing remain available; stale results cannot
+the background. Comment, indent, and selection-wrapping commands also run in the
+background for large documents. Navigation and editing remain available; stale results cannot
 replace newer edits. Above 1,000 lines or 128 KiB, syntax and search analysis run
 asynchronously, so highlighting may briefly appear after the text. Completion
-analysis also runs asynchronously above 128 KiB. Undo stores changed ranges with
+analysis also runs asynchronously above 128 KiB. Syntax analysis reuses unchanged
+line states and cancels obsolete work. Dirty checks use saved history identities,
+so undoing to a saved version clears the unsaved marker without comparing the
+whole document. Undo stores changed ranges with
 a 16 MiB budget and 256-command limit, retaining the newest command even if it
 alone exceeds the budget.
+
+To bound automatic analysis, syntax highlighting and completion stop above 8 MiB
+or 100,000 lines. A line above 32,768 runes and its suffix display without syntax
+highlighting, because its ending lexical state is unknown. Completion is also
+limited on such a line. The editor reports these limits in text and preserves all
+contents. Long Unicode lines build a sparse layout index as you navigate them.
+Search stores at most 20,000 matches; narrow a capped search before using Replace
+All. Cursor undo retains 50 navigation states and resets after a text edit.
+Ctrl+D supports up to 256 selections of single-line text; edits across selections
+share one undo step. Copy, cut, paste, and completion use the primary selection.
 
 Dirty tabs are snapshotted every two seconds under sqlgo's data directory in
 `recovery/`. Snapshots include SQL text and are private to your OS account on

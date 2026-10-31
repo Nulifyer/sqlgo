@@ -5,12 +5,51 @@ import (
 	stdsql "database/sql"
 	"net/url"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 )
+
+func TestColumnsResolvesBareAndQualifiedNamesOnServer(t *testing.T) {
+	for _, schema := range []string{"", "dbo", "sales]region"} {
+		t.Run(schema, func(t *testing.T) {
+			sqlDB, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			mock.ExpectPing()
+			// Assert the server owns name resolution as well as the bound arguments.
+			if !strings.Contains(columnsQuery, "OBJECT_ID(CASE WHEN @p1 = '' THEN QUOTENAME(@p2)") {
+				t.Fatal("column lookup must resolve bare identifiers on SQL Server")
+			}
+			mock.ExpectQuery(regexp.QuoteMeta(columnsQuery)).WithArgs(schema, "my.table]").
+				WillReturnRows(sqlmock.NewRows([]string{"name", "type"}).AddRow("_id", "int"))
+			mock.ExpectClose()
+			conn, err := db.OpenWith(context.Background(), Profile, db.Transport{
+				Name: "mssql", Open: func(context.Context, db.Config) (*stdsql.DB, func() error, error) { return sqlDB, nil, nil },
+			}, db.Config{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cols, err := conn.Columns(context.Background(), db.TableRef{Schema: schema, Name: "my.table]"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cols) != 1 || cols[0].Name != "_id" || cols[0].TypeName != "int" {
+				t.Fatalf("columns = %+v", cols)
+			}
+			if err := conn.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
 
 func TestExplainInRestoresOriginalDatabase(t *testing.T) {
 	sqlDB, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))

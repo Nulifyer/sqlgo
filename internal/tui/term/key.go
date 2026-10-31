@@ -114,6 +114,10 @@ func (kr *KeyReader) Read() (InputMsg, error) {
 		// 0x00 is historically both Ctrl+@ and Ctrl+Space. Decode
 		// as Ctrl+Space -- far more useful as an editor shortcut.
 		return Key{Kind: KeyRune, Rune: ' ', Ctrl: true}, nil
+	case b >= 0x1c && b <= 0x1f:
+		// ASCII control punctuation: Ctrl+\, ], ^ and _. Many terminals
+		// emit the last of these for Ctrl+/ as well.
+		return Key{Kind: KeyRune, Rune: rune(b + 0x40), Ctrl: true}, nil
 	case b < 0x20:
 		// Ctrl+<letter>: 0x01..0x1a maps to a..z
 		return Key{Kind: KeyRune, Rune: rune(b - 1 + 'a'), Ctrl: true}, nil

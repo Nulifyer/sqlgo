@@ -37,7 +37,11 @@ func (l *recoveryLayer) HandleKey(a *app, k Key) {
 				continue
 			}
 			s.title = draft.Title
-			s.savedText = draft.Baseline
+			// Recovered history has no version corresponding to the disk baseline.
+			s.setSavedIdentity(draft.Baseline, ^uint64(0))
+			if draft.Text == draft.Baseline {
+				s.savedStateID = s.editor.buf.stateID
+			}
 			s.activeCatalog = draft.Catalog
 			m.sessions = append(m.sessions, s)
 			last = len(m.sessions) - 1

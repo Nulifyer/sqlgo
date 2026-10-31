@@ -7,6 +7,8 @@ const maxUndoBytes = 16 << 20
 type bufferCursor struct {
 	row, col, anchorRow, anchorCol int
 	anchorSet                      bool
+	goalVisual                     int
+	goalValid                      bool
 }
 type bufferChange struct {
 	start, oldEnd, newEnd cursorPos
@@ -15,12 +17,13 @@ type bufferChange struct {
 type bufferEdit struct {
 	changes                   []bufferChange
 	before, after             bufferCursor
-	beforeExtras, afterExtras []cursorPos
+	beforeExtras, afterExtras []bufferCursor
 	bytes                     int
+	beforeID, afterID         uint64
 }
 
 func (b *buffer) cursorState() bufferCursor {
-	return bufferCursor{b.row, b.col, b.anchorRow, b.anchorCol, b.anchorSet}
+	return bufferCursor{b.row, b.col, b.anchorRow, b.anchorCol, b.anchorSet, b.goalVisual, b.goalValid}
 }
 func (b *buffer) restoreCursor(s bufferCursor) {
 	b.row = max(0, min(s.row, len(b.lines)-1))
@@ -28,6 +31,7 @@ func (b *buffer) restoreCursor(s bufferCursor) {
 	b.anchorRow = max(0, min(s.anchorRow, len(b.lines)-1))
 	b.anchorCol = max(0, min(s.anchorCol, len(b.lines[b.anchorRow])))
 	b.anchorSet = s.anchorSet
+	b.goalVisual, b.goalValid = s.goalVisual, s.goalValid
 }
 func (b *buffer) endPosition() cursorPos {
 	row := len(b.lines) - 1
@@ -72,7 +76,7 @@ func advanceText(start cursorPos, text string) cursorPos {
 func (b *buffer) Transaction(fn func()) { b.beginEdit(editNone); defer b.endEdit(); fn() }
 func (b *buffer) beginEdit(kind editKind) {
 	if b.editDepth == 0 {
-		b.pending = &bufferEdit{before: b.cursorState()}
+		b.pending = &bufferEdit{before: b.cursorState(), beforeID: b.stateID}
 		b.pendingKind = kind
 		b.pendingCoalesce = kind != editNone && kind == b.lastEditKind && b.row == b.lastEditRow && b.col == b.lastEditCol && !b.HasSelection()
 	}
@@ -89,6 +93,7 @@ func (b *buffer) endEdit() {
 		return
 	}
 	edit.after = b.cursorState()
+	edit.afterID = b.stateID
 	b.redo = nil
 	if b.pendingCoalesce && len(b.undo) > 0 {
 		last := &b.undo[len(b.undo)-1]
@@ -105,6 +110,7 @@ func (b *buffer) endEdit() {
 			last.changes = append(last.changes, edit.changes...)
 		}
 		last.after = edit.after
+		last.afterID = edit.afterID
 		last.afterExtras = edit.afterExtras
 		last.bytes += edit.bytes
 	} else {
@@ -164,6 +170,9 @@ func (b *buffer) replaceRange(start, end cursorPos, text string) {
 	b.layouts = nil
 	b.goalValid = false
 	b.rev++
+	b.bumpState()
+	b.textBytes += len(text) - len(before)
+	b.dirtyTo = max(newEnd.row, b.dirtyTo+newEnd.row-end.row)
 	if b.dirtyFrom < 0 || start.row < b.dirtyFrom {
 		b.dirtyFrom = start.row
 	}
@@ -194,7 +203,8 @@ func (b *buffer) Undo() bool {
 	}
 	b.replaying = false
 	b.restoreCursor(edit.before)
-	b.restoredExtras = append([]cursorPos(nil), edit.beforeExtras...)
+	b.stateID = edit.beforeID
+	b.restoredExtras = append([]bufferCursor(nil), edit.beforeExtras...)
 	b.lastEditKind = editNone
 	b.redo = append(b.redo, edit)
 	return true
@@ -212,7 +222,8 @@ func (b *buffer) Redo() bool {
 	}
 	b.replaying = false
 	b.restoreCursor(edit.after)
-	b.restoredExtras = append([]cursorPos(nil), edit.afterExtras...)
+	b.stateID = edit.afterID
+	b.restoredExtras = append([]bufferCursor(nil), edit.afterExtras...)
 	b.lastEditKind = editNone
 	b.undo = append(b.undo, edit)
 	b.historyBytes += edit.bytes
@@ -236,8 +247,20 @@ func (b *buffer) SetPreparedText(text string, lines [][]rune) {
 	b.row, b.col = newEnd.row, newEnd.col
 	b.anchorSet = false
 	b.rev++
-	b.dirtyFrom = 0
+	b.bumpState()
+	b.textBytes = len(text)
+	b.dirtyFrom, b.dirtyTo = 0, len(lines)-1
 	b.layouts = nil
 	b.goalValid = false
 	b.textCache, b.textRevision, b.textCached = text, b.rev, true
 }
+
+// stateID follows undo/redo; rev always advances, including during replay.
+func (b *buffer) bumpState() {
+	b.nextStateID++
+	b.stateID = b.nextStateID
+	if b.onChange != nil {
+		b.onChange()
+	}
+}
+func (b *buffer) breakUndoGroup() { b.lastEditKind = editNone }

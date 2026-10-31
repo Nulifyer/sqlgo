@@ -38,19 +38,23 @@ type buffer struct {
 	// Undo / redo stacks. Bounded so a runaway edit loop doesn't eat
 	// memory; the cap is big enough that a normal editing session
 	// never hits it.
-	undo            []bufferEdit
-	redo            []bufferEdit
-	historyBytes    int
-	editDepth       int
-	pending         *bufferEdit
-	pendingKind     editKind
-	pendingCoalesce bool
-	replaying       bool
-	restoredExtras  []cursorPos
-	textCache       string
-	textRevision    uint64
-	textCached      bool
-	dirtyFrom       int
+	undo                 []bufferEdit
+	redo                 []bufferEdit
+	historyBytes         int
+	editDepth            int
+	pending              *bufferEdit
+	pendingKind          editKind
+	pendingCoalesce      bool
+	replaying            bool
+	restoredExtras       []bufferCursor
+	textCache            string
+	textRevision         uint64
+	textCached           bool
+	dirtyFrom            int
+	dirtyTo              int
+	stateID, nextStateID uint64
+	textBytes            int
+	onChange             func()
 
 	// Coalescing: consecutive same-kind edits at adjacent cursor
 	// positions share a single undo entry so Undo pops a word (or
@@ -212,7 +216,9 @@ func (b *buffer) setTextRaw(s string) {
 	b.row = len(b.lines) - 1
 	b.col = len(b.lines[b.row])
 	b.rev++
-	b.dirtyFrom = 0
+	b.bumpState()
+	b.textBytes = len(s)
+	b.dirtyFrom, b.dirtyTo = 0, len(b.lines)-1
 	b.layouts = nil
 	b.goalValid = false
 	b.textCache, b.textRevision, b.textCached = s, b.rev, true
@@ -232,7 +238,9 @@ func (b *buffer) resetPreparedText(s string, lines [][]rune) {
 	b.historyBytes = 0
 	b.lastEditKind = editNone
 	b.rev++
-	b.dirtyFrom = 0
+	b.bumpState()
+	b.textBytes = len(s)
+	b.dirtyFrom, b.dirtyTo = 0, len(b.lines)-1
 	b.layouts = nil
 	b.goalValid = false
 	b.textCache, b.textRevision, b.textCached = s, b.rev, true

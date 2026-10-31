@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -63,17 +62,20 @@ func TestMultiCursorBackspace(t *testing.T) {
 	}
 }
 
-func TestMultiCursorBackspaceAtCol0Skipped(t *testing.T) {
+func TestMultiCursorBackspaceJoinsLinesAtomically(t *testing.T) {
 	t.Parallel()
 	e := seedMultilineEditor("foo\n\nbaz", 0, 0)
 	e.addCursorRelative(1) // row 1 col 0 (empty line)
 	e.addCursorRelative(2) // row 2 col 0
-	// Backspace at col 0 on all cursors should be a no-op
-	// (joining rows would break the row-uniqueness invariant).
+	// Joining adjacent rows transforms the remaining cursor positions.
 	e.handleInsert(nil, Key{Kind: KeyBackspace})
 	got := e.buf.Text()
-	if got != "foo\n\nbaz" {
-		t.Errorf("buffer mutated unexpectedly: %q", got)
+	if got != "foobaz" {
+		t.Errorf("joined buffer = %q", got)
+	}
+	keyCtrl(e, 'z')
+	if e.buf.Text() != "foo\n\nbaz" || len(e.extraCursors) != 2 {
+		t.Fatal("undo lost joined lines or cursors")
 	}
 }
 
@@ -118,19 +120,17 @@ func TestMultiCursorEscCollapses(t *testing.T) {
 	}
 }
 
-func TestMultiCursorEnterCollapses(t *testing.T) {
+func TestMultiCursorEnterEditsEveryCursorAtomically(t *testing.T) {
 	t.Parallel()
 	e := seedMultilineEditor("foo\nbar\nbaz", 0, 3)
 	e.addCursorRelative(1)
 	e.handleInsert(nil, Key{Kind: KeyEnter})
-	// Extras should be gone and primary should have inserted
-	// a newline at its single position.
-	if e.hasMultiCursor() {
-		t.Errorf("extras should be cleared after Enter")
+	if e.buf.Text() != "foo\n\nbar\n\nbaz" || len(e.extraCursors) != 1 {
+		t.Fatalf("multi-enter text=%q cursors=%+v", e.buf.Text(), e.extraCursors)
 	}
-	// Buffer should have an extra line now.
-	if !strings.Contains(e.buf.Text(), "foo\n") {
-		t.Errorf("buffer = %q", e.buf.Text())
+	e.handleInsert(nil, Key{Kind: KeyRune, Rune: 'z', Ctrl: true})
+	if e.buf.Text() != "foo\nbar\nbaz" || len(e.extraCursors) != 1 {
+		t.Fatal("multi-enter undo lost the original text or cursors")
 	}
 }
 

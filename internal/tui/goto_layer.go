@@ -67,6 +67,7 @@ func (gl *gotoLayer) HandleKey(a *app, k Key) {
 			return
 		}
 		e := m.editor
+		before := e.navigation()
 		e.collapseCursors()
 		e.buf.ClearSelection()
 		row := line - 1
@@ -84,6 +85,7 @@ func (gl *gotoLayer) HandleKey(a *app, k Key) {
 			col = lineLen
 		}
 		e.buf.SetCursor(row, col)
+		e.recordNavigation(before)
 		m.focus = FocusQuery
 		a.popLayer()
 		return

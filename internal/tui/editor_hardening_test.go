@@ -72,16 +72,16 @@ func TestEditorTerminalPasteShouldCollapseStaleCursors(t *testing.T) {
 		t.Fatalf("terminal paste retained old extra positions %+v", e.extraCursors)
 	}
 }
-func TestEditorMultiCursorHorizontalMoveMustKeepRowInvariant(t *testing.T) {
+func TestEditorMultiCursorHorizontalMoveKeepsDistinctValidPositions(t *testing.T) {
 	e := newEditor()
 	e.buf.SetText("a\nb")
 	e.buf.SetCursor(0, 1)
 	e.addCursorRelative(1)
 	e.handleInsert(nil, Key{Kind: KeyRight})
-	r, _ := e.buf.Cursor()
+	r, col := e.buf.Cursor()
 	for _, c := range e.extraCursors {
-		if r == c.row {
-			t.Fatalf("Right across EOL put primary and secondary on row %d", r)
+		if r == c.row && col == c.col {
+			t.Fatalf("Right across EOL produced duplicate cursor at %d/%d", r, col)
 		}
 	}
 }
