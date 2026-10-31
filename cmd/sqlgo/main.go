@@ -26,7 +26,7 @@ func main() {
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintf(out, "usage: %s\n", os.Args[0])
-		fmt.Fprintf(out, "       %s <verb> [flags]    verbs: exec, export, open, edit, conns, history, version\n", os.Args[0])
+		fmt.Fprintf(out, "       %s <verb> [flags]    verbs: exec, export, open, edit, conns, history, version, update\n", os.Args[0])
 		fmt.Fprintf(out, "       %s --version\n", os.Args[0])
 		flag.PrintDefaults()
 	}
@@ -40,7 +40,7 @@ func main() {
 		os.Exit(int(cli.ExitUsage))
 	}
 
-	if err := tui.Run(tui.Options{}); err != nil {
+	if err := tui.Run(tui.Options{Version: cli.Version}); err != nil {
 		fmt.Fprintln(os.Stderr, "sqlgo:", err)
 		os.Exit(1)
 	}

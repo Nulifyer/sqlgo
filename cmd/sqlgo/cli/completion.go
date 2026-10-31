@@ -22,7 +22,7 @@ var completionShells = []string{"bash", "zsh", "fish", "powershell", "pwsh"}
 // tab-completion menus.
 var topVerbs = []string{
 	"exec", "export", "open", "edit", "conns", "history",
-	"version", "help", "completion",
+	"version", "update", "help", "completion",
 }
 
 // verbFlags lists every long/short flag each verb accepts. Keep aligned
@@ -53,6 +53,7 @@ var verbFlags = map[string][]string{
 	},
 	"conns":      {},
 	"version":    {},
+	"update":     {"--check"},
 	"help":       {},
 	"completion": {},
 }
@@ -309,6 +310,7 @@ _sqlgo_export()     { _sqlgo_common_flags }
 _sqlgo_open()       { _sqlgo_common_flags; _files -g '*.(csv|tsv|jsonl|ndjson|db|db3|s3db|sqlite|sqlite3)' }
 _sqlgo_edit()       { _sqlgo_common_flags; _files -g '*.sql' }
 _sqlgo_version()    { }
+_sqlgo_update()     { _arguments '--check[check for a newer stable release without installing]' }
 _sqlgo_help()       { _describe 'verb' verbs }
 _sqlgo_completion() { _values 'shell' bash zsh fish powershell pwsh }
 
@@ -397,9 +399,10 @@ end
 complete -c sqlgo -n '__sqlgo_verb_is exec' -l allow-unsafe
 complete -c sqlgo -n '__sqlgo_verb_is exec' -l continue-on-error
 complete -c sqlgo -n '__sqlgo_verb_is exec' -l record-history
+complete -c sqlgo -n '__sqlgo_verb_is update' -l check -d 'check for a newer stable release without installing'
 
 complete -c sqlgo -n '__sqlgo_verb_is completion' -x -a 'bash zsh fish powershell pwsh'
-complete -c sqlgo -n '__sqlgo_verb_is help' -x -a 'exec export open edit conns history version completion'
+complete -c sqlgo -n '__sqlgo_verb_is help' -x -a 'exec export open edit conns history version update completion'
 
 # conns subverbs.
 complete -c sqlgo -n '__sqlgo_verb_is conns' -x -a 'list show add set rm test import export help'

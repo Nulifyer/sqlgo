@@ -38,6 +38,7 @@ verbs:
   conns     manage saved connections (list, show, add, set, rm, test, import, export)
   history   inspect query history (list, search, clear)
   version     print sqlgo version
+  update      install the latest stable release (--check to check only)
   help        show this message or per-verb help
   completion  print shell-completion script for bash|zsh|fish|powershell|pwsh
 

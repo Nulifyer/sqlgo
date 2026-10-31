@@ -106,6 +106,29 @@ CGO_ENABLED=1 go install -tags sqlite_fts5 github.com/Nulifyer/sqlgo/cmd/sqlgo@l
 
 Requires a C toolchain (gcc, clang, or `zig cc`). The `sqlite_fts5` tag enables the FTS5 module that powers query history search.
 
+### Update
+
+For a release binary installed with the scripts above or downloaded directly:
+
+```sh
+sqlgo update --check  # Check for a newer stable release
+sqlgo update          # Download, verify, and install it
+```
+
+The updater replaces the executable you are running, follows symlinks, and
+verifies the release archive against `checksums.txt` before replacement. Saved
+connections and query history are unaffected. Source and development builds
+must use their original build or `go install` command. Package-manager installs
+should use their package manager. On Windows, an in-use binary can remain as
+`sqlgo.exe.old` until a later update removes it.
+
+The TUI checks for updates in the background at most once per day using a local
+cache. A notice appears in the footer when space permits. Press `F1` for the
+installed version and update instructions. Checks have a five-second timeout,
+and failures do not interrupt work. Exit the TUI before running `sqlgo update`.
+Set `SQLGO_UPDATE_CHECK=0` to disable automatic checks. Non-TUI commands never
+check automatically, and `sqlgo update --check` works with this setting disabled.
+
 ### Uninstall
 
 ```sh

@@ -139,7 +139,7 @@ func runOpen(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 			Driver:   driver,
 			Database: connCfg.Database,
 		}
-		if err := tui.Run(tui.Options{InitialConnection: ic}); err != nil {
+		if err := tui.Run(tui.Options{InitialConnection: ic, Version: Version}); err != nil {
 			stderrf(stderr, "%v", err)
 			return 1
 		}

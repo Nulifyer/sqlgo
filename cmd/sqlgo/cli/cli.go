@@ -33,7 +33,7 @@ const (
 // initial-query seed).
 func IsVerb(name string) bool {
 	switch name {
-	case "exec", "export", "open", "edit", "conns", "history", "version",
+	case "exec", "export", "open", "edit", "conns", "history", "version", "update",
 		"help", "-h", "--help", "completion", "__complete":
 		return true
 	}
@@ -65,6 +65,8 @@ func Dispatch(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode
 		return runHistory(argv[1:], stdout, stderr)
 	case "version":
 		return runVersion(argv[1:], stdout)
+	case "update":
+		return runUpdate(argv[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		return runHelp(argv[1:], stdin, stdout, stderr)
 	case "completion":

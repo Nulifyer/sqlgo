@@ -168,6 +168,9 @@ type app struct {
 	metadataBusy bool
 
 	quit bool
+
+	version       string
+	updateVersion string
 }
 
 // refreshConnections re-reads the saved-connections list from the store
@@ -382,6 +385,9 @@ func (a *app) unlinkSecret(ctx context.Context, name string) error {
 // Options configures a Run invocation. The zero value is valid and
 // matches the pre-Options behavior.
 type Options struct {
+	// Version is set only by release builds. Empty disables automatic checks.
+	Version string
+
 	// InitialQuery, if non-empty, seeds the query editor with this text
 	// on startup. Used by the CLI `sqlgo file.sql` entry point.
 	InitialQuery string
@@ -420,8 +426,9 @@ func Run(opts Options) error {
 	secAvail := sec.Available()
 
 	a := &app{
-		term: t,
-		scr:  newScreen(os.Stdout, t.width, t.height),
+		version: opts.Version,
+		term:    t,
+		scr:     newScreen(os.Stdout, t.width, t.height),
 		// Buffer a handful of events so a fast-streaming query doesn't
 		// stall the drain goroutine on a non-blocking progress send.
 		resultCh:         make(chan queryEvent, resultChanBuf),
@@ -483,6 +490,8 @@ func Run(opts Options) error {
 		a.scr.TeardownView()
 	}()
 
+	stopUpdates := a.beginUpdateCheck()
+	defer stopUpdates()
 	loopErr := a.loop()
 	close(a.doneCh)
 	return loopErr
@@ -614,7 +623,7 @@ func (a *app) handleKey(k Key) {
 			a.popLayer()
 			return
 		}
-		a.pushLayer(newHelpLayer())
+		a.pushLayer(newAppHelpLayer(a))
 		return
 	}
 	if k.Kind == KeyF8 {

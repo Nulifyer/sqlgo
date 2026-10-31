@@ -56,7 +56,7 @@ func runEdit(argv []string, _ io.Reader, _, stderr io.Writer) ExitCode {
 		stderrf(stderr, "edit: %v", err)
 		return 1
 	}
-	if err := tui.Run(tui.Options{InitialQuery: string(data)}); err != nil {
+	if err := tui.Run(tui.Options{InitialQuery: string(data), Version: Version}); err != nil {
 		stderrf(stderr, "%v", err)
 		return 1
 	}

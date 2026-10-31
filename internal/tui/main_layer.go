@@ -2349,7 +2349,7 @@ func (m *mainLayer) statusText(a *app, width int) string {
 		}
 		hints = hints[:idx]
 	}
-	return truncate(prefix+hints+suffix, width)
+	return appendUpdateNotice(truncate(prefix+hints+suffix, width), a.updateVersion, width)
 }
 
 // Hints is the Layer interface entry point for mainLayer. It dispatches on
