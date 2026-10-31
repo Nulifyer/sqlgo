@@ -104,7 +104,9 @@ Installs to `%LOCALAPPDATA%\Programs\sqlgo\sqlgo.exe` and adds that directory to
 CGO_ENABLED=1 go install -tags sqlite_fts5 github.com/Nulifyer/sqlgo/cmd/sqlgo@latest
 ```
 
-Requires a C toolchain (gcc, clang, or `zig cc`). The `sqlite_fts5` tag enables the FTS5 module that powers query history search.
+Requires Go 1.27.3 or newer and a C toolchain (gcc, clang, or `zig cc`). The
+`sqlite_fts5` tag enables the FTS5 module that powers query history search.
+macOS binaries require macOS 13 Ventura or later.
 
 ### Update
 

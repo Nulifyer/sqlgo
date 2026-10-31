@@ -36,9 +36,10 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
-	_ "github.com/snowflakedb/gosnowflake"
+	_ "github.com/snowflakedb/gosnowflake/v2"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 	"github.com/Nulifyer/sqlgo/internal/sqltok"
@@ -180,8 +181,9 @@ func sqlQuote(s string) string {
 //	cfg.Options["region"]                  -> ?region= (legacy region override)
 //	cfg.Options["login_timeout"]           -> ?loginTimeout=
 //	cfg.Options["request_timeout"]         -> ?requestTimeout=
-//	cfg.Options["client_session_keep_alive"] -> ?clientSessionKeepAlive=
-//	cfg.Options["insecure_mode"]           -> ?insecureMode= (dev only)
+//	cfg.Options["client_session_keep_alive"] -> ?serverSessionKeepAlive=
+//	cfg.Options["insecure_mode"]           -> ?disableOCSPChecks= (dev only)
+//	cfg.Options["disable_oob_telemetry"]   -> inverted CLIENT_TELEMETRY_ENABLED
 //
 // Unknown Options keys pass through verbatim so future driver knobs
 // work without a buildDSN patch.
@@ -239,15 +241,21 @@ func buildDSN(cfg db.Config) string {
 		"region":                    "region",
 		"login_timeout":             "loginTimeout",
 		"request_timeout":           "requestTimeout",
-		"client_session_keep_alive": "clientSessionKeepAlive",
-		"insecure_mode":             "insecureMode",
+		"client_session_keep_alive": "serverSessionKeepAlive",
+		"insecure_mode":             "disableOCSPChecks",
 		"ocsp_fail_open":            "ocspFailOpen",
 		"tracing":                   "tracing",
-		"disable_oob_telemetry":     "disableOCSPChecks",
 	}
 	// "schema" is consumed into the path above; skip it in both the
 	// semantic map and the raw passthrough.
 	skip := map[string]struct{}{"schema": {}}
+	if v := strings.TrimSpace(cfg.Options["disable_oob_telemetry"]); v != "" {
+		if disabled, err := strconv.ParseBool(v); err == nil {
+			v = strconv.FormatBool(!disabled)
+		}
+		q.Set("CLIENT_TELEMETRY_ENABLED", v)
+	}
+	skip["disable_oob_telemetry"] = struct{}{}
 	for src, dst := range semantic {
 		if v := strings.TrimSpace(cfg.Options[src]); v != "" {
 			q.Set(dst, v)

@@ -81,6 +81,7 @@ builds:
         env:
           - CC=o64-clang
           - CXX=o64-clang++
+          - MACOSX_DEPLOYMENT_TARGET=13.0
           - CGO_CFLAGS=-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2
 
       # darwin/arm64: PAC+BTI on Apple Silicon.
@@ -89,6 +90,7 @@ builds:
         env:
           - CC=oa64-clang
           - CXX=oa64-clang++
+          - MACOSX_DEPLOYMENT_TARGET=13.0
           - CGO_CFLAGS=-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -mbranch-protection=standard
 
 archives:

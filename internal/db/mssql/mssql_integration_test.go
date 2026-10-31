@@ -44,6 +44,26 @@ func TestIntegrationMSSQL(t *testing.T) {
 		"sqlgo_it_mssql",
 	)
 
+	t.Run("unqualified_columns", func(t *testing.T) {
+		const name = "sqlgo_it_mssql_bare"
+		if err := conn.Exec(ctx, "DROP TABLE IF EXISTS dbo."+name); err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.Exec(ctx, "CREATE TABLE dbo."+name+" (_id INT, label NVARCHAR(50))"); err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Exec(context.Background(), "DROP TABLE dbo."+name)
+		for _, schema := range []string{"", "dbo"} {
+			cols, err := conn.Columns(ctx, db.TableRef{Schema: schema, Name: name})
+			if err != nil {
+				t.Fatalf("columns with schema %q: %v", schema, err)
+			}
+			if len(cols) != 2 || cols[0].Name != "_id" || cols[1].Name != "label" {
+				t.Fatalf("columns with schema %q = %+v", schema, cols)
+			}
+		}
+	})
+
 	// Seeded via .scripts/seed-testdbs.{sh,ps1}; gate so an unseeded
 	// container still runs the base round-trip.
 	t.Run("seeded_catalogs", func(t *testing.T) {

@@ -4,6 +4,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
+
+	gosnowflake "github.com/snowflakedb/gosnowflake/v2"
 
 	"github.com/Nulifyer/sqlgo/internal/db"
 	"github.com/Nulifyer/sqlgo/internal/sqltok"
@@ -100,7 +103,7 @@ func TestBuildDSN(t *testing.T) {
 			wantParams: map[string]string{
 				"loginTimeout":           "30s",
 				"requestTimeout":         "60s",
-				"clientSessionKeepAlive": "true",
+				"serverSessionKeepAlive": "true",
 			},
 			absentParams: []string{
 				"login_timeout", "request_timeout", "client_session_keep_alive",
@@ -251,5 +254,44 @@ func TestQuoteIdent(t *testing.T) {
 		if got := quoteIdent(tc.in); got != tc.want {
 			t.Errorf("quoteIdent(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestV2DriverParsesMappedConnectionOptions(t *testing.T) {
+	for _, disabled := range []string{"true", "false"} {
+		t.Run("telemetry_disabled_"+disabled, func(t *testing.T) {
+			dsn := buildDSN(db.Config{Host: "xy12345.us-east-1", User: "SQLGO", Password: "p", Database: "SQLGO_DB", Options: map[string]string{
+				"schema": "PUBLIC", "warehouse": "COMPUTE_WH", "role": "ANALYST",
+				"login_timeout": "30", "request_timeout": "60",
+				"client_session_keep_alive": "true", "disable_oob_telemetry": disabled,
+			}})
+			cfg, err := gosnowflake.ParseDSN(dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Database != "SQLGO_DB" || cfg.Schema != "PUBLIC" || cfg.Warehouse != "COMPUTE_WH" || cfg.Role != "ANALYST" {
+				t.Fatalf("driver configuration lost connection options: database=%q schema=%q warehouse=%q role=%q", cfg.Database, cfg.Schema, cfg.Warehouse, cfg.Role)
+			}
+			if cfg.LoginTimeout != 30*time.Second || cfg.RequestTimeout != time.Minute || !cfg.ServerSessionKeepAlive {
+				t.Fatal("v2 timeout/session options not recognized")
+			}
+			want := "false"
+			if disabled == "false" {
+				want = "true"
+			}
+			if v := cfg.Params["CLIENT_TELEMETRY_ENABLED"]; v == nil || *v != want {
+				t.Fatalf("telemetry enabled = %v, want %s", v, want)
+			}
+			if cfg.DisableOCSPChecks {
+				t.Fatal("telemetry option disabled certificate revocation checks")
+			}
+		})
+	}
+	cfg, err := gosnowflake.ParseDSN(buildDSN(db.Config{Host: "xy12345.us-east-1", User: "SQLGO", Password: "p", Options: map[string]string{"insecure_mode": "true"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DisableOCSPChecks {
+		t.Fatal("legacy insecure_mode was not mapped to the v2 option")
 	}
 }
