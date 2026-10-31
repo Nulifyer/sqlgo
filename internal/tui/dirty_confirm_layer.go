@@ -56,6 +56,7 @@ func (l *dirtyConfirmLayer) HandleKey(a *app, k Key) {
 	case 'y', 'Y':
 		a.popLayer()
 		if l.action == dirtyQuit {
+			a.discardRecovery = true
 			a.quit = true
 			return
 		}
@@ -71,11 +72,16 @@ func (l *dirtyConfirmLayer) Hints(a *app) string {
 func (a *app) requestQuit() {
 	dirty := 0
 	for _, sess := range a.mainLayerPtr().sessions {
+		if sess.saveBusy {
+			a.mainLayerPtr().status = "save in progress; editing remains available; quit again when saved"
+			return
+		}
 		if sess.IsDirty() {
 			dirty++
 		}
 	}
 	if dirty == 0 {
+		a.discardRecovery = true
 		a.quit = true
 		return
 	}

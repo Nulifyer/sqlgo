@@ -1697,7 +1697,7 @@ func (a *app) fetchColumnsFor(t tableScope, refreshSig string) ([]db.Column, boo
 			if m := a.mainLayerPtr(); m != nil && m.session != nil && m.focus == FocusQuery {
 				if e := m.session.editor; e != nil && e.complete != nil &&
 					e.complete.ctxSig == refreshSig &&
-					completionSignatureForEditor(e, a) == refreshSig {
+					completionPositionIsCurrent(e, a) {
 					e.openCompletion(a)
 				}
 			}
@@ -1756,22 +1756,6 @@ func (ctx completionCtx) signature() string {
 		strings.ToLower(ctx.qualifier) + "\x00" +
 		strings.ToLower(ctx.catalog) + "\x00" +
 		strings.ToLower(ctx.prefix)
-}
-
-func completionSignatureForEditor(e *editor, a *app) string {
-	if e == nil {
-		return ""
-	}
-	row, col := e.buf.Cursor()
-	line := e.buf.Line(row)
-	word, startCol := wordBeforeCursor(line, col)
-	qualifier, catalog := qualifiersBeforeCursor(line, startCol)
-	ctx := analyzeCursorContext(e.buf.Text(), runeOffsetOf(e.buf, row, col))
-	ctx.qualifier = qualifier
-	ctx.catalog = catalog
-	ctx.prefix = word
-	ctx.startCol = startCol
-	return ctx.signature()
 }
 
 // completionCatalog returns the active-tab catalog used to scope
@@ -1840,4 +1824,14 @@ func (a *app) completionTables() []db.TableRef {
 		return nil
 	}
 	return e.info.Tables
+}
+
+// Existing model/caret/catalog identities are enough to fence a metadata refresh;
+// reparsing an entire large document on the UI callback is unnecessary.
+func completionPositionIsCurrent(e *editor, a *app) bool {
+	if e.complete == nil || e.complete.revision != e.buf.Revision() {
+		return false
+	}
+	row, col := e.buf.Cursor()
+	return row == e.complete.row && col == e.complete.col && e.complete.activeCatalog == a.completionCatalog()
 }

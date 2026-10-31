@@ -147,7 +147,7 @@ func TestBufferInsertTextMultiline(t *testing.T) {
 	}
 }
 
-func TestBufferInsertTextCRLF(t *testing.T) {
+func TestBufferBulkTextNormalizesLineEndings(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name  string
@@ -159,14 +159,30 @@ func TestBufferInsertTextCRLF(t *testing.T) {
 		{"CR only", "a\rb\rc", "a\nb\nc"},
 		{"mixed", "a\r\nb\rc\nd", "a\nb\nc\nd"},
 		{"trailing CR", "abc\r", "abc\n"},
+		{"blank lines", "\r\n\r\r\n\n", "\n\n\n\n"},
+		{"unicode and literal caret M", "é\r\n漢字 ^M\r🙂", "é\n漢字 ^M\n🙂"},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			b := newBuffer()
-			b.InsertText(tt.input)
-			if got := b.Text(); got != tt.want {
-				t.Errorf("InsertText(%q) = %q, want %q", tt.input, got, tt.want)
+	for _, method := range []string{"SetText", "InsertText"} {
+		t.Run(method, func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					t.Parallel()
+					b := newBuffer()
+					if method == "SetText" {
+						b.SetText(tt.input)
+					} else {
+						b.InsertText(tt.input)
+					}
+					if got := b.Text(); got != tt.want {
+						t.Fatalf("%s(%q) = %q, want %q", method, tt.input, got, tt.want)
+					}
+					if !b.Undo() || b.Text() != "" {
+						t.Fatalf("Undo: text = %q, want empty", b.Text())
+					}
+					if !b.Redo() || b.Text() != tt.want {
+						t.Fatalf("Redo: text = %q, want %q", b.Text(), tt.want)
+					}
+				})
 			}
 		})
 	}

@@ -60,11 +60,14 @@ type completionItem struct {
 
 // completionState is the live popup.
 type completionState struct {
-	startCol int              // where the prefix begins in the buffer line
-	prefix   string           // prefix used to open
-	items    []completionItem // filtered matches
-	ctxSig   string
-	selected int
+	startCol      int              // where the prefix begins in the buffer line
+	prefix        string           // prefix used to open
+	items         []completionItem // filtered matches
+	ctxSig        string
+	revision      uint64
+	row, col      int
+	activeCatalog string
+	selected      int
 }
 
 func (c *completionState) moveSelection(delta int) {
@@ -101,16 +104,52 @@ func (e *editor) openCompletion(a *app) {
 
 	text := e.buf.Text()
 	cursorOffset := runeOffsetOf(e.buf, row, col)
-	ctx := analyzeCursorContext(text, cursorOffset)
-	ctx.qualifier = qualifier
-	ctx.catalog = catalog
-	ctx.prefix = word
-	ctx.startCol = startCol
-
-	// Clear any existing popup up front so a live-refine that
-	// narrows to zero items dismisses cleanly.
 	e.complete = nil
-
+	e.completionGeneration++
+	gen := e.completionGeneration
+	e.completionRequest = gen
+	finish := func(ctx completionCtx) {
+		ctx.qualifier = qualifier
+		ctx.catalog = catalog
+		ctx.prefix = word
+		ctx.startCol = startCol
+		e.showCompletion(a, ctx, word, startCol)
+	}
+	if a != nil && a.asyncCh != nil && len(text) > 128<<10 {
+		if e.completionBusy {
+			e.completionAgain = true
+			return
+		}
+		rev := e.buf.Revision()
+		e.completionBusy = true
+		e.completionAgain = false
+		a.runBackground(func() func(*app) {
+			ctx := analyzeCursorContext(text, cursorOffset)
+			return func(a *app) {
+				e.completionBusy = false
+				if e.completionAgain && e.completionRequest == e.completionGeneration {
+					e.completionAgain = false
+					e.openCompletion(a)
+					return
+				}
+				if e.completionGeneration != gen || e.buf.Revision() != rev {
+					return
+				}
+				if m := a.mainLayerPtr(); m.editor != e || m.focus != FocusQuery {
+					return
+				}
+				r, c := e.buf.Cursor()
+				if r != row || c != col {
+					return
+				}
+				finish(ctx)
+			}
+		})
+		return
+	}
+	finish(analyzeCursorContext(text, cursorOffset))
+}
+func (e *editor) showCompletion(a *app, ctx completionCtx, word string, startCol int) {
 	if ctx.suppress {
 		return
 	}
@@ -140,6 +179,11 @@ func (e *editor) openCompletion(a *app) {
 		prefix:   word,
 		items:    items,
 		ctxSig:   sig,
+		revision: e.buf.Revision(),
+	}
+	e.complete.row, e.complete.col = e.buf.Cursor()
+	if a != nil {
+		e.complete.activeCatalog = a.completionCatalog()
 	}
 }
 
@@ -256,10 +300,9 @@ func (e *editor) acceptCompletion() {
 		}
 	}
 	toDelete := col - startCol
-	for i := 0; i < toDelete; i++ {
-		e.buf.Backspace()
+	if toDelete >= 0 {
+		e.buf.ReplaceRange(row, startCol, row, col, text)
 	}
-	e.buf.InsertText(text)
 	e.ClearErrorLocation()
 	e.complete = nil
 }

@@ -1,5 +1,10 @@
 package tui
 
+import (
+	"strings"
+	"unicode"
+)
+
 // buffer is a simple multi-line text buffer indexed in runes (not bytes).
 // It is the data model behind the query editor: a slice of rune slices,
 // one per line, plus a cursor. Operations mutate in place and clamp the
@@ -10,14 +15,15 @@ package tui
 // started; the selected range is always [min(anchor,cursor),
 // max(anchor,cursor)). An unset anchor means "no selection active".
 //
-// Undo/redo: every text mutation pushes a snapshot onto the undo stack.
-// Snapshots are full-buffer strings plus cursor position -- small
-// enough for typical editor usage and avoids the complexity of diff-
-// based undo trees. Redo is cleared on any new edit.
+// Undo/redo records changed ranges and selection state. Compound commands
+// share a transaction; no-op commands preserve redo.
 //
 // Not safe for concurrent use. The TUI only touches it from the main loop.
 type buffer struct {
-	lines [][]rune
+	lines      [][]rune
+	layouts    map[int]*textLayout
+	goalVisual int
+	goalValid  bool
 	// row, col are 0-based. col is allowed to equal len(line) -- that
 	// means the cursor is sitting after the last character on the line.
 	row int
@@ -32,11 +38,22 @@ type buffer struct {
 	// Undo / redo stacks. Bounded so a runaway edit loop doesn't eat
 	// memory; the cap is big enough that a normal editing session
 	// never hits it.
-	undo []bufferSnapshot
-	redo []bufferSnapshot
+	undo            []bufferEdit
+	redo            []bufferEdit
+	historyBytes    int
+	editDepth       int
+	pending         *bufferEdit
+	pendingKind     editKind
+	pendingCoalesce bool
+	replaying       bool
+	restoredExtras  []cursorPos
+	textCache       string
+	textRevision    uint64
+	textCached      bool
+	dirtyFrom       int
 
 	// Coalescing: consecutive same-kind edits at adjacent cursor
-	// positions share a single undo snapshot so Undo pops a word (or
+	// positions share a single undo entry so Undo pops a word (or
 	// run of backspaces) at a time instead of one rune at a time.
 	lastEditKind editKind
 	lastEditRow  int
@@ -57,20 +74,17 @@ const (
 	editDelete
 )
 
-type bufferSnapshot struct {
-	text string
-	row  int
-	col  int
-}
-
 const maxUndoDepth = 256
 
 func newBuffer() *buffer {
-	return &buffer{lines: [][]rune{{}}}
+	return &buffer{lines: [][]rune{{}}, dirtyFrom: 0}
 }
 
 // Text returns the buffer contents joined by '\n'.
 func (b *buffer) Text() string {
+	if b.textCached && b.textRevision == b.rev {
+		return b.textCache
+	}
 	n := 0
 	for i, ln := range b.lines {
 		if i > 0 {
@@ -85,7 +99,9 @@ func (b *buffer) Text() string {
 		}
 		out = append(out, string(ln)...)
 	}
-	return string(out)
+	b.textCache = string(out)
+	b.textRevision, b.textCached = b.rev, true
+	return b.textCache
 }
 
 // Revision returns a monotonically increasing counter that changes on
@@ -105,6 +121,7 @@ func (b *buffer) Cursor() (row, col int) { return b.row, b.col }
 // primary cursor there without touching selection. Used by the
 // multi-cursor apply loop to walk positions.
 func (b *buffer) SetCursor(row, col int) {
+	b.goalValid = false
 	if row < 0 {
 		row = 0
 	}
@@ -116,6 +133,10 @@ func (b *buffer) SetCursor(row, col int) {
 	}
 	if col > len(b.lines[row]) {
 		col = len(b.lines[row])
+	}
+	if col < len(b.lines[row]) {
+		layout := b.lineLayout(row)
+		col = layout.runeColumn(layout.column(col))
 	}
 	b.row = row
 	b.col = col
@@ -127,6 +148,7 @@ func (b *buffer) SetCursor(row, col int) {
 // double-click paths to pin the start of a selection before extending
 // it via SetCursor.
 func (b *buffer) SetAnchor(row, col int) {
+	b.goalValid = false
 	if row < 0 {
 		row = 0
 	}
@@ -139,6 +161,10 @@ func (b *buffer) SetAnchor(row, col int) {
 	if col > len(b.lines[row]) {
 		col = len(b.lines[row])
 	}
+	if col < len(b.lines[row]) {
+		layout := b.lineLayout(row)
+		col = layout.runeColumn(layout.column(col))
+	}
 	b.anchorRow = row
 	b.anchorCol = col
 	b.anchorSet = true
@@ -147,180 +173,156 @@ func (b *buffer) SetAnchor(row, col int) {
 
 // Clear resets the buffer to a single empty line and wipes undo/redo.
 func (b *buffer) Clear() {
-	b.snapshot()
-	b.lines = [][]rune{{}}
-	b.row, b.col = 0, 0
-	b.anchorSet = false
-	b.rev++
+	b.SetText("")
 }
 
-// SetText replaces the entire buffer with s, splitting on '\n'. The
-// cursor lands at the end of the last line. Pushes an undo snapshot
+// SetText replaces the entire buffer with s, normalizing line endings to LF. The
+// cursor lands at the end of the last line. Pushes an undo entry
 // first so the replace can be undone.
 func (b *buffer) SetText(s string) {
-	b.snapshot()
-	b.setTextRaw(s)
+	b.beginEdit(editNone)
+	defer b.endEdit()
+	b.replaceRange(cursorPos{}, b.endPosition(), normalizeEditorLineEndings(s))
 	b.anchorSet = false
 }
 
-// setTextRaw is SetText without taking an undo snapshot. Used by the
-// undo / redo paths to apply a stored snapshot without recursing.
-func (b *buffer) setTextRaw(s string) {
-	b.lines = b.lines[:0]
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			b.lines = append(b.lines, []rune(s[start:i]))
-			start = i + 1
-		}
+// ResetText loads a different document, discarding the previous document's
+// undo/redo and selection state. Use SetText for an undoable edit.
+func (b *buffer) ResetText(s string) {
+	b.setTextRaw(s)
+	b.undo, b.redo = nil, nil
+	b.historyBytes = 0
+	b.anchorSet = false
+	b.lastEditKind = editNone
+}
+
+func splitBufferText(s string) [][]rune {
+	pieces := strings.Split(s, "\n")
+	lines := make([][]rune, len(pieces))
+	for i, piece := range pieces {
+		lines[i] = []rune(piece)
 	}
-	b.lines = append(b.lines, []rune(s[start:]))
+	return lines
+}
+
+// setTextRaw installs normalized text and clears cached layouts.
+func (b *buffer) setTextRaw(s string) {
+	s = normalizeEditorLineEndings(s)
+	b.lines = splitBufferText(s)
 	b.row = len(b.lines) - 1
 	b.col = len(b.lines[b.row])
 	b.rev++
+	b.dirtyFrom = 0
+	b.layouts = nil
+	b.goalValid = false
+	b.textCache, b.textRevision, b.textCached = s, b.rev, true
+}
+
+// resetPreparedText transfers a worker-prepared document to the UI without
+// reparsing it. The caller must not mutate lines after ownership transfers.
+func (b *buffer) resetPreparedText(s string, lines [][]rune) {
+	if len(lines) == 0 {
+		b.ResetText(s)
+		return
+	}
+	b.lines = lines
+	b.row, b.col = 0, 0
+	b.anchorSet = false
+	b.undo, b.redo = nil, nil
+	b.historyBytes = 0
+	b.lastEditKind = editNone
+	b.rev++
+	b.dirtyFrom = 0
+	b.layouts = nil
+	b.goalValid = false
+	b.textCache, b.textRevision, b.textCached = s, b.rev, true
 }
 
 // Insert writes r at the cursor and advances one column. If a
 // selection is active it's deleted first.
 func (b *buffer) Insert(r rune) {
-	if b.HasSelection() {
-		b.snapshot()
-		b.deleteSelectionNoSnap()
-		b.insertRuneNoSnap(r)
-		return
-	}
 	kind := editInsertPunct
 	if isWordChar(r) {
 		kind = editInsertWord
 	}
-	b.snapshotKind(kind)
+	if b.HasSelection() {
+		kind = editNone
+	}
+	b.beginEdit(kind)
+	defer b.endEdit()
+	start, end := b.insertionRange()
+	b.replaceRange(start, end, normalizeEditorLineEndings(string(r)))
 	b.anchorSet = false
-	b.insertRuneNoSnap(r)
-	b.recordEdit(kind)
 }
 
-// InsertText writes a whole string (possibly multi-line) at the cursor.
-// Used by Paste. A single undo snapshot covers the full paste.
+// normalizeEditorLineEndings gives every bulk text path the same LF model.
+// CRLF is one line break; a bare CR is also a line break.
+func normalizeEditorLineEndings(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.ReplaceAll(s, "\r", "\n")
+}
+
+// InsertText writes a whole string at the cursor, normalizing line endings to LF.
+// Used by Paste. A single undo entry covers the full paste.
 func (b *buffer) InsertText(s string) {
-	b.snapshot()
-	if b.anchorSet {
-		b.deleteSelectionNoSnap()
-	}
-	for i, r := range s {
-		if r == '\n' {
-			b.insertNewlineNoSnap()
-			continue
-		}
-		if r == '\r' {
-			// CRLF pair: skip the \r, the following \n handles
-			// the newline. Standalone \r (Windows console in VT
-			// mode sends this for pasted line breaks): treat as
-			// newline so multi-line paste works.
-			if i+1 < len(s) && s[i+1] == '\n' {
-				continue
-			}
-			b.insertNewlineNoSnap()
-			continue
-		}
-		b.insertRuneNoSnap(r)
-	}
+	b.beginEdit(editNone)
+	defer b.endEdit()
+	start, end := b.insertionRange()
+	b.replaceRange(start, end, normalizeEditorLineEndings(s))
+	b.anchorSet = false
 }
 
 // InsertNewline splits the current line at the cursor.
 func (b *buffer) InsertNewline() {
-	b.snapshot()
-	if b.anchorSet {
-		b.deleteSelectionNoSnap()
-	}
-	b.insertNewlineNoSnap()
-}
-
-func (b *buffer) insertNewlineNoSnap() {
-	line := b.lines[b.row]
-	head := append([]rune(nil), line[:b.col]...)
-	tail := append([]rune(nil), line[b.col:]...)
-	b.lines[b.row] = head
-	b.lines = append(b.lines, nil)
-	copy(b.lines[b.row+2:], b.lines[b.row+1:])
-	b.lines[b.row+1] = tail
-	b.row++
-	b.col = 0
-	b.rev++
-}
-
-func (b *buffer) insertRuneNoSnap(r rune) {
-	line := b.lines[b.row]
-	line = append(line, 0)
-	copy(line[b.col+1:], line[b.col:])
-	line[b.col] = r
-	b.lines[b.row] = line
-	b.col++
-	b.rev++
+	b.InsertText("\n")
 }
 
 // Backspace deletes the character before the cursor, the active
 // selection, or joins with the previous line if at column 0.
 func (b *buffer) Backspace() {
 	if b.HasSelection() {
-		b.snapshot()
-		b.deleteSelectionNoSnap()
+		b.DeleteSelection()
 		return
 	}
-	// Joining lines (col == 0) is a distinct, more disruptive edit; force
-	// a break so a run of in-line backspaces doesn't silently swallow the
-	// line-merge into the same undo step.
-	if b.col == 0 {
-		b.snapshot()
-		b.anchorSet = false
-		if b.row == 0 {
-			return
-		}
-		prev := b.lines[b.row-1]
-		cur := b.lines[b.row]
-		newCol := len(prev)
-		b.lines[b.row-1] = append(prev, cur...)
-		b.lines = append(b.lines[:b.row], b.lines[b.row+1:]...)
-		b.row--
-		b.col = newCol
-		b.rev++
+	start := cursorPos{b.row, b.col}
+	end := start
+	kind := editBackspace
+	if start.col > 0 {
+		start.col = b.lineLayout(start.row).prev(start.col)
+	} else if start.row > 0 {
+		start.row--
+		start.col = len(b.lines[start.row])
+		kind = editNone
+	} else {
 		return
 	}
-	b.snapshotKind(editBackspace)
-	b.anchorSet = false
-	line := b.lines[b.row]
-	copy(line[b.col-1:], line[b.col:])
-	b.lines[b.row] = line[:len(line)-1]
-	b.col--
-	b.recordEdit(editBackspace)
+	b.beginEdit(kind)
+	defer b.endEdit()
+	b.replaceRange(start, end, "")
 }
 
 // Delete removes the character under the cursor, the active selection,
 // or joins the next line into the current one if at end of line.
 func (b *buffer) Delete() {
 	if b.HasSelection() {
-		b.snapshot()
-		b.deleteSelectionNoSnap()
+		b.DeleteSelection()
 		return
 	}
-	line := b.lines[b.row]
-	// Line-join case: force a break, same reasoning as Backspace.
-	if b.col >= len(line) {
-		b.snapshot()
-		b.anchorSet = false
-		if b.row == len(b.lines)-1 {
-			return
-		}
-		next := b.lines[b.row+1]
-		b.lines[b.row] = append(line, next...)
-		b.lines = append(b.lines[:b.row+1], b.lines[b.row+2:]...)
-		b.rev++
+	start := cursorPos{b.row, b.col}
+	end := start
+	kind := editDelete
+	if end.col < len(b.lines[end.row]) {
+		end.col = b.lineLayout(end.row).next(end.col)
+	} else if end.row+1 < len(b.lines) {
+		end.row++
+		end.col = 0
+		kind = editNone
+	} else {
 		return
 	}
-	b.snapshotKind(editDelete)
-	b.anchorSet = false
-	copy(line[b.col:], line[b.col+1:])
-	b.lines[b.row] = line[:len(line)-1]
-	b.recordEdit(editDelete)
+	b.beginEdit(kind)
+	defer b.endEdit()
+	b.replaceRange(start, end, "")
 }
 
 // --- cursor movement -------------------------------------------------------
@@ -333,13 +335,20 @@ func (b *buffer) Delete() {
 // MoveLeft decrements the column, wrapping to the end of the previous
 // line when at column 0.
 func (b *buffer) MoveLeft() {
+	if b.HasSelection() {
+		r, c, _, _ := b.normalizedSelection()
+		b.SetCursor(r, c)
+		b.clearSelection()
+		return
+	}
+	b.goalValid = false
 	b.clearSelection()
 	b.moveLeftNoSel()
 }
 
 func (b *buffer) moveLeftNoSel() {
 	if b.col > 0 {
-		b.col--
+		b.col = b.lineLayout(b.row).prev(b.col)
 		return
 	}
 	if b.row > 0 {
@@ -351,13 +360,20 @@ func (b *buffer) moveLeftNoSel() {
 // MoveRight increments the column, wrapping to column 0 of the next
 // line when past end-of-line.
 func (b *buffer) MoveRight() {
+	if b.HasSelection() {
+		_, _, r, c := b.normalizedSelection()
+		b.SetCursor(r, c)
+		b.clearSelection()
+		return
+	}
+	b.goalValid = false
 	b.clearSelection()
 	b.moveRightNoSel()
 }
 
 func (b *buffer) moveRightNoSel() {
 	if b.col < len(b.lines[b.row]) {
-		b.col++
+		b.col = b.lineLayout(b.row).next(b.col)
 		return
 	}
 	if b.row < len(b.lines)-1 {
@@ -373,14 +389,21 @@ func (b *buffer) MoveUp() {
 }
 
 func (b *buffer) moveUpNoSel() {
-	if b.row == 0 {
+	if !b.goalValid {
+		b.goalVisual = b.lineLayout(b.row).column(b.col)
+		b.goalValid = true
+	}
+	target := b.row + -1
+	if target < 0 {
 		b.col = 0
 		return
 	}
-	b.row--
-	if b.col > len(b.lines[b.row]) {
+	if target >= len(b.lines) {
 		b.col = len(b.lines[b.row])
+		return
 	}
+	b.row = target
+	b.col = b.lineLayout(target).runeColumn(b.goalVisual)
 }
 
 // MoveDown moves the cursor down one line, clamping the column.
@@ -390,30 +413,40 @@ func (b *buffer) MoveDown() {
 }
 
 func (b *buffer) moveDownNoSel() {
-	if b.row == len(b.lines)-1 {
+	if !b.goalValid {
+		b.goalVisual = b.lineLayout(b.row).column(b.col)
+		b.goalValid = true
+	}
+	target := b.row + 1
+	if target < 0 {
+		b.col = 0
+		return
+	}
+	if target >= len(b.lines) {
 		b.col = len(b.lines[b.row])
 		return
 	}
-	b.row++
-	if b.col > len(b.lines[b.row]) {
-		b.col = len(b.lines[b.row])
-	}
+	b.row = target
+	b.col = b.lineLayout(target).runeColumn(b.goalVisual)
 }
 
 // MoveHome jumps to column 0 on the current line.
 func (b *buffer) MoveHome() {
+	b.goalValid = false
 	b.clearSelection()
 	b.col = 0
 }
 
 // MoveEnd jumps to the end of the current line.
 func (b *buffer) MoveEnd() {
+	b.goalValid = false
 	b.clearSelection()
 	b.col = len(b.lines[b.row])
 }
 
 // MoveBufferStart jumps to (0, 0).
 func (b *buffer) MoveBufferStart() {
+	b.goalValid = false
 	b.clearSelection()
 	b.row = 0
 	b.col = 0
@@ -421,6 +454,7 @@ func (b *buffer) MoveBufferStart() {
 
 // MoveBufferEnd jumps to the end of the last line.
 func (b *buffer) MoveBufferEnd() {
+	b.goalValid = false
 	b.clearSelection()
 	b.row = len(b.lines) - 1
 	b.col = len(b.lines[b.row])
@@ -431,6 +465,7 @@ func (b *buffer) MoveBufferEnd() {
 // of word characters. Crosses line boundaries when at the start of a
 // line, matching what most terminal editors do with Ctrl+Left.
 func (b *buffer) MoveWordLeft() {
+	b.goalValid = false
 	b.clearSelection()
 	b.moveWordLeftNoSel()
 }
@@ -458,6 +493,7 @@ func (b *buffer) moveWordLeftNoSel() {
 // MoveWordRight jumps forward over one word boundary. Mirror of
 // MoveWordLeft.
 func (b *buffer) MoveWordRight() {
+	b.goalValid = false
 	b.clearSelection()
 	b.moveWordRightNoSel()
 }
@@ -485,11 +521,13 @@ func (b *buffer) moveWordRightNoSel() {
 // SelectWordLeft / SelectWordRight are the shift-held counterparts.
 // They set the anchor (if not already) and move without clearing it.
 func (b *buffer) SelectWordLeft() {
+	b.goalValid = false
 	b.ensureAnchor()
 	b.moveWordLeftNoSel()
 }
 
 func (b *buffer) SelectWordRight() {
+	b.goalValid = false
 	b.ensureAnchor()
 	b.moveWordRightNoSel()
 }
@@ -498,129 +536,95 @@ func (b *buffer) SelectWordRight() {
 // boundary. Uses the selection+delete machinery so it integrates with
 // undo and matches what a selection-then-delete would do.
 func (b *buffer) DeleteWordLeft() {
-	b.snapshot()
-	// Drop any existing selection; we're building a fresh range to
-	// delete, anchored at the current cursor.
-	b.anchorSet = false
-	savedRow, savedCol := b.row, b.col
-	// Temporarily treat the move as a selection extension so we can
-	// reuse the multi-line delete path.
-	b.ensureAnchor()
-	b.moveWordLeftNoSel()
-	// Normalize so anchor > cursor (we're deleting leftward).
-	if b.row == savedRow && b.col == savedCol {
-		b.anchorSet = false
+	if b.HasSelection() {
+		b.DeleteSelection()
 		return
 	}
-	b.anchorRow, b.anchorCol = savedRow, savedCol
-	b.deleteSelectionNoSnap()
+	b.beginEdit(editNone)
+	defer b.endEdit()
+	end := cursorPos{b.row, b.col}
+	b.moveWordLeftNoSel()
+	start := cursorPos{b.row, b.col}
+	b.replaceRange(start, end, "")
+	b.anchorSet = false
 }
 
 // DeleteWordRight deletes from the cursor forward to the next word
 // boundary.
 func (b *buffer) DeleteWordRight() {
-	b.snapshot()
-	b.anchorSet = false
-	savedRow, savedCol := b.row, b.col
-	b.ensureAnchor()
-	b.moveWordRightNoSel()
-	if b.row == savedRow && b.col == savedCol {
-		b.anchorSet = false
+	if b.HasSelection() {
+		b.DeleteSelection()
 		return
 	}
-	// anchor at saved position, cursor at the forward boundary --
-	// deleteSelectionNoSnap handles the ordering.
-	b.anchorRow, b.anchorCol = savedRow, savedCol
-	b.deleteSelectionNoSnap()
+	b.beginEdit(editNone)
+	defer b.endEdit()
+	start := cursorPos{b.row, b.col}
+	b.moveWordRightNoSel()
+	end := cursorPos{b.row, b.col}
+	b.replaceRange(start, end, "")
+	b.anchorSet = false
 }
 
 // MoveLineUp swaps the current line with the one above, preserving the
-// cursor column. No-op on the top line. Takes an undo snapshot.
+// cursor column. No-op on the top line. Takes an undo entry.
 func (b *buffer) MoveLineUp() {
-	if b.row <= 0 {
+	if b.row == 0 {
 		return
 	}
-	b.snapshot()
-	b.clearSelection()
-	b.lines[b.row-1], b.lines[b.row] = b.lines[b.row], b.lines[b.row-1]
-	b.row--
-	if b.col > len(b.lines[b.row]) {
-		b.col = len(b.lines[b.row])
-	}
-	b.lastEditKind = editNone
-	b.rev++
+	row, col := b.row, b.col
+	b.beginEdit(editNone)
+	defer b.endEdit()
+	text := string(b.lines[row]) + "\n" + string(b.lines[row-1])
+	b.replaceRange(cursorPos{row - 1, 0}, cursorPos{row, len(b.lines[row])}, text)
+	b.row, b.col = row-1, col
+	b.anchorSet = false
 }
 
 // MoveLineDown swaps the current line with the one below. No-op on the
-// last line. Takes an undo snapshot.
+// last line. Takes an undo entry.
 func (b *buffer) MoveLineDown() {
-	if b.row >= len(b.lines)-1 {
+	if b.row+1 >= len(b.lines) {
 		return
 	}
-	b.snapshot()
-	b.clearSelection()
-	b.lines[b.row+1], b.lines[b.row] = b.lines[b.row], b.lines[b.row+1]
-	b.row++
-	if b.col > len(b.lines[b.row]) {
-		b.col = len(b.lines[b.row])
-	}
-	b.lastEditKind = editNone
-	b.rev++
+	row, col := b.row, b.col
+	b.beginEdit(editNone)
+	defer b.endEdit()
+	text := string(b.lines[row+1]) + "\n" + string(b.lines[row])
+	b.replaceRange(cursorPos{row, 0}, cursorPos{row + 1, len(b.lines[row+1])}, text)
+	b.row, b.col = row+1, col
+	b.anchorSet = false
 }
 
 // DuplicateLineDown inserts a copy of the current line directly below
 // it and moves the cursor onto the copy (matching VSCode's
-// Shift+Alt+Down). Takes an undo snapshot.
+// Shift+Alt+Down). Takes an undo entry.
 func (b *buffer) DuplicateLineDown() {
-	b.snapshot()
-	b.clearSelection()
-	src := append([]rune(nil), b.lines[b.row]...)
-	b.lines = append(b.lines, nil)
-	copy(b.lines[b.row+2:], b.lines[b.row+1:])
-	b.lines[b.row+1] = src
-	b.row++
-	if b.col > len(b.lines[b.row]) {
-		b.col = len(b.lines[b.row])
-	}
-	b.lastEditKind = editNone
-	b.rev++
+	row, col := b.row, b.col
+	b.beginEdit(editNone)
+	defer b.endEdit()
+	end := cursorPos{row, len(b.lines[row])}
+	b.replaceRange(end, end, "\n"+string(b.lines[row]))
+	b.row, b.col = row+1, col
+	b.anchorSet = false
 }
 
 // DuplicateLineUp inserts a copy of the current line directly above it.
-// The cursor stays on the same visible line (which is now the lower
-// copy -- row index +1). Takes an undo snapshot.
+// The cursor stays on the upper copy. Takes an undo entry.
 func (b *buffer) DuplicateLineUp() {
-	b.snapshot()
-	b.clearSelection()
-	src := append([]rune(nil), b.lines[b.row]...)
-	b.lines = append(b.lines, nil)
-	copy(b.lines[b.row+1:], b.lines[b.row:])
-	b.lines[b.row] = src
-	b.row++
-	if b.col > len(b.lines[b.row]) {
-		b.col = len(b.lines[b.row])
-	}
-	b.lastEditKind = editNone
-	b.rev++
+	row, col := b.row, b.col
+	b.beginEdit(editNone)
+	defer b.endEdit()
+	start := cursorPos{row, 0}
+	b.replaceRange(start, start, string(b.lines[row])+"\n")
+	b.row, b.col = row, col
+	b.anchorSet = false
 }
 
 // isWordChar reports whether r belongs inside an identifier-like word
 // run for the purposes of Ctrl+Left/Right navigation. Letters, digits,
 // and underscore count; everything else is a boundary character.
 func isWordChar(r rune) bool {
-	if r == '_' {
-		return true
-	}
-	if r >= '0' && r <= '9' {
-		return true
-	}
-	if r >= 'a' && r <= 'z' {
-		return true
-	}
-	if r >= 'A' && r <= 'Z' {
-		return true
-	}
-	return false
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r)
 }
 
 // --- selection -------------------------------------------------------------
@@ -628,12 +632,14 @@ func isWordChar(r rune) bool {
 // SelectLeft extends the selection one rune to the left, setting the
 // anchor on first call.
 func (b *buffer) SelectLeft() {
+	b.goalValid = false
 	b.ensureAnchor()
 	b.moveLeftNoSel()
 }
 
 // SelectRight extends the selection one rune to the right.
 func (b *buffer) SelectRight() {
+	b.goalValid = false
 	b.ensureAnchor()
 	b.moveRightNoSel()
 }
@@ -652,12 +658,14 @@ func (b *buffer) SelectDown() {
 
 // SelectHome extends the selection to column 0.
 func (b *buffer) SelectHome() {
+	b.goalValid = false
 	b.ensureAnchor()
 	b.col = 0
 }
 
 // SelectEnd extends the selection to the end of the line.
 func (b *buffer) SelectEnd() {
+	b.goalValid = false
 	b.ensureAnchor()
 	b.col = len(b.lines[b.row])
 }
@@ -718,120 +726,78 @@ func (b *buffer) Selection() string {
 // cursor and selection anchor shift right by n when they sit on
 // affected rows so the user's selection visually stays put.
 func (b *buffer) IndentRange(row1, row2, n int) {
-	if n <= 0 {
+	row1 = max(row1, 0)
+	row2 = min(row2, len(b.lines)-1)
+	if n <= 0 || row1 > row2 {
 		return
 	}
-	if row1 < 0 {
-		row1 = 0
+	b.beginEdit(editNone)
+	defer b.endEdit()
+	state := b.cursorState()
+	for row := row2; row >= row1; row-- {
+		pos := cursorPos{row, 0}
+		b.replaceRange(pos, pos, strings.Repeat(" ", n))
 	}
-	if row2 >= len(b.lines) {
-		row2 = len(b.lines) - 1
+	if state.row >= row1 && state.row <= row2 {
+		state.col += n
 	}
-	if row1 > row2 {
-		return
+	if state.anchorSet && state.anchorRow >= row1 && state.anchorRow <= row2 {
+		state.anchorCol += n
 	}
-	b.snapshot()
-	pad := make([]rune, n)
-	for i := range pad {
-		pad[i] = ' '
-	}
-	for r := row1; r <= row2; r++ {
-		line := b.lines[r]
-		newLine := make([]rune, 0, len(line)+n)
-		newLine = append(newLine, pad...)
-		newLine = append(newLine, line...)
-		b.lines[r] = newLine
-	}
-	if b.row >= row1 && b.row <= row2 {
-		b.col += n
-	}
-	if b.anchorSet && b.anchorRow >= row1 && b.anchorRow <= row2 {
-		b.anchorCol += n
-	}
-	b.lastEditKind = editNone
-	b.rev++
+	b.restoreCursor(state)
 }
 
 // DedentRange removes up to n leading spaces from each line in
 // [row1, row2]. Cursor/anchor columns are clamped so they never
 // fall off the start of a shortened line.
 func (b *buffer) DedentRange(row1, row2, n int) {
-	if n <= 0 {
+	row1 = max(row1, 0)
+	row2 = min(row2, len(b.lines)-1)
+	if n <= 0 || row1 > row2 {
 		return
 	}
-	if row1 < 0 {
-		row1 = 0
-	}
-	if row2 >= len(b.lines) {
-		row2 = len(b.lines) - 1
-	}
-	if row1 > row2 {
-		return
-	}
-	b.snapshot()
-	changed := false
-	for r := row1; r <= row2; r++ {
-		line := b.lines[r]
+	b.beginEdit(editNone)
+	defer b.endEdit()
+	state := b.cursorState()
+	for row := row2; row >= row1; row-- {
 		k := 0
-		for k < n && k < len(line) && line[k] == ' ' {
+		cells := 0
+		for k < len(b.lines[row]) && cells < n {
+			r := b.lines[row][k]
+			if r == ' ' {
+				cells++
+			} else if r == '\t' {
+				cells += editorTabStop - cells%editorTabStop
+			} else {
+				break
+			}
 			k++
 		}
 		if k == 0 {
 			continue
 		}
-		changed = true
-		b.lines[r] = line[k:]
-		if b.row == r {
-			if b.col >= k {
-				b.col -= k
-			} else {
-				b.col = 0
-			}
+		b.replaceRange(cursorPos{row, 0}, cursorPos{row, k}, "")
+		if state.row == row {
+			state.col = max(0, state.col-k)
 		}
-		if b.anchorSet && b.anchorRow == r {
-			if b.anchorCol >= k {
-				b.anchorCol -= k
-			} else {
-				b.anchorCol = 0
-			}
+		if state.anchorSet && state.anchorRow == row {
+			state.anchorCol = max(0, state.anchorCol-k)
 		}
 	}
-	b.lastEditKind = editNone
-	if changed {
-		b.rev++
-	}
+	b.restoreCursor(state)
 }
 
-// DeleteSelection removes the active selection, taking an undo snapshot
+// DeleteSelection removes the active selection, taking an undo entry
 // before mutating.
 func (b *buffer) DeleteSelection() {
 	if !b.HasSelection() {
 		return
 	}
-	b.snapshot()
-	b.deleteSelectionNoSnap()
-}
-
-func (b *buffer) deleteSelectionNoSnap() {
-	if !b.HasSelection() {
-		b.anchorSet = false
-		return
-	}
-	r1, c1, r2, c2 := b.normalizedSelection()
-	if r1 == r2 {
-		line := b.lines[r1]
-		b.lines[r1] = append(line[:c1], line[c2:]...)
-	} else {
-		head := append([]rune(nil), b.lines[r1][:c1]...)
-		tail := append([]rune(nil), b.lines[r2][c2:]...)
-		head = append(head, tail...)
-		b.lines[r1] = head
-		b.lines = append(b.lines[:r1+1], b.lines[r2+1:]...)
-	}
-	b.row = r1
-	b.col = c1
+	b.beginEdit(editNone)
+	defer b.endEdit()
+	start, end := b.insertionRange()
+	b.replaceRange(start, end, "")
 	b.anchorSet = false
-	b.rev++
 }
 
 // normalizedSelection returns (startRow, startCol, endRow, endCol)
@@ -865,98 +831,4 @@ func (b *buffer) ensureAnchor() {
 	b.anchorRow = b.row
 	b.anchorCol = b.col
 	b.anchorSet = true
-}
-
-// --- undo / redo -----------------------------------------------------------
-
-// snapshot pushes the current buffer state onto the undo stack and
-// clears the redo stack (a new edit abandons any redo future). Always
-// breaks any in-progress coalesce run, so callers of plain snapshot()
-// get a distinct undo step.
-func (b *buffer) snapshot() {
-	b.pushSnapshot()
-	b.lastEditKind = editNone
-}
-
-// snapshotKind is the coalescing variant used by single-rune edits
-// (Insert / Backspace / Delete). If the previous edit was the same
-// kind and the cursor is exactly where that edit left it, no new
-// snapshot is pushed -- the run is still covered by the pre-run
-// snapshot, so Undo rolls back the whole word / whole run of deletes.
-// Callers must call recordEdit after mutating to update the coalesce
-// anchor.
-func (b *buffer) snapshotKind(kind editKind) {
-	if kind != editNone && kind == b.lastEditKind &&
-		b.row == b.lastEditRow && b.col == b.lastEditCol {
-		// Coalesce: reuse the existing top-of-stack snapshot. Still
-		// drop redo because we're extending the current edit forward.
-		b.redo = nil
-		return
-	}
-	b.pushSnapshot()
-}
-
-func (b *buffer) pushSnapshot() {
-	snap := bufferSnapshot{text: b.Text(), row: b.row, col: b.col}
-	b.undo = append(b.undo, snap)
-	if len(b.undo) > maxUndoDepth {
-		// Drop the oldest entries; bounded slice keeps the cost O(1)
-		// per push amortized because the cap is small.
-		n := len(b.undo) - maxUndoDepth
-		b.undo = append(b.undo[:0], b.undo[n:]...)
-	}
-	b.redo = nil
-}
-
-func (b *buffer) recordEdit(kind editKind) {
-	b.lastEditKind = kind
-	b.lastEditRow = b.row
-	b.lastEditCol = b.col
-}
-
-// Undo reverts the most recent mutation. Pushes the current state
-// onto the redo stack so Redo can round-trip.
-func (b *buffer) Undo() bool {
-	if len(b.undo) == 0 {
-		return false
-	}
-	current := bufferSnapshot{text: b.Text(), row: b.row, col: b.col}
-	last := b.undo[len(b.undo)-1]
-	b.undo = b.undo[:len(b.undo)-1]
-	b.redo = append(b.redo, current)
-	b.setTextRaw(last.text)
-	b.row = last.row
-	b.col = last.col
-	if b.row >= len(b.lines) {
-		b.row = len(b.lines) - 1
-	}
-	if b.col > len(b.lines[b.row]) {
-		b.col = len(b.lines[b.row])
-	}
-	b.anchorSet = false
-	b.lastEditKind = editNone
-	return true
-}
-
-// Redo replays the most recently undone mutation.
-func (b *buffer) Redo() bool {
-	if len(b.redo) == 0 {
-		return false
-	}
-	current := bufferSnapshot{text: b.Text(), row: b.row, col: b.col}
-	next := b.redo[len(b.redo)-1]
-	b.redo = b.redo[:len(b.redo)-1]
-	b.undo = append(b.undo, current)
-	b.setTextRaw(next.text)
-	b.row = next.row
-	b.col = next.col
-	if b.row >= len(b.lines) {
-		b.row = len(b.lines) - 1
-	}
-	if b.col > len(b.lines[b.row]) {
-		b.col = len(b.lines[b.row])
-	}
-	b.anchorSet = false
-	b.lastEditKind = editNone
-	return true
 }

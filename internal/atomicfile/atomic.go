@@ -1,4 +1,4 @@
-package cli
+package atomicfile
 
 import (
 	"errors"
@@ -8,16 +8,16 @@ import (
 	"path/filepath"
 )
 
-// atomicOutput writes beside the destination and replaces it only after the
-// operation succeeds. A failed query therefore cannot truncate a valid file.
-type atomicOutput struct {
+// Output writes beside the destination and replaces it only after the
+// operation succeeds. Callers must abort unfinished outputs with Finish(false).
+type Output struct {
 	file        *os.File
 	temporary   string
 	destination string
 	done        bool
 }
 
-func createAtomicOutput(destination string) (*atomicOutput, error) {
+func Create(destination string) (*Output, error) {
 	dir := filepath.Dir(destination)
 	base := filepath.Base(destination)
 	file, err := os.CreateTemp(dir, "."+base+".tmp-*")
@@ -35,16 +35,30 @@ func createAtomicOutput(destination string) (*atomicOutput, error) {
 		_ = removeIfPresent(file.Name())
 		return nil, statErr
 	}
-	return &atomicOutput{
+	return &Output{
 		file:        file,
 		temporary:   file.Name(),
 		destination: destination,
 	}, nil
 }
 
-func (o *atomicOutput) Writer() io.Writer { return o.file }
+func (o *Output) Writer() io.Writer { return o.file }
 
-func (o *atomicOutput) Finish(commit bool) error {
+// WriteFile replaces destination only after all bytes have been written and
+// synced. Existing permissions are preserved; new files are private.
+func WriteFile(destination string, data []byte) error {
+	out, err := Create(destination)
+	if err != nil {
+		return err
+	}
+	defer out.Finish(false)
+	if _, err := out.Writer().Write(data); err != nil {
+		return err
+	}
+	return out.Finish(true)
+}
+
+func (o *Output) Finish(commit bool) error {
 	if o == nil || o.done {
 		return nil
 	}

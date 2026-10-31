@@ -18,7 +18,13 @@ type OverwriteGuard struct {
 
 // Check reports whether a write to path should proceed.
 func (g *OverwriteGuard) Check(path string) bool {
-	if _, err := os.Stat(path); err != nil {
+	_, err := os.Stat(path)
+	return g.CheckExists(path, err == nil)
+}
+
+// CheckExists applies a target inspection performed by the caller's worker.
+func (g *OverwriteGuard) CheckExists(path string, exists bool) bool {
+	if !exists {
 		return true
 	}
 	if g.armedPath == path {

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Nulifyer/sqlgo/internal/atomicfile"
 	"github.com/Nulifyer/sqlgo/internal/config"
 	"github.com/Nulifyer/sqlgo/internal/connectutil"
 	"github.com/Nulifyer/sqlgo/internal/db"
@@ -553,9 +554,9 @@ func connsExport(argv []string, stdout, stderr io.Writer) ExitCode {
 	}
 	defer st.Close()
 	var w io.Writer = stdout
-	var atomic *atomicOutput
+	var atomic *atomicfile.Output
 	if out != "" {
-		atomic, err = createAtomicOutput(out)
+		atomic, err = atomicfile.Create(out)
 		if err != nil {
 			stderrf(stderr, "create %s: %v", out, err)
 			return ExitUsage

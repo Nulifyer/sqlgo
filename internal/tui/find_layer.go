@@ -1,5 +1,7 @@
 package tui
 
+import "strings"
+
 // findLayer drives the editor's find/replace overlay. Two single-
 // line inputs (Find, Replace) with Tab to toggle focus. Matches
 // live on the editor so highlights draw alongside syntax/selection.
@@ -66,6 +68,14 @@ func (fl *findLayer) Draw(a *app, c *cellbuf) {
 	if statusText == "" {
 		statusText = fl.defaultStatus(m.editor)
 	}
+	options := "Alt+C match case: off  Alt+W whole word: off"
+	if m.editor.searchMatchCase {
+		options = "Alt+C match case: on  Alt+W whole word: off"
+	}
+	if m.editor.searchWholeWord {
+		options = strings.ReplaceAll(options, "word: off", "word: on")
+	}
+	c.WriteAt(row+3, innerCol, truncate(options, boxW-4))
 	c.WriteAt(row+4, innerCol, truncate(statusText, boxW-4))
 	c.WriteAt(row+5, innerCol, truncate("↵=next  ⇤=prev  ⇥=field  Ctrl+R=all  Esc=close", boxW-4))
 }
@@ -96,6 +106,9 @@ func (fl *findLayer) defaultStatus(ed *editor) string {
 	if fl.find.String() == "" {
 		return "type to search; Esc closes"
 	}
+	if ed.searchBusy {
+		return "searching…"
+	}
 	if ed.MatchCount() == 0 {
 		return "no matches"
 	}
@@ -106,6 +119,19 @@ func (fl *findLayer) HandleKey(a *app, k Key) {
 	m := a.mainLayerPtr()
 	ed := m.editor
 
+	if k.Alt && k.Kind == KeyRune {
+		switch k.Rune {
+		case 'c', 'C':
+			ed.searchMatchCase = !ed.searchMatchCase
+		case 'w', 'W':
+			ed.searchWholeWord = !ed.searchWholeWord
+		default:
+			return
+		}
+		ed.requestSearch(a, fl.find.String())
+		fl.status = ""
+		return
+	}
 	switch k.Kind {
 	case KeyEsc:
 		ed.ClearSearch()
@@ -125,7 +151,11 @@ func (fl *findLayer) HandleKey(a *app, k Key) {
 		return
 	case KeyEnter:
 		if fl.activeField == findFieldReplace {
-			if ed.ReplaceCurrent(fl.replace.String()) {
+			if ed.searchBusy {
+				fl.status = "searching…"
+				return
+			}
+			if ed.replaceCurrentInUI(a, fl.replace.String()) {
 				fl.status = ""
 			} else {
 				fl.status = "nothing to replace"
@@ -140,6 +170,20 @@ func (fl *findLayer) HandleKey(a *app, k Key) {
 	// Ctrl+R: replace all. Handled before input.handle() because
 	// Ctrl runes return false from handle.
 	if k.Ctrl && k.Kind == KeyRune && (k.Rune == 'r' || k.Rune == 'R') {
+		if ed.searchBusy {
+			fl.status = "searching…"
+			return
+		}
+		if ed.largeAnalysis() && a.asyncCh != nil {
+			ed.replaceAllAsync(a, fl.replace.String(), func(n int, err error) {
+				if err != nil {
+					fl.status = err.Error()
+				} else {
+					fl.status = "replaced " + itoa(n)
+				}
+			})
+			return
+		}
 		n := ed.ReplaceAll(fl.replace.String())
 		if n == 0 {
 			fl.status = "nothing to replace"
@@ -159,7 +203,7 @@ func (fl *findLayer) HandleKey(a *app, k Key) {
 	if target.Handle(k) {
 		fl.status = ""
 		if fl.activeField == findFieldFind {
-			ed.SetSearch(fl.find.String())
+			ed.requestSearch(a, fl.find.String())
 		}
 	}
 }
@@ -180,7 +224,7 @@ func (fl *findLayer) HandleInput(a *app, msg InputMsg) bool {
 	}
 	fl.status = ""
 	if fl.activeField == findFieldFind {
-		a.mainLayerPtr().editor.SetSearch(fl.find.String())
+		a.mainLayerPtr().editor.requestSearch(a, fl.find.String())
 	}
 	return true
 }

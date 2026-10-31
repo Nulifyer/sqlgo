@@ -21,11 +21,8 @@ func (e *editor) addCursorRelative(delta int) {
 	if target < 0 || target >= e.buf.LineCount() {
 		return
 	}
-	line := e.buf.Line(target)
-	tc := col
-	if tc > len(line) {
-		tc = len(line)
-	}
+	// Column-add follows the visible caret column, including tabs and wide glyphs.
+	tc := e.buf.lineLayout(target).runeColumn(e.buf.lineLayout(row).column(col))
 	// Skip duplicates (primary or existing extra at same pos).
 	if target == row && tc == col {
 		return
@@ -49,9 +46,6 @@ func (e *editor) collapseCursors() {
 // position; this helper moves the primary between positions and
 // captures the resulting location.
 //
-// Returns true if any mutation happened so the caller can skip
-// scroll updates when it was a no-op.
-//
 // Precondition: v1 requires all cursors on DIFFERENT rows. The
 // constraint is enforced on addCursorRelative.
 func (e *editor) applyToAllCursors(fn func()) {
@@ -59,6 +53,12 @@ func (e *editor) applyToAllCursors(fn func()) {
 		fn()
 		return
 	}
+	e.buf.beginEdit(editNone)
+	e.buf.pending.beforeExtras = append([]cursorPos(nil), e.extraCursors...)
+	defer func() {
+		e.buf.pending.afterExtras = append([]cursorPos(nil), e.extraCursors...)
+		e.buf.endEdit()
+	}()
 
 	// Gather all positions.
 	row, col := e.buf.Cursor()
@@ -96,4 +96,24 @@ func (e *editor) applyToAllCursors(fn func()) {
 	for _, p := range newPositions[1:] {
 		e.extraCursors = append(e.extraCursors, p)
 	}
+	e.normalizeCursors()
+}
+
+// normalizeCursors enforces the current one-cursor-per-row contract after
+// movement, which can cross line boundaries even without changing the text.
+func (e *editor) normalizeCursors() {
+	row, _ := e.buf.Cursor()
+	seen := map[int]bool{row: true}
+	valid := e.extraCursors[:0]
+	for _, p := range e.extraCursors {
+		if p.row < 0 || p.row >= e.buf.LineCount() || seen[p.row] {
+			continue
+		}
+		p.col = max(0, min(p.col, len(e.buf.Line(p.row))))
+		layout := e.buf.lineLayout(p.row)
+		p.col = layout.runeColumn(layout.column(p.col))
+		seen[p.row] = true
+		valid = append(valid, p)
+	}
+	e.extraCursors = valid
 }

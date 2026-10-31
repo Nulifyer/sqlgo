@@ -1,6 +1,7 @@
 package term
 
 import (
+	"github.com/clipperhouse/uax29/v2/graphemes"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -68,9 +69,9 @@ type Cell struct {
 	R     rune
 	Style Style
 	FG    int
-	// Combining holds zero-width runes (combining marks, ZWJ) that
-	// attach to R. Emitted after R during flush so "cafe" + U+0301
-	// renders as "cafe". nil for the common case.
+	// Combining holds the remaining code points of the grapheme headed by R.
+	// This includes combining marks and the rest of emoji/ZWJ sequences.
+	// Flush emits the complete cluster once; nil is the common ASCII case.
 	Combining []rune
 	Touched   bool
 	WideCont  bool
@@ -141,59 +142,39 @@ func (c *Cellbuf) WriteAt(row, col int, s string) {
 // can emit runs with different styles back-to-back without saving and
 // restoring a pen each time.
 //
-// Width awareness: each rune's terminal column width is resolved via
-// go-runewidth.
-//
-//   - width 0 (combining marks, zero-width joiners): dropped. A proper
-//     implementation would attach the mark to the previous cell as a
-//     combining rune list; for now we accept the visual loss so the
-//     grid stays in sync with the terminal cursor.
-//   - width 1: writes one cell, advances col by 1.
-//   - width 2: writes the head rune at col and a wideCont placeholder
-//     at col+1 (same style, r=0), advances col by 2. A subsequent
-//     write at col+1 would cleanly replace the continuation.
-//
-// Writes that would extend past the right edge of the buffer get
-// silently clipped, including the head of a wide rune that only has
-// room for one of its two columns -- the caller is responsible for
-// choosing not to land a wide rune on the last column.
+// Grapheme clusters occupy one or two cells. The first rune occupies the
+// head cell and the remaining runes are emitted with it, preserving combining
+// accents and emoji sequences. Zero-width controls are ignored.
 func (c *Cellbuf) WriteStyled(row, col int, s string, st Style) {
-	for _, r := range s {
-		w := RuneDisplayWidth(r)
-		switch w {
-		case 0:
-			// Combining mark / ZWJ: attach to the previous cell
-			// (the last narrow rune written, or the head of a
-			// wide glyph). If no base cell exists yet the mark
-			// is dropped -- leading combining marks have no
-			// anchor.
+	it := graphemes.FromString(s)
+	for it.Next() {
+		cluster := it.Value()
+		rs := []rune(cluster)
+		if len(rs) == 0 {
+			continue
+		}
+		width := StringDisplayWidth(cluster)
+		if width == 0 {
+			if rs[0] < 0x20 || (rs[0] >= 0x7f && rs[0] <= 0x9f) {
+				continue
+			}
 			if p := c.At(row, col-1); p != nil && p.R != 0 && !p.WideCont {
-				p.Combining = append(p.Combining, r)
+				p.Combining = append(p.Combining, rs...)
 			} else if p := c.At(row, col-2); p != nil && p.R != 0 {
-				// Wide glyph case: combining mark anchors on
-				// the head two cells back.
-				p.Combining = append(p.Combining, r)
+				p.Combining = append(p.Combining, rs...)
 			}
 			continue
-		case 2:
-			// Head cell with the rune.
-			if p := c.At(row, col); p != nil {
-				*p = Cell{R: r, Style: st, FG: st.FG, Touched: true}
-			}
-			// Continuation cell; no rune, just marks the column as
-			// occupied by the wide glyph so later writes don't try
-			// to reuse it and the flush diff can detect stale
-			// right-halves.
+		}
+		width = min(width, 2)
+		if p := c.At(row, col); p != nil {
+			*p = Cell{R: rs[0], Combining: append([]rune(nil), rs[1:]...), Style: st, FG: st.FG, Touched: true}
+		}
+		if width == 2 {
 			if p := c.At(row, col+1); p != nil {
 				*p = Cell{Style: st, FG: st.FG, Touched: true, WideCont: true}
 			}
-			col += 2
-		default:
-			if p := c.At(row, col); p != nil {
-				*p = Cell{R: r, Style: st, FG: st.FG, Touched: true}
-			}
-			col++
 		}
+		col += width
 	}
 }
 

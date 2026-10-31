@@ -1,17 +1,27 @@
 package tui
 
 import (
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
+
+	"github.com/Nulifyer/sqlgo/internal/atomicfile"
 )
 
 type documentService struct{}
 
 type loadedDocument struct {
-	Path string
-	Text string
-	Size int
+	Path        string
+	Text        string
+	Size        int
+	Format      documentFormat
+	Fingerprint documentFingerprint
+	DiskKnown   bool
+	lines       [][]rune
 }
 
 func (documentService) NormalizePath(path string) string {
@@ -34,7 +44,7 @@ func (d documentService) FindOpenTab(sessions []*session, path string) int {
 		if sess == nil || sess.sourcePath == "" {
 			continue
 		}
-		if d.NormalizePath(sess.sourcePath) == want {
+		if actual := d.NormalizePath(sess.sourcePath); actual == want || (runtime.GOOS == "windows" && strings.EqualFold(actual, want)) {
 			return i
 		}
 	}
@@ -46,11 +56,18 @@ func (d documentService) Load(path string) (loadedDocument, error) {
 	if path == "" {
 		return loadedDocument{}, fmt.Errorf("path is required")
 	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return loadedDocument{}, err
 	}
-	return loadedDocument{Path: path, Text: string(data), Size: len(data)}, nil
+	text, format, err := decodeDocument(data)
+	if err != nil {
+		return loadedDocument{}, err
+	}
+	return loadedDocument{Path: path, Text: text, Size: len(data), Format: format, Fingerprint: documentFingerprint{Exists: true, Hash: sha256.Sum256(data)}, DiskKnown: true, lines: splitBufferText(text)}, nil
 }
 
 func (d documentService) ApplyLoaded(sess *session, doc loadedDocument) error {
@@ -58,29 +75,103 @@ func (d documentService) ApplyLoaded(sess *session, doc loadedDocument) error {
 		return fmt.Errorf("document session is unavailable")
 	}
 	doc.Path = d.NormalizePath(doc.Path)
-	sess.editor.buf.SetText(doc.Text)
+	sess.editor.resetTransientState()
+	sess.editor.buf.resetPreparedText(doc.Text, doc.lines)
+	sess.editor.buf.MoveBufferStart()
 	sess.editor.ClearErrorLocation()
+	sess.docGen++
+	sess.format = doc.Format
+	sess.diskFingerprint, sess.diskKnown = doc.Fingerprint, doc.DiskKnown
 	sess.sourcePath = doc.Path
-	sess.savedText = doc.Text
+	sess.savedText = normalizeEditorLineEndings(doc.Text)
 	sess.title = filepath.Base(doc.Path)
 	return nil
 }
 
-func (d documentService) Save(sess *session, path string) (loadedDocument, error) {
+// documentSnapshot is immutable and can be encoded/written on a worker while
+// the session continues to accept edits on the UI goroutine.
+type documentSnapshot struct {
+	Path, Text    string
+	Format        documentFormat
+	Expected      documentFingerprint
+	CheckExpected bool
+}
+type documentFingerprint struct {
+	Exists bool
+	Hash   [32]byte
+}
+
+var errDocumentConflict = errors.New("file changed on disk; reload it or use Save As")
+
+func fingerprintDocument(path string) (documentFingerprint, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return documentFingerprint{}, nil
+	}
+	if err != nil {
+		return documentFingerprint{}, err
+	}
+	return documentFingerprint{Exists: true, Hash: sha256.Sum256(data)}, nil
+}
+func (d documentService) Snapshot(sess *session, path string) (documentSnapshot, error) {
 	if sess == nil || sess.editor == nil {
-		return loadedDocument{}, fmt.Errorf("document session is unavailable")
+		return documentSnapshot{}, fmt.Errorf("document session is unavailable")
 	}
 	path = d.NormalizePath(path)
 	if path == "" {
-		return loadedDocument{}, fmt.Errorf("path is required")
+		return documentSnapshot{}, fmt.Errorf("path is required")
 	}
-	text := sess.editor.buf.Text()
-	if err := os.WriteFile(path, []byte(text), 0644); err != nil {
+	return documentSnapshot{Path: path, Text: sess.editor.buf.Text(), Format: sess.format,
+		Expected: sess.diskFingerprint, CheckExpected: sess.diskKnown && path == sess.sourcePath}, nil
+}
+func (documentService) Write(snapshot documentSnapshot) (loadedDocument, error) {
+	if resolved, err := filepath.EvalSymlinks(snapshot.Path); err == nil {
+		snapshot.Path = resolved
+	}
+	before, err := fingerprintDocument(snapshot.Path)
+	if err != nil {
 		return loadedDocument{}, err
 	}
-	doc := loadedDocument{Path: path, Text: text, Size: len(text)}
+	if snapshot.CheckExpected && before != snapshot.Expected {
+		return loadedDocument{}, errDocumentConflict
+	}
+	data := encodeDocument(snapshot.Text, snapshot.Format)
+	out, err := atomicfile.Create(snapshot.Path)
+	if err != nil {
+		return loadedDocument{}, err
+	}
+	defer out.Finish(false)
+	if _, err = out.Writer().Write(data); err != nil {
+		return loadedDocument{}, err
+	}
+	current, err := fingerprintDocument(snapshot.Path)
+	if err != nil {
+		return loadedDocument{}, err
+	}
+	if current != before {
+		return loadedDocument{}, errDocumentConflict
+	}
+	if err = out.Finish(true); err != nil {
+		return loadedDocument{}, err
+	}
+	return loadedDocument{Path: snapshot.Path, Text: snapshot.Text, Size: len(data), Format: snapshot.Format,
+		Fingerprint: documentFingerprint{Exists: true, Hash: sha256.Sum256(data)}, DiskKnown: true}, nil
+}
+func (documentService) ApplySaved(sess *session, doc loadedDocument) {
 	sess.sourcePath = doc.Path
 	sess.savedText = doc.Text
+	sess.format = doc.Format
+	sess.diskFingerprint, sess.diskKnown = doc.Fingerprint, doc.DiskKnown
 	sess.title = filepath.Base(doc.Path)
-	return doc, nil
+}
+func (d documentService) Save(sess *session, path string) (loadedDocument, error) {
+	snapshot, err := d.Snapshot(sess, path)
+	if err != nil {
+		return loadedDocument{}, err
+	}
+	doc, err := d.Write(snapshot)
+	if err == nil {
+		d.ApplySaved(sess, doc)
+	}
+	return doc, err
 }

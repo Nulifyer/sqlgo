@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Nulifyer/sqlgo/internal/atomicfile"
 	"github.com/Nulifyer/sqlgo/internal/config"
 	"github.com/Nulifyer/sqlgo/internal/connectutil"
 	"github.com/Nulifyer/sqlgo/internal/db"
@@ -176,7 +177,7 @@ func buildRunOptions(flags *commonFlags, stdin io.Reader, stdout, stderr io.Writ
 	opts.format = format
 
 	if flags.Output != "" {
-		atomic, err := createAtomicOutput(flags.Output)
+		atomic, err := atomicfile.Create(flags.Output)
 		if err != nil {
 			return nil, ExitUsage, fmt.Errorf("create %s: %w", flags.Output, err)
 		}

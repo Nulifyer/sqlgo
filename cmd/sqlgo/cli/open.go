@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Nulifyer/sqlgo/internal/atomicfile"
 	"github.com/Nulifyer/sqlgo/internal/config"
 	"github.com/Nulifyer/sqlgo/internal/db"
 	"github.com/Nulifyer/sqlgo/internal/output"
@@ -173,7 +174,7 @@ func runOpen(argv []string, stdin io.Reader, stdout, stderr io.Writer) ExitCode 
 	var outClose func() error
 	var outFinish func(bool) error
 	if outPath != "" {
-		atomic, err := createAtomicOutput(outPath)
+		atomic, err := atomicfile.Create(outPath)
 		if err != nil {
 			stderrf(stderr, "create %s: %v", outPath, err)
 			return ExitUsage

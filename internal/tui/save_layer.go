@@ -23,6 +23,7 @@ type saveLayer struct {
 	// initDone is flipped on first Draw so the picker's OnDirChange
 	// binds to *app exactly once and the initial scan fires.
 	initDone bool
+	checking bool
 }
 
 // newSaveLayer constructs a save dialog seeded from seed (typically the
@@ -180,6 +181,9 @@ func (sl *saveLayer) HandleInput(a *app, msg InputMsg) bool {
 }
 
 func (sl *saveLayer) save(a *app) {
+	if sl.checking {
+		return
+	}
 	name := strings.TrimSpace(sl.picker.NameInput.String())
 	if name == "" {
 		sl.status = "filename is required"
@@ -199,27 +203,55 @@ func (sl *saveLayer) save(a *app) {
 		return
 	}
 
-	parent := filepath.Dir(full)
-	if info, err := os.Stat(parent); err != nil || !info.IsDir() {
-		sl.status = "directory does not exist: " + parent
-		return
-	}
-
-	if full != sess.sourcePath {
-		if !sl.picker.Guard.Check(full) {
-			sl.status = "file exists -- Enter to overwrite, edit path to cancel"
-			return
+	sl.checking = true
+	sl.status = "checking save target…"
+	a.runBackground(func() func(*app) {
+		target := full
+		if resolved, err := filepath.EvalSymlinks(full); err == nil {
+			target = resolved
 		}
-	}
-
-	doc, err := a.documents.Save(sess, full)
-	if err != nil {
-		sl.status = "write failed: " + err.Error()
-		return
-	}
-	recordDir(a, store.LastDirSave, filepath.Dir(full))
-	a.popLayer()
-	m.status = fmt.Sprintf("saved %d bytes to %s", doc.Size, doc.Path)
+		parent := filepath.Dir(full)
+		var inspectErr error
+		if info, err := os.Stat(parent); err != nil || !info.IsDir() {
+			inspectErr = fmt.Errorf("directory does not exist: %s", parent)
+		}
+		var fingerprint documentFingerprint
+		if inspectErr == nil {
+			fingerprint, inspectErr = fingerprintDocument(target)
+		}
+		return func(a *app) {
+			sl.checking = false
+			if a.topLayer() != sl || a.documents.NormalizePath(sl.picker.Path()) != full || !a.hasSession(sess) {
+				return
+			}
+			if inspectErr != nil {
+				sl.status = inspectErr.Error()
+				return
+			}
+			if idx := a.documents.FindOpenTab(a.mainLayerPtr().sessions, target); idx >= 0 && a.mainLayerPtr().sessions[idx] != sess {
+				sl.status = "another tab already has " + filepath.Base(target) + " open"
+				return
+			}
+			if target != sess.sourcePath && !sl.picker.Guard.CheckExists(target, fingerprint.Exists) {
+				sl.status = "file exists -- Enter to overwrite, edit path to cancel"
+				return
+			}
+			snapshot, err := a.documents.Snapshot(sess, target)
+			if err != nil {
+				sl.status = err.Error()
+				return
+			}
+			if !snapshot.CheckExpected {
+				snapshot.Expected, snapshot.CheckExpected = fingerprint, true
+			}
+			a.popLayer()
+			if sess.saveBusy {
+				a.mainLayerPtr().status = "save already in progress; editing remains available"
+				return
+			}
+			a.saveDocumentSnapshot(sess, snapshot)
+		}
+	})
 }
 
 func (sl *saveLayer) Hints(a *app) string {

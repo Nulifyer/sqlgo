@@ -43,19 +43,33 @@ type editor struct {
 
 	// complete is the live autocomplete popup or nil. One-shot:
 	// typing after open dismisses (no prefix refinement).
-	complete *completionState
+	complete                        *completionState
+	completionGeneration            uint64
+	completionRequest               uint64
+	completionBusy, completionAgain bool
 
 	// Find/replace state. findLayer writes these; empty needle =
 	// no search. Draw paints matches with a dim bg and the
 	// current one with a stronger accent.
-	searchNeedle string
-	matches      []matchRange
-	currentMatch int // -1 when empty
+	searchNeedle                     string
+	lastSearch                       string
+	searchMatchCase, searchWholeWord bool
+	searchRevision, searchGeneration uint64
+	searchBusy                       bool
+	matchRows                        map[int][]indexedMatch
+	pageHeight                       int
+	matches                          []matchRange
+	currentMatch                     int // -1 when empty
 
 	// extraCursors holds secondary cursor positions for column-
 	// add multi-cursor edits. Primary cursor lives on the
 	// buffer. v1 invariant: at most one cursor per row.
-	extraCursors []cursorPos
+	extraCursors   []cursorPos
+	syntax         []editorSyntaxLine
+	syntaxRevision uint64
+	syntaxBusy     bool
+	formatBusy     bool
+	replaceBusy    bool
 }
 
 // matchRange is one find/replace hit. row/col are rune indices;
@@ -68,6 +82,23 @@ type matchRange struct {
 
 func newEditor() *editor {
 	return &editor{buf: newBuffer()}
+}
+
+// replaceText is an undoable whole-document edit. Transient positions belong to
+// the old contents and must not survive the replacement.
+func (e *editor) replaceText(text string) {
+	e.resetTransientState()
+	e.buf.SetText(text)
+}
+
+func (e *editor) resetTransientState() {
+	e.completionGeneration++
+	e.collapseCursors()
+	e.complete = nil
+	e.ClearSearch()
+	e.lastSearch = ""
+	e.ClearErrorLocation()
+	e.scrollRow, e.scrollCol = 0, 0
 }
 
 // SetErrorLocation stores the most recent query error location for this
@@ -98,6 +129,7 @@ func (e *editor) hasErrorLocation() bool {
 // handleInsert applies one keypress. Returns true if consumed.
 // nil app is fine (tests); clipboard calls become no-ops.
 func (e *editor) handleInsert(a *app, k Key) bool {
+	e.completionGeneration++
 	// Track buffer mutation cheaply while an error marker exists so the
 	// first edit can invalidate the marker without rebuilding the whole
 	// buffer string on every keypress.
@@ -282,15 +314,22 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		case 'x':
 			e.collapseCursors()
 			if sel := e.buf.Selection(); sel != "" && a != nil && a.clipboard != nil {
-				_ = a.clipboard.Copy(sel)
-				e.buf.DeleteSelection()
+				if err := a.clipboard.Copy(sel); err != nil {
+					if len(a.layers) > 0 {
+						a.mainLayerPtr().status = "cut: " + err.Error()
+					}
+				} else {
+					e.buf.DeleteSelection()
+				}
 			}
 			return true
 		case 'v':
 			e.collapseCursors()
 			if a != nil && a.clipboard != nil {
 				if text, err := a.clipboard.Paste(); err == nil && text != "" {
-					e.buf.InsertText(text)
+					if text = sanitizeEditorPasteText(text); text != "" {
+						e.buf.InsertText(text)
+					}
 				}
 			}
 			return true
@@ -302,12 +341,16 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 			// term.MakeRaw disables ISIG on posix and ReadConsoleW
 			// on Windows delivers ^Z as a raw byte, so Ctrl+Z is
 			// safe to use for undo.
-			e.collapseCursors()
-			e.buf.Undo()
+			if e.buf.Undo() {
+				e.extraCursors = append([]cursorPos(nil), e.buf.restoredExtras...)
+				e.normalizeCursors()
+			}
 			return true
 		case 'y':
-			e.collapseCursors()
-			e.buf.Redo()
+			if e.buf.Redo() {
+				e.extraCursors = append([]cursorPos(nil), e.buf.restoredExtras...)
+				e.normalizeCursors()
+			}
 			return true
 		case 'd':
 			// Ctrl+D: if no selection, select the word under the
@@ -358,7 +401,50 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 		// Newlines break the "at most one cursor per row"
 		// invariant. Collapse first.
 		e.collapseCursors()
-		e.buf.InsertNewline()
+		row, col := e.buf.Cursor()
+		if e.buf.HasSelection() {
+			row, col, _, _ = e.buf.normalizedSelection()
+		}
+		line := e.buf.Line(row)
+		indent := 0
+		for indent < col && (line[indent] == ' ' || line[indent] == '\t') {
+			indent++
+		}
+		e.buf.InsertText("\n" + string(line[:indent]))
+		return true
+	case KeyPgUp, KeyPgDn:
+		e.collapseCursors()
+		page := e.pageHeight
+		if page <= 0 {
+			page = 20
+		}
+		for i := 0; i < page; i++ {
+			if k.Kind == KeyPgUp {
+				if k.Shift {
+					e.buf.SelectUp()
+				} else {
+					e.buf.MoveUp()
+				}
+			} else {
+				if k.Shift {
+					e.buf.SelectDown()
+				} else {
+					e.buf.MoveDown()
+				}
+			}
+		}
+		return true
+	case KeyF3:
+		if !e.HasSearch() && e.lastSearch != "" {
+			e.requestSearch(a, e.lastSearch)
+		}
+		if !e.searchBusy {
+			if k.Shift {
+				e.PrevMatch()
+			} else {
+				e.NextMatch()
+			}
+		}
 		return true
 	case KeyBackspace:
 		if e.hasMultiCursor() {
@@ -449,10 +535,9 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 			}
 		}
 		e.applyToAllCursors(func() {
-			_, col := e.buf.Cursor()
-			for n := softTabWidth - (col % softTabWidth); n > 0; n-- {
-				e.buf.Insert(' ')
-			}
+			start, _ := e.buf.insertionRange()
+			visual := e.buf.lineLayout(start.row).column(start.col)
+			e.buf.InsertText(strings.Repeat(" ", softTabWidth-visual%softTabWidth))
 		})
 		return true
 	case KeyBackTab:
@@ -469,8 +554,7 @@ func (e *editor) handleInsert(a *app, k Key) bool {
 				e.buf.DedentRange(r1, end, softTabWidth)
 			}
 		} else {
-			row, _ := e.buf.Cursor()
-			e.buf.DedentRange(row, row, softTabWidth)
+			e.applyToAllCursors(func() { row, _ := e.buf.Cursor(); e.buf.DedentRange(row, row, softTabWidth) })
 		}
 		return true
 	}
@@ -503,6 +587,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 	bodyCol := innerCol + gutter
 	bodyW := innerW - gutter
 
+	e.pageHeight = innerH
 	e.ensureCursorVisible(bodyW, innerH)
 
 	gutterStyle := Style{FG: ansiBrightBlack, BG: ansiDefaultBG}
@@ -546,48 +631,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 	currentMatchBg := Style{FG: ansiDefault, BG: ansiDefaultBG, Attrs: attrReverse | attrUnderline}
 	hasSearch := e.searchNeedle != "" && len(e.matches) > 0
 
-	// Precompute cross-line table-context state so table idents on a
-	// separate line from their introducer (e.g. FROM\n    dbo.products)
-	// still highlight. Scan from line 0 up to the last visible line.
-	// Also track block-comment carryover so a /* ... */ that spans
-	// multiple lines paints as comment on every continuation line.
-	tableState := tblNormal
-	inBlockComment := false
-	lineStartStates := make([]int, innerH)
-	commentCarryEnd := make([]int, innerH)
-	scanEnd := e.scrollRow + innerH
-	if scanEnd > e.buf.LineCount() {
-		scanEnd = e.buf.LineCount()
-	}
-	for li := 0; li < scanEnd; li++ {
-		line := e.buf.Line(li)
-		if li >= e.scrollRow {
-			lineStartStates[li-e.scrollRow] = tableState
-		}
-		if inBlockComment {
-			closeIdx := indexOfCloseBlock(line)
-			if closeIdx < 0 {
-				if li >= e.scrollRow {
-					commentCarryEnd[li-e.scrollRow] = len(line)
-				}
-				continue
-			}
-			if li >= e.scrollRow {
-				commentCarryEnd[li-e.scrollRow] = closeIdx + 2
-			}
-			inBlockComment = false
-			tableState = advanceTableState(tableState, sqltok.TokenizeLine(line[closeIdx+2:]))
-			continue
-		}
-		tokens := sqltok.TokenizeLine(line)
-		tableState = advanceTableState(tableState, tokens)
-		for _, t := range tokens {
-			if t.Kind == sqltok.Comment && strings.HasPrefix(t.Text, "/*") && !strings.HasSuffix(t.Text, "*/") {
-				inBlockComment = true
-				break
-			}
-		}
-	}
+	e.syntaxForDraw()
 
 	for i := 0; i < innerH; i++ {
 		lineIdx := e.scrollRow + i
@@ -595,33 +639,38 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			break
 		}
 		line := e.buf.Line(lineIdx)
+		layout := e.buf.lineLayout(lineIdx)
 
-		tokens := sqltok.TokenizeLine(line)
-		startState := lineStartStates[i]
+		var tokens []sqltok.Token
+		startState := tblNormal
+		if e.syntaxRevision == e.buf.Revision() && lineIdx < len(e.syntax) {
+			tokens = e.syntax[lineIdx].tokens
+			startState = e.syntax[lineIdx].tableStart
+		} else if !e.largeAnalysis() {
+			tokens = sqltok.TokenizeLine(line[:min(len(line), 4096)])
+		}
 		markedLine, errStartCol, errEndCol, errBlankCol := e.errorMarkerForLine(lineIdx, line, tokens)
 
 		// Walk runes from scrollCol onward. colOut advances by visual
 		// editor width so wide glyphs, tabs, and escaped control bytes
 		// all occupy the space the user can actually see.
-		scrollOut := visualColumnForRune(line, e.scrollCol)
+		scrollOut := layout.column(e.scrollCol)
 		visualCol := scrollOut
 		drawnOut := 0
-		for vc := e.scrollCol; vc < len(line); vc++ {
-			r := line[vc]
+		for vc := min(e.scrollCol, len(line)); vc < len(line); {
 			colOut := visualCol - scrollOut
-			text, rw := editorDisplayRuneAt(r, visualCol)
+			text, rw, next := layout.display(vc)
+			vcStart := vc
+			vc = next
 			if rw == 0 {
 				continue
 			}
 			if colOut >= bodyW {
 				break
 			}
-			st := styleForCol(tokens, vc, startState)
-			if vc < commentCarryEnd[i] {
-				st = currentTheme.SQLComment
-			}
+			st := styleForCol(tokens, vcStart, startState)
 			if hasSearch {
-				if isCurrent, inMatch := e.matchStyleAt(lineIdx, vc); inMatch {
+				if isCurrent, inMatch := e.matchStyleAt(lineIdx, vcStart); inMatch {
 					if isCurrent {
 						st = currentMatchBg
 					} else {
@@ -629,10 +678,10 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 					}
 				}
 			}
-			if hasSel && inSelection(lineIdx, vc, selR1, selC1, selR2, selC2) {
+			if hasSel && inSelection(lineIdx, vcStart, selR1, selC1, selR2, selC2) {
 				st = selStyle
 			}
-			if markedLine && vc >= errStartCol && vc < errEndCol {
+			if markedLine && vcStart >= errStartCol && vcStart < errEndCol {
 				st = applyEditorErrorStyle(st)
 			}
 			// If the wide rune would spill past the right edge,
@@ -662,7 +711,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 		}
 
 		if markedLine && errBlankCol >= 0 {
-			if blankOut, ok := screenColForRune(line, e.scrollCol, errBlankCol); ok && blankOut < bodyW {
+			if blankOut := layout.column(errBlankCol) - layout.column(e.scrollCol); errBlankCol >= e.scrollCol && blankOut < bodyW {
 				st := defaultStyle()
 				if hasSel && inSelection(lineIdx, errBlankCol, selR1, selC1, selR2, selC2) {
 					st = selStyle
@@ -675,8 +724,8 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 
 	if cursorVisible {
 		row, col := e.buf.Cursor()
-		line := e.buf.Line(row)
-		if cursorOut, ok := screenColForRune(line, e.scrollCol, col); ok {
+		layout := e.buf.lineLayout(row)
+		if cursorOut := layout.column(col) - layout.column(e.scrollCol); col >= e.scrollCol {
 			s.PlaceCursor(innerRow+(row-e.scrollRow), bodyCol+cursorOut)
 		}
 		// Paint a reverse-video block at each extra cursor so
@@ -684,12 +733,16 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 		// The real terminal caret stays on the primary.
 		caretStyle := Style{FG: ansiDefault, BG: ansiDefaultBG, Attrs: attrReverse}
 		for _, cp := range e.extraCursors {
+			if cp.row < 0 || cp.row >= e.buf.LineCount() {
+				continue
+			}
 			if cp.row < e.scrollRow || cp.row >= e.scrollRow+innerH {
 				continue
 			}
 			line := e.buf.Line(cp.row)
-			cursorOut, ok := screenColForRune(line, e.scrollCol, cp.col)
-			if !ok || cursorOut >= bodyW {
+			layout := e.buf.lineLayout(cp.row)
+			cursorOut := layout.column(cp.col) - layout.column(e.scrollCol)
+			if cp.col < e.scrollCol || cursorOut >= bodyW {
 				continue
 			}
 			sc := bodyCol + cursorOut
@@ -698,7 +751,7 @@ func (e *editor) draw(s *cellbuf, r rect, cursorVisible bool) {
 			// real character there, use it verbatim.
 			ch := " "
 			if cp.col < len(line) {
-				if text, width := editorDisplayRuneAt(line[cp.col], visualColumnForRune(line, cp.col)); width > 0 {
+				if text, width, _ := layout.display(cp.col); width > 0 {
 					ch = text
 				}
 			}
@@ -738,11 +791,6 @@ func editorDisplayRuneAt(r rune, visualCol int) (string, int) {
 
 func editorRuneDisplayWidth(r rune) int {
 	_, width := editorDisplayRuneAt(r, 0)
-	return width
-}
-
-func editorRuneDisplayWidthAt(r rune, visualCol int) int {
-	_, width := editorDisplayRuneAt(r, visualCol)
 	return width
 }
 
@@ -809,19 +857,7 @@ func screenColForRune(line []rune, scrollCol, runeCol int) (int, bool) {
 }
 
 func visualColumnForRune(line []rune, runeCol int) int {
-	if runeCol > len(line) {
-		runeCol = len(line)
-	}
-	if runeCol < 0 {
-		runeCol = 0
-	}
-	colOut := 0
-	for i := 0; i < runeCol; i++ {
-		if rw := editorRuneDisplayWidthAt(line[i], colOut); rw > 0 {
-			colOut += rw
-		}
-	}
-	return colOut
+	return newTextLayout(line).column(max(0, min(runeCol, len(line))))
 }
 
 // styleForCol returns the syntax-highlight style for the column offset
@@ -1046,7 +1082,6 @@ func (e *editor) caretFromScreen(r rect, screenRow, screenCol int) (int, int, bo
 	if row >= e.buf.LineCount() {
 		row = e.buf.LineCount() - 1
 	}
-	line := e.buf.Line(row)
 
 	target := screenCol - bodyCol
 	if target < 0 {
@@ -1055,24 +1090,8 @@ func (e *editor) caretFromScreen(r rect, screenRow, screenCol int) (int, int, bo
 	if target >= bodyW {
 		target = bodyW - 1
 	}
-	col := e.scrollCol
-	if col > len(line) {
-		col = len(line)
-	}
-	targetAbs := visualColumnForRune(line, e.scrollCol) + target
-	visualCol := visualColumnForRune(line, col)
-	for col < len(line) {
-		w := editorRuneDisplayWidthAt(line[col], visualCol)
-		if w == 0 {
-			col++
-			continue
-		}
-		if visualCol+w > targetAbs {
-			break
-		}
-		visualCol += w
-		col++
-	}
+	layout := e.buf.lineLayout(row)
+	col := layout.runeColumn(layout.column(e.scrollCol) + target)
 	return row, col, true
 }
 
@@ -1156,18 +1175,6 @@ func wordBoundsAt(line []rune, col int) (int, int) {
 	return start, end
 }
 
-// indexOfCloseBlock returns the rune index of `*` in the first `*/`
-// sequence in line, or -1 if none. Used by the highlighter to detect
-// where a carried-over /* ... */ block comment closes.
-func indexOfCloseBlock(line []rune) int {
-	for i := 0; i+1 < len(line); i++ {
-		if line[i] == '*' && line[i+1] == '/' {
-			return i
-		}
-	}
-	return -1
-}
-
 // ensureCursorVisible scrolls the viewport so the cursor sits inside
 // the visible region. Called at draw time so the viewport reacts to
 // resizes.
@@ -1178,30 +1185,16 @@ func (e *editor) ensureCursorVisible(innerW, innerH int) {
 	} else if row >= e.scrollRow+innerH {
 		e.scrollRow = row - innerH + 1
 	}
+	layout := e.buf.lineLayout(row)
 	if col < e.scrollCol {
 		e.scrollCol = col
-	} else {
-		line := e.buf.Line(row)
-		cursorVisual := visualColumnForRune(line, col)
-		scrollVisual := visualColumnForRune(line, e.scrollCol)
-		for e.scrollCol < col {
-			if cursorVisual-scrollVisual < innerW {
-				break
-			}
-			if e.scrollCol < len(line) {
-				if rw := editorRuneDisplayWidthAt(line[e.scrollCol], scrollVisual); rw > 0 {
-					scrollVisual += rw
-				}
-			} else {
-				scrollVisual++
-			}
-			e.scrollCol++
+	}
+	if layout.column(col)-layout.column(e.scrollCol) >= innerW {
+		e.scrollCol = layout.runeColumn(layout.column(col) - innerW + 1)
+		if layout.column(col)-layout.column(e.scrollCol) >= innerW {
+			e.scrollCol = layout.next(e.scrollCol)
 		}
 	}
-	if e.scrollRow < 0 {
-		e.scrollRow = 0
-	}
-	if e.scrollCol < 0 {
-		e.scrollCol = 0
-	}
+	e.scrollRow = max(0, e.scrollRow)
+	e.scrollCol = max(0, e.scrollCol)
 }

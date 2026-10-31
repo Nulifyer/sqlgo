@@ -108,8 +108,18 @@ type session struct {
 	// it was loaded from or saved to disk. Empty for scratch/query tabs
 	// that have never been written. savedText is the buffer contents at
 	// the last load/save; IsDirty compares it against editor.buf.Text().
-	sourcePath string
-	savedText  string
+	sourcePath      string
+	savedText       string
+	format          documentFormat
+	diskFingerprint documentFingerprint
+	diskKnown       bool
+	docGen          uint64
+	saveGen         uint64
+	saveBusy        bool
+	dirtyRevision   uint64
+	dirtyBaseline   string
+	dirtyCached     bool
+	dirtyValue      bool
 
 	// activeCatalog is the SSMS-style per-tab current database for
 	// cross-DB drivers (MSSQL, MySQL, Sybase). Empty means "use the
@@ -128,11 +138,13 @@ func (s *session) IsDirty() bool {
 	if s == nil || s.editor == nil {
 		return false
 	}
-	cur := s.editor.buf.Text()
-	if s.sourcePath == "" && s.savedText == "" {
-		return cur != ""
+	rev := s.editor.buf.Revision()
+	if s.dirtyCached && s.dirtyRevision == rev && s.dirtyBaseline == s.savedText {
+		return s.dirtyValue
 	}
-	return cur != s.savedText
+	s.dirtyValue = s.editor.buf.Text() != s.savedText
+	s.dirtyCached, s.dirtyRevision, s.dirtyBaseline = true, rev, s.savedText
+	return s.dirtyValue
 }
 
 func newSession() *session {

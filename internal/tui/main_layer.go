@@ -108,6 +108,9 @@ func (m *mainLayer) HandleInput(a *app, msg InputMsg) bool {
 		}
 		text := sanitizeEditorPasteText(v.Text)
 		if m.focus == FocusQuery && text != "" {
+			m.editor.collapseCursors()
+			m.editor.complete = nil
+			m.editor.completionGeneration++
 			hadDetachedFrame := len(m.sessions) == 0
 			beforeRev := m.editor.buf.Revision()
 			m.editor.buf.InsertText(text)
@@ -399,12 +402,7 @@ func (m *mainLayer) saveActive(a *app) {
 		a.pushLayer(newSaveLayer(a, m.activeTab, seed, []string{".sql"}))
 		return
 	}
-	doc, err := a.documents.Save(sess, sess.sourcePath)
-	if err != nil {
-		m.status = "save failed: " + err.Error()
-		return
-	}
-	m.status = fmt.Sprintf("saved %d bytes to %s", doc.Size, doc.Path)
+	a.saveDocument(sess, sess.sourcePath)
 }
 
 // saveAsActive pushes a Save As dialog seeded from the active tab's
@@ -674,11 +672,9 @@ func (m *mainLayer) queryTabHits(r rect) []queryTabHit {
 		if remaining < 3 {
 			break
 		}
-		if len(lbl) > remaining {
-			lbl = lbl[:remaining]
-		}
-		hits = append(hits, queryTabHit{idx: i, startCol: col, endCol: col + len(lbl) - 1})
-		col += len(lbl)
+		lbl = clipEditorLabel(lbl, remaining)
+		hits = append(hits, queryTabHit{idx: i, startCol: col, endCol: col + stringDisplayWidth(lbl) - 1})
+		col += stringDisplayWidth(lbl)
 	}
 	return hits
 }
@@ -698,9 +694,7 @@ func (m *mainLayer) drawQueryTabs(c *cellbuf, r rect) {
 	for _, h := range m.queryTabHits(r) {
 		s := m.sessions[h.idx]
 		lbl := queryTabLabel(s, h.idx == m.activeTab, m.sessionNeedsDatabase(s))
-		if len(lbl) > h.endCol-h.startCol+1 {
-			lbl = lbl[:h.endCol-h.startCol+1]
-		}
+		lbl = clipEditorLabel(lbl, h.endCol-h.startCol+1)
 		fg := colorTitleUnfocused
 		if h.idx == m.activeTab {
 			fg = colorTitleFocused
@@ -777,11 +771,9 @@ func (m *mainLayer) resultTabHits(r rect) []queryTabHit {
 		if remaining < 3 {
 			break
 		}
-		if len(lbl) > remaining {
-			lbl = lbl[:remaining]
-		}
-		hits = append(hits, queryTabHit{idx: i, startCol: col, endCol: col + len(lbl) - 1})
-		col += len(lbl)
+		lbl = clipEditorLabel(lbl, remaining)
+		hits = append(hits, queryTabHit{idx: i, startCol: col, endCol: col + stringDisplayWidth(lbl) - 1})
+		col += stringDisplayWidth(lbl)
 	}
 	return hits
 }
@@ -794,9 +786,7 @@ func (m *mainLayer) drawResultTabs(c *cellbuf, r rect) {
 	}
 	for _, h := range m.resultTabHits(r) {
 		lbl := resultTabLabelWith(m.results[h.idx], h.idx == m.activeResult, m.resultTabSuffix(h.idx))
-		if len(lbl) > h.endCol-h.startCol+1 {
-			lbl = lbl[:h.endCol-h.startCol+1]
-		}
+		lbl = clipEditorLabel(lbl, h.endCol-h.startCol+1)
 		fg := colorTitleUnfocused
 		if h.idx == m.activeResult {
 			fg = colorTitleFocused
@@ -1000,7 +990,7 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 			// own undo stack covers Alt+Z for "that looks worse,
 			// give me my original back".
 			if m.focus == FocusQuery && (m.editor.buf.LineCount() > 1 || len(m.editor.buf.Line(0)) > 0) {
-				m.formatQuery()
+				m.formatQuery(a)
 			}
 			return
 		case 's', 'S':
@@ -1028,10 +1018,13 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 	if k.Ctrl && k.Rune == 'f' {
 		switch m.focus {
 		case FocusQuery:
+			m.editor.collapseCursors()
+			m.editor.complete = nil
+			m.editor.completionGeneration++
 			seed := m.editor.buf.Selection()
 			fl := newFindLayer(seed)
 			if seed != "" {
-				m.editor.SetSearch(seed)
+				m.editor.requestSearch(a, seed)
 			}
 			a.pushLayer(fl)
 			return
@@ -1053,19 +1046,19 @@ func (m *mainLayer) HandleKey(a *app, k Key) {
 				return
 			}
 			before := m.editor.buf.Text()
-			m.editor.buf.Clear()
+			m.editor.replaceText("")
 			if m.editor.buf.Text() != before {
 				m.editor.ClearErrorLocation()
 			}
 			m.promoteActiveIfPreview()
 			return
 		}
-		before := m.editor.buf.Text()
+		before := m.editor.buf.Revision()
 		m.editor.handleInsert(a, k)
-		if len(m.sessions) == 0 && m.editor.buf.Text() != before {
+		if len(m.sessions) == 0 && m.editor.buf.Revision() != before {
 			m.ensureActiveTab()
 		}
-		if m.editor.buf.Text() != before {
+		if m.editor.buf.Revision() != before {
 			m.promoteActiveIfPreview()
 		}
 		return
@@ -1298,7 +1291,7 @@ func (m *mainLayer) editObjectFromExplorer(a *app) {
 				mm.activeTab = len(mm.sessions) - 1
 			}
 			sess.title = label
-			sess.editor.buf.SetText(body)
+			sess.editor.replaceText(body)
 			sess.editKind = kind
 			sess.editSchema = schema
 			sess.editName = name
@@ -1639,24 +1632,44 @@ func (m *mainLayer) drawResultsError(c *cellbuf, r rect) {
 }
 
 // formatQuery reformats the editor's current buffer using the
-// sqltok heuristic formatter. The buffer's SetText path pushes a
-// snapshot for undo, so Ctrl+Z restores the original text if the
-// formatted output isn't what the user wanted. Empty buffers short
+// sqltok heuristic formatter. One history entry lets Ctrl+Z restore
+// the original text if the formatted output is not what the user wanted. Empty buffers short
 // out here and in the Alt+F binding above.
-func (m *mainLayer) formatQuery() {
+func (m *mainLayer) formatQuery(a *app) {
 	if len(m.sessions) == 0 {
 		return
 	}
-	src := m.editor.buf.Text()
-	formatted := sqltok.Format(src)
-	if formatted == src {
-		m.status = "already formatted"
+	owner := m.session
+	e := owner.editor
+	if e.formatBusy {
+		m.status = "formatting already in progress; editing remains available"
 		return
 	}
-	m.editor.buf.SetText(formatted)
-	m.editor.ClearErrorLocation()
-	m.promoteActiveIfPreview()
-	m.status = "formatted"
+	src := e.buf.Text()
+	rev := e.buf.Revision()
+	m.status = "formatting SQL…"
+	e.formatBusy = true
+	a.runBackground(func() func(*app) {
+		formatted := sqltok.Format(src)
+		lines := splitBufferText(formatted)
+		return func(a *app) {
+			e.formatBusy = false
+			if !a.hasSession(owner) || e.buf.Revision() != rev {
+				m.status = "query changed; format again"
+				return
+			}
+			if formatted == src {
+				m.status = "already formatted"
+				return
+			}
+			e.resetTransientState()
+			e.buf.SetPreparedText(formatted, lines)
+			if m.session == owner {
+				m.promoteActiveIfPreview()
+			}
+			m.status = "formatted"
+		}
+	})
 }
 
 // prefillSelectFromExplorer writes a driver-aware SELECT for the highlighted
@@ -1713,7 +1726,7 @@ func (m *mainLayer) openSQLPreviewFromExplorer(a *app, t db.TableRef, sql string
 	}
 	sess := m.sessions[prev]
 	sess.title = t.Name
-	sess.editor.buf.SetText(sql)
+	sess.editor.replaceText(sql)
 	sess.editor.ClearErrorLocation()
 	if t.Catalog != "" {
 		sess.activeCatalog = t.Catalog
@@ -2269,7 +2282,11 @@ func (m *mainLayer) queryRightInfo() string {
 		return ""
 	}
 	row, col := m.editor.buf.Cursor()
-	return fmt.Sprintf("Ln %d, Col %d", row+1, col+1)
+	info := fmt.Sprintf("Ln %d, Col %d", row+1, col+1)
+	if m.editor.syntaxBusy {
+		info += " · highlighting…"
+	}
+	return info
 }
 
 func (m *mainLayer) resultsRightInfo(_ *app) string {

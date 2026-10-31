@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -115,7 +116,11 @@ type app struct {
 
 	// documents owns file-backed query-tab invariants shared by open /
 	// save flows.
-	documents documentService
+	documents                     documentService
+	documentWrites                sync.WaitGroup
+	recovery                      *recoveryStore
+	recoveryGeneration            uint64
+	recoveryBusy, discardRecovery bool
 
 	// secrets is the OS keyring abstraction. When the backend is
 	// available we move new passwords off disk into it on save; when
@@ -453,6 +458,7 @@ func Run(opts Options) error {
 		return fmt.Errorf("open store: %w", err)
 	}
 	a.store = st
+	a.startRecovery()
 
 	if err := a.refreshConnections(); err != nil {
 		return fmt.Errorf("load connections: %w", err)
@@ -493,6 +499,10 @@ func Run(opts Options) error {
 	stopUpdates := a.beginUpdateCheck()
 	defer stopUpdates()
 	loopErr := a.loop()
+	// Accepted saves must reach their atomic commit even after input closes.
+	// This wait happens after the interactive event loop has ended.
+	a.documentWrites.Wait()
+	a.finishRecovery()
 	close(a.doneCh)
 	return loopErr
 }
@@ -527,6 +537,8 @@ func (a *app) loop() error {
 	resizeCh, stopResize := watchResize()
 	defer stopResize()
 
+	recoveryTick := time.NewTicker(2 * time.Second)
+	defer recoveryTick.Stop()
 	for !a.quit {
 		if a.term.refreshSize() {
 			a.scr.Resize(a.term.width, a.term.height)
@@ -555,6 +567,8 @@ func (a *app) loop() error {
 			a.handleQueryEvent(e)
 		case fn := <-a.asyncCh:
 			fn(a)
+		case <-recoveryTick.C:
+			a.scheduleRecovery()
 		case <-resizeCh:
 			// Wake: loop top calls refreshSize() and redraws.
 		case <-sigCh:
@@ -569,6 +583,14 @@ func (a *app) loop() error {
 // then composites them bottom-to-top and diffs against the prior frame
 // on flush, so only changed cells get emitted as ANSI.
 func (a *app) draw() {
+	if len(a.layers) > 0 {
+		if m, ok := a.layers[0].(*mainLayer); ok && m.editor != nil {
+			m.editor.scheduleSyntax(a)
+			if m.editor.HasSearch() && m.editor.searchRevision != m.editor.buf.Revision() && !m.editor.searchBusy {
+				m.editor.requestSearch(a, m.editor.searchNeedle)
+			}
+		}
+	}
 	if a.term.width < 40 || a.term.height < 10 {
 		b := a.scr.LayerBuf(0)
 		msg := "terminal too small (need 40x10)"

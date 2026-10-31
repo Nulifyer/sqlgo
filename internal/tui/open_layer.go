@@ -214,84 +214,20 @@ func (ol *openLayer) load(a *app) {
 	m := a.mainLayerPtr()
 	if idx := a.documents.FindOpenTab(m.sessions, path); idx >= 0 {
 		m.switchTab(idx)
-		recordDir(a, store.LastDirOpen, filepath.Dir(path))
+		a.recordDocumentDir(store.LastDirOpen, filepath.Dir(path))
 		a.popLayer()
 		m.status = fmt.Sprintf("switched to open tab for %s", filepath.Base(path))
 		return
 	}
-	doc, err := a.documents.Load(path)
-	if err != nil {
-		ol.status = "read failed: " + err.Error()
-		return
-	}
-	sess := m.ensureActiveTab()
-	if err := a.documents.ApplyLoaded(sess, doc); err != nil {
-		ol.status = "read failed: " + err.Error()
-		return
-	}
-	recordDir(a, store.LastDirOpen, filepath.Dir(path))
 	a.popLayer()
-	m.status = fmt.Sprintf("loaded %d bytes from %s", doc.Size, path)
+	a.openDocumentPaths([]string{path})
 }
 
-// loadMarked opens each marked path in its own new editor tab. Files
-// already open in another tab are switched to rather than re-opened;
-// read failures are counted and surfaced on the main view.
 func (ol *openLayer) loadMarked(a *app, marked []string) {
-	m := a.mainLayerPtr()
-	var loaded, skipped, reused int
-	var lastErr, lastLoadedPath string
-	lastIdx := -1
-	for _, abs := range marked {
-		abs = a.documents.NormalizePath(abs)
-		if idx := a.documents.FindOpenTab(m.sessions, abs); idx >= 0 {
-			reused++
-			lastIdx = idx
-			continue
-		}
-		doc, err := a.documents.Load(abs)
-		if err != nil {
-			skipped++
-			lastErr = err.Error()
-			continue
-		}
-		m.newTab()
-		if err := a.documents.ApplyLoaded(m.session, doc); err != nil {
-			skipped++
-			lastErr = err.Error()
-			continue
-		}
-		loaded++
-		lastIdx = m.activeTab
-		lastLoadedPath = abs
-	}
-	if loaded == 0 && reused == 0 {
-		if lastErr != "" {
-			ol.status = "read failed: " + lastErr
-		} else {
-			ol.status = "no files loaded"
-		}
-		return
-	}
-	if lastIdx >= 0 {
-		m.switchTab(lastIdx)
-	}
-	if lastLoadedPath != "" {
-		recordDir(a, store.LastDirOpen, filepath.Dir(lastLoadedPath))
-	}
 	a.popLayer()
-	switch {
-	case skipped > 0:
-		m.status = fmt.Sprintf("opened %d new, %d already open (%d failed)", loaded, reused, skipped)
-	case reused > 0:
-		m.status = fmt.Sprintf("opened %d new, %d already open", loaded, reused)
-	default:
-		m.status = fmt.Sprintf("opened %d files in new tabs", loaded)
-	}
+	a.openDocumentPaths(marked)
 }
 
-// HandleInput delegates mouse events to the picker, then applies the
-// click-tracker so a double-click triggers a load.
 func (ol *openLayer) HandleInput(a *app, msg InputMsg) bool {
 	switch v := msg.(type) {
 	case PasteMsg:

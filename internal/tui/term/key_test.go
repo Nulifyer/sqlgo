@@ -6,6 +6,24 @@ import (
 	"testing"
 )
 
+func TestFindNavigationFunctionKeyEncodings(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want Key
+	}{
+		{"\x1bOR", Key{Kind: KeyF3}},
+		{"\x1b[13~", Key{Kind: KeyF3}},
+		{"\x1b[1;2R", Key{Kind: KeyF3, Shift: true}},
+		{"\x1b[13;2~", Key{Kind: KeyF3, Shift: true}},
+		{"\x1bé", Key{Kind: KeyRune, Rune: 'é', Alt: true}},
+	} {
+		got := readAll(t, tc.raw, 1)[0]
+		if got != tc.want {
+			t.Fatalf("%q decoded as %+v, want %+v", tc.raw, got, tc.want)
+		}
+	}
+}
+
 // readAll drains the KeyReader until n messages arrive. Tests supply a
 // byte stream and expect a specific sequence of InputMsg values.
 func readAll(t *testing.T, raw string, n int) []InputMsg {

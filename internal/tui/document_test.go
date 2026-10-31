@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -60,6 +61,54 @@ func TestDocumentServiceSaveNormalizesPathAndBaseline(t *testing.T) {
 	}
 	if got := string(data); got != "select 2;" {
 		t.Fatalf("file = %q, want select 2;", got)
+	}
+}
+
+func TestDocumentServiceNormalizesLoadedLineEndings(t *testing.T) {
+	t.Parallel()
+	for _, ending := range []string{"\r\n", "\r", "\n"} {
+		t.Run(fmt.Sprintf("%q", ending), func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "query.sql")
+			raw := "select 'é';" + ending + ending + "select 2;" + ending
+			want := "select 'é';\n\nselect 2;\n"
+			if err := os.WriteFile(path, []byte(raw), 0644); err != nil {
+				t.Fatal(err)
+			}
+			svc := documentService{}
+			doc, err := svc.Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sess := newSession()
+			if err := svc.ApplyLoaded(sess, doc); err != nil {
+				t.Fatal(err)
+			}
+			if got := sess.editor.buf.Text(); got != want {
+				t.Fatalf("loaded text = %q, want %q", got, want)
+			}
+			if sess.IsDirty() {
+				t.Fatal("normalized document should start clean")
+			}
+			sess.editor.buf.Insert('x')
+			if !sess.IsDirty() {
+				t.Fatal("edited document should be dirty")
+			}
+			sess.editor.buf.Undo()
+			if sess.IsDirty() {
+				t.Fatal("undo to normalized baseline should be clean")
+			}
+			if _, err := svc.Save(sess, path); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != raw || sess.IsDirty() {
+				t.Fatalf("saved text = %q, dirty = %v", data, sess.IsDirty())
+			}
+		})
 	}
 }
 

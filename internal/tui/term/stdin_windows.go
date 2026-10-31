@@ -6,8 +6,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
-	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -36,6 +34,8 @@ type conInReader struct {
 	wbuf                   [256]uint16
 	buf                    []byte
 	suppressPasteSynthesis bool
+	textDecoder            utf16InputDecoder
+	readErr                error
 }
 
 // pasteEventThreshold is the minimum number of key-down events that
@@ -49,6 +49,9 @@ func (c *conInReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	if len(c.buf) == 0 && c.readErr != nil {
+		return 0, c.readErr
+	}
 	if len(c.buf) == 0 && !c.suppressPasteSynthesis {
 		// ReadConsoleW often does not relay the terminal's ESC[200~
 		// brackets. When the console queue already looks paste-like,
@@ -60,16 +63,18 @@ func (c *conInReader) Read(p []byte) (int, error) {
 			}
 		}
 	}
-	if len(c.buf) == 0 {
+	for len(c.buf) == 0 {
 		var read uint32
 		if err := windows.ReadConsole(c.h, &c.wbuf[0], uint32(len(c.wbuf)), &read, nil); err != nil {
-			return 0, err
+			c.readErr = err
 		}
-		if read == 0 {
-			return 0, io.EOF
+		if read == 0 && c.readErr == nil {
+			c.readErr = io.EOF
 		}
-		runes := utf16.Decode(c.wbuf[:read])
-		c.buf = []byte(string(runes))
+		c.buf = []byte(c.textDecoder.decode(c.wbuf[:read], c.readErr != nil))
+		if len(c.buf) == 0 && c.readErr != nil {
+			return 0, c.readErr
+		}
 	}
 	n := copy(p, c.buf)
 	c.buf = c.buf[n:]
@@ -140,7 +145,7 @@ func (c *conInReader) pendingKeyCount() int {
 // every other burst is wrapped once.
 func (c *conInReader) readPasteBatch() []byte {
 	recBuf := make([]inputRecord, 256)
-	var runes []rune
+	var units []uint16
 	for {
 		var n uint32
 		if err := windows.GetNumberOfConsoleInputEvents(c.h, &n); err != nil || n == 0 {
@@ -165,20 +170,24 @@ func (c *conInReader) readPasteBatch() []byte {
 			if kr.KeyDown == 0 || kr.UnicodeChar == 0 {
 				continue
 			}
-			ch := rune(kr.UnicodeChar)
+			ch := kr.UnicodeChar
 			rep := kr.RepeatCount
 			if rep == 0 {
 				rep = 1
 			}
 			for j := uint16(0); j < rep; j++ {
-				runes = append(runes, ch)
+				units = append(units, ch)
 			}
 		}
 	}
-	if len(runes) == 0 {
+	if len(units) == 0 {
 		return nil
 	}
-	return wrapPasteBatch(string(runes))
+	content := c.textDecoder.decode(units, false)
+	if content == "" {
+		return nil
+	}
+	return wrapPasteBatch(content)
 }
 
 func wrapPasteBatch(content string) []byte {
@@ -186,94 +195,6 @@ func wrapPasteBatch(content string) []byte {
 		return []byte(content)
 	}
 	return []byte(bracketedPasteStart + content + bracketedPasteEnd)
-}
-
-// StdinPeekReadable reports whether a key event is pending on the
-// console input queue within d. It uses PeekConsoleInputW so we never
-// consume bytes and never start a second concurrent ReadConsoleW --
-// which would race the main reader on the shared bufio.Reader state
-// and leak partial CSI tails ("5~", "[A", etc.) as literal runes when
-// the main reader's peek window fired before the goroutine Peek got
-// scheduled.
-//
-// Mouse / focus / window / menu events are filtered out: ReadConsoleW
-// discards them, so a WaitForSingleObject-based signal would lie about
-// readability and cause the next ReadByte to block.
-func StdinPeekReadable(d time.Duration) bool {
-	h := windows.Handle(os.Stdin.Fd())
-	deadline := time.Now().Add(d)
-	// Poll with 2ms granularity -- well under the 50ms window readEscape
-	// grants us, fine-grained enough that we return promptly when input
-	// arrives, coarse enough to not burn CPU.
-	const step = 2 * time.Millisecond
-	for {
-		if hasPendingKeyEvent(h) {
-			return true
-		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return false
-		}
-		sleep := step
-		if remaining < sleep {
-			sleep = remaining
-		}
-		time.Sleep(sleep)
-	}
-}
-
-func hasPendingKeyEvent(h windows.Handle) bool {
-	var n uint32
-	if err := windows.GetNumberOfConsoleInputEvents(h, &n); err != nil || n == 0 {
-		return false
-	}
-	var buf [16]inputRecord
-	count := n
-	if count > uint32(len(buf)) {
-		count = uint32(len(buf))
-	}
-	var read uint32
-	r1, _, _ := procPeekConsoleInputW.Call(
-		uintptr(h),
-		uintptr(unsafe.Pointer(&buf[0])),
-		uintptr(count),
-		uintptr(unsafe.Pointer(&read)),
-	)
-	if r1 == 0 {
-		return false
-	}
-	for i := uint32(0); i < read; i++ {
-		if buf[i].EventType == keyEvent {
-			kr := (*keyEventRecord)(unsafe.Pointer(&buf[i].Event[0]))
-			if kr.KeyDown != 0 && kr.UnicodeChar != 0 {
-				return true
-			}
-			// Key-down events with UnicodeChar == 0 are pure modifier
-			// presses (Shift/Ctrl/Alt) or function keys that Windows
-			// resolves via key-translation. Arrow keys and friends set
-			// UnicodeChar to 0 but VirtualKeyCode is non-zero; in VT
-			// input mode ReadConsoleW translates them to escape
-			// sequences, so treat those as pending too.
-			if kr.KeyDown != 0 && kr.VirtualKeyCode != 0 && isTranslatableVK(kr.VirtualKeyCode) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// isTranslatableVK returns true for virtual-key codes that VT input
-// mode translates into escape sequences (arrows, Home/End, PgUp/PgDn,
-// F-keys, etc). We filter out pure modifier keys so peekAvailable
-// doesn't return true on a Shift release and then block in ReadConsole.
-func isTranslatableVK(vk uint16) bool {
-	switch vk {
-	case 0x10, 0x11, 0x12, // SHIFT, CONTROL, MENU(Alt)
-		0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, // L/R SHIFT/CTRL/MENU
-		0x14, 0x90, 0x91: // CAPITAL, NUMLOCK, SCROLL
-		return false
-	}
-	return true
 }
 
 const keyEvent = 0x0001

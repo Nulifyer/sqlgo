@@ -183,6 +183,7 @@ Open the command menu with `Ctrl+K` for global actions (connect, disconnect, his
 | | `Alt+F` | Format SQL |
 | | `Ctrl+␣` | Autocomplete |
 | | `Ctrl+F` | Find / replace |
+| | `F3` / `Shift+F3` | Next / previous match from the last search |
 | | `Ctrl+G` | Go to line |
 | | `Ctrl+L` | Clear editor |
 | | `Ctrl+Z` / `Ctrl+Y` | Undo / Redo |
@@ -196,6 +197,8 @@ Open the command menu with `Ctrl+K` for global actions (connect, disconnect, his
 | | `Ctrl+U` | Clear selection |
 | | `Home` | Smart home (toggle indent / col 0) |
 | | `↑` / `↓` / `←` / `→` / `End` | Move caret |
+| | `PgUp` / `PgDn` | Move one editor page; add Shift to select |
+| | `↵` | New line, carrying leading indentation |
 | | `Ctrl+←` / `Ctrl+→` | Word-jump |
 | | `Ctrl+Home` / `Ctrl+End` | Jump to buffer start / end |
 | | `Ctrl+Backspace` / `Ctrl+Delete` | Delete word left / right |
@@ -207,6 +210,7 @@ Open the command menu with `Ctrl+K` for global actions (connect, disconnect, his
 | | `⇥` | Toggle Find / Replace field |
 | | `⇤` | Previous match |
 | | `Ctrl+R` | Replace all |
+| | `Alt+C` / `Alt+W` | Toggle match case / whole word |
 | | `Esc` | Close |
 | **Go to** | `type line[:col]` | Edit target |
 | | `↵` | Jump |
@@ -298,6 +302,28 @@ Open the command menu with `Ctrl+K` for global actions (connect, disconnect, his
 | | `q` | Quit |
 | | `Esc` | Cancel |
 
+
+SQL files open in separate tabs. The editor normalizes line endings internally and
+preserves UTF-8 (with or without BOM), BOM-marked UTF-16, and the file's predominant
+LF/CRLF/CR line endings when saving. Invalid or unsupported text encodings produce
+an error. Saves use a synced temporary file and reject changes made on disk since
+the file was loaded or last saved; use Save As to choose a different destination.
+
+Opening, saving, recovery writes, formatting, and large-document analysis run in
+the background. Navigation and editing remain available; stale results cannot
+replace newer edits. Above 1,000 lines or 128 KiB, syntax and search analysis run
+asynchronously, so highlighting may briefly appear after the text. Completion
+analysis also runs asynchronously above 128 KiB. Undo stores changed ranges with
+a 16 MiB budget and 256-command limit, retaining the newest command even if it
+alone exceeds the budget.
+
+Dirty tabs are snapshotted every two seconds under sqlgo's data directory in
+`recovery/`. Snapshots include SQL text and are private to your OS account on
+systems that enforce Unix file permissions. Each snapshot is limited to 64 MiB;
+an error appears in the status area if it exceeds this limit. After an interrupted
+session, startup offers **R** to restore into new tabs, **D** to discard, or **Esc**
+to decide later. Recovery covers the last successful snapshot; explicit discard
+on quit removes that session's snapshot.
 
 ## CLI commands
 

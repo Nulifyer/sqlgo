@@ -356,12 +356,33 @@ type lexer struct {
 	src    []rune
 	i      int
 	tokens []Token
+	state  LineState
 }
 
 func (l *lexer) run() []Token {
 	for l.i < len(l.src) {
 		start := l.i
 		c := l.src[l.i]
+		if l.state.BlockDepth > 0 {
+			l.scanBlockContent()
+			l.emit(Comment, start)
+			continue
+		}
+		if l.state.Quote != 0 {
+			l.scanQuoteContent(l.state.Quote)
+			l.emit(String, start)
+			continue
+		}
+		if l.state.Bracket {
+			l.scanBracketContent()
+			l.emit(String, start)
+			continue
+		}
+		if l.state.DollarTag != "" {
+			l.scanDollarContent()
+			l.emit(String, start)
+			continue
+		}
 		switch {
 		case unicode.IsSpace(c):
 			l.scanWhile(unicode.IsSpace)
@@ -434,43 +455,45 @@ func (l *lexer) scanLineComment() {
 	}
 }
 
-func (l *lexer) scanBlockComment() {
-	// Consume "/*"
-	l.i += 2
-	for l.i < len(l.src)-1 {
-		if l.src[l.i] == '*' && l.src[l.i+1] == '/' {
+func (l *lexer) scanBlockComment() { l.i += 2; l.state.BlockDepth = 1; l.scanBlockContent() }
+func (l *lexer) scanBlockContent() {
+	for l.i < len(l.src) {
+		if l.src[l.i] == '/' && l.peek(1) == '*' {
+			l.state.BlockDepth++
 			l.i += 2
-			return
+			continue
+		}
+		if l.src[l.i] == '*' && l.peek(1) == '/' {
+			l.state.BlockDepth--
+			l.i += 2
+			if l.state.BlockDepth == 0 {
+				return
+			}
+			continue
 		}
 		l.i++
 	}
-	// Unclosed: swallow the rest.
-	l.i = len(l.src)
 }
-
-func (l *lexer) scanString(quote rune) {
-	l.i++ // opening quote
+func (l *lexer) scanString(quote rune) { l.i++; l.state.Quote = quote; l.scanQuoteContent(quote) }
+func (l *lexer) scanQuoteContent(quote rune) {
 	for l.i < len(l.src) {
 		c := l.src[l.i]
 		if c == '\\' && l.i+1 < len(l.src) {
-			// Escape sequence -- skip both chars. SQL-standard
-			// escaping is '' but most dialects accept backslash too.
 			l.i += 2
 			continue
 		}
 		if c == quote {
-			// Check for doubled quote (SQL standard escape).
 			if l.i+1 < len(l.src) && l.src[l.i+1] == quote {
 				l.i += 2
 				continue
 			}
 			l.i++
+			l.state.Quote = 0
 			return
 		}
 		l.i++
 	}
 }
-
 func (l *lexer) scanDollarQuoted() bool {
 	start := l.i
 	endTag := start + 1
@@ -489,26 +512,36 @@ func (l *lexer) scanDollarQuoted() bool {
 	if endTag >= len(l.src) || l.src[endTag] != '$' {
 		return false
 	}
-	delimiter := l.src[start : endTag+1]
+	l.state.DollarTag = string(l.src[start : endTag+1])
 	l.i = endTag + 1
+	l.scanDollarContent()
+	return true
+}
+func (l *lexer) scanDollarContent() {
+	delimiter := []rune(l.state.DollarTag)
 	for l.i+len(delimiter) <= len(l.src) {
-		if string(l.src[l.i:l.i+len(delimiter)]) == string(delimiter) {
+		if string(l.src[l.i:l.i+len(delimiter)]) == l.state.DollarTag {
 			l.i += len(delimiter)
-			return true
+			l.state.DollarTag = ""
+			return
 		}
 		l.i++
 	}
 	l.i = len(l.src)
-	return true
 }
-
-func (l *lexer) scanBracketed() {
-	l.i++ // [
-	for l.i < len(l.src) && l.src[l.i] != ']' {
+func (l *lexer) scanBracketed() { l.i++; l.state.Bracket = true; l.scanBracketContent() }
+func (l *lexer) scanBracketContent() {
+	for l.i < len(l.src) {
+		if l.src[l.i] == ']' {
+			if l.i+1 < len(l.src) && l.src[l.i+1] == ']' {
+				l.i += 2
+				continue
+			}
+			l.i++
+			l.state.Bracket = false
+			return
+		}
 		l.i++
-	}
-	if l.i < len(l.src) {
-		l.i++ // ]
 	}
 }
 

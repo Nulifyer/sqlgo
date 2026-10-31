@@ -58,8 +58,9 @@ type Key struct {
 // KeyReader decodes bytes from a terminal into Key events. It owns its
 // own buffered reader so escape sequences can be peeked.
 type KeyReader struct {
-	r          *bufio.Reader
-	pasteSynth pasteSynthesisController
+	r           *bufio.Reader
+	pasteSynth  pasteSynthesisController
+	pendingPeek <-chan error
 }
 
 func NewKeyReader(r io.Reader) *KeyReader {
@@ -83,6 +84,13 @@ type pasteSynthesisController interface {
 // Key, PasteMsg, MouseMsg, FocusMsg, BlurMsg depending on the CSI
 // sequence the terminal emitted.
 func (kr *KeyReader) Read() (InputMsg, error) {
+	if kr.pendingPeek != nil {
+		err := <-kr.pendingPeek
+		kr.pendingPeek = nil
+		if err != nil {
+			return nil, err
+		}
+	}
 	b, err := kr.r.ReadByte()
 	if err != nil {
 		return nil, err
@@ -118,23 +126,15 @@ func (kr *KeyReader) Read() (InputMsg, error) {
 }
 
 func (kr *KeyReader) readUTF8(first byte) (InputMsg, error) {
-	var n int
-	switch {
-	case first&0xE0 == 0xC0:
-		n = 1
-	case first&0xF0 == 0xE0:
-		n = 2
-	case first&0xF8 == 0xF0:
-		n = 3
-	default:
-		return Key{Kind: KeyRune, Rune: rune(first)}, nil
+	// Let bufio's standard decoder consume only the malformed prefix and retain
+	// any valid following ASCII or escape byte for the next event.
+	if err := kr.r.UnreadByte(); err != nil {
+		return nil, err
 	}
-	buf := make([]byte, n+1)
-	buf[0] = first
-	if _, err := io.ReadFull(kr.r, buf[1:]); err != nil {
-		return Key{}, err
+	r, _, err := kr.r.ReadRune()
+	if err != nil {
+		return nil, err
 	}
-	r, _ := decodeUTF8(buf)
 	return Key{Kind: KeyRune, Rune: r}, nil
 }
 
@@ -164,8 +164,8 @@ func (kr *KeyReader) readEscape() (InputMsg, error) {
 			return Key{Kind: KeyEsc}, nil
 		}
 		switch c {
-		case 'P':
-			return Key{Kind: KeyF1}, nil
+		case 'P', 'Q', 'R', 'S':
+			return Key{Kind: KeyF1 + KeyKind(c-'P')}, nil
 		case 'H':
 			return Key{Kind: KeyHome}, nil
 		case 'F':
@@ -173,11 +173,18 @@ func (kr *KeyReader) readEscape() (InputMsg, error) {
 		}
 		return Key{Kind: KeyEsc}, nil
 	}
-	// Alt+<rune>: ESC followed by a printable ASCII byte. This covers
-	// Alt+1..9, Alt+letters, etc. Multibyte Alt combos are rare enough to
-	// ignore -- they fall through to bare Esc.
+	// Alt+<rune>: preserve the complete UTF-8 character after Escape.
 	if b >= 0x20 && b < 0x7f {
 		return Key{Kind: KeyRune, Rune: rune(b), Alt: true}, nil
+	}
+	if b >= 0x80 {
+		msg, err := kr.readUTF8(b)
+		if err != nil {
+			return nil, err
+		}
+		k := msg.(Key)
+		k.Alt = true
+		return k, nil
 	}
 	return Key{Kind: KeyEsc}, nil
 }
@@ -427,6 +434,8 @@ func decodeCSI(params []byte, final byte) Key {
 		return k
 	}
 	switch final {
+	case 'P', 'Q', 'R', 'S':
+		return apply(Key{Kind: KeyF1 + KeyKind(final-'P')})
 	case 'A':
 		return apply(Key{Kind: KeyUp})
 	case 'B':
@@ -443,6 +452,8 @@ func decodeCSI(params []byte, final byte) Key {
 		return Key{Kind: KeyBackTab}
 	case '~':
 		switch p1 {
+		case "11", "12", "13", "14":
+			return apply(Key{Kind: KeyF1 + KeyKind(p1[1]-'1')})
 		case "1":
 			return apply(Key{Kind: KeyHome})
 		case "3":
@@ -519,28 +530,23 @@ func parseModifier(s string) csiModifier {
 	}
 }
 
-// peekAvailable returns true if at least one byte is buffered or arrives
-// within d. The cold-buffer path is delegated to StdinPeekReadable, which
-// has a platform-specific implementation so we never race another
-// goroutine against the main reader on the same bufio.Reader.
+// peekAvailable has at most one outstanding read. After an Escape timeout,
+// the next Read joins that pending peek before accessing bufio again. This
+// preserves read fragments without concurrent reader access or discarded bytes.
 func (kr *KeyReader) peekAvailable(d time.Duration) bool {
 	if kr.r.Buffered() > 0 {
 		return true
 	}
-	return StdinPeekReadable(d)
-}
-
-func decodeUTF8(b []byte) (rune, int) {
-	// minimal decoder; full UTF-8 handled by callers via bufio reads
-	switch len(b) {
-	case 1:
-		return rune(b[0]), 1
-	case 2:
-		return rune(b[0]&0x1f)<<6 | rune(b[1]&0x3f), 2
-	case 3:
-		return rune(b[0]&0x0f)<<12 | rune(b[1]&0x3f)<<6 | rune(b[2]&0x3f), 3
-	case 4:
-		return rune(b[0]&0x07)<<18 | rune(b[1]&0x3f)<<12 | rune(b[2]&0x3f)<<6 | rune(b[3]&0x3f), 4
+	done := make(chan error, 1)
+	kr.pendingPeek = done
+	go func() { _, err := kr.r.Peek(1); done <- err }()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		kr.pendingPeek = nil
+		return err == nil
+	case <-timer.C:
+		return false
 	}
-	return 0xFFFD, 1
 }

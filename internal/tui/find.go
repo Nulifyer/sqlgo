@@ -1,6 +1,14 @@
 package tui
 
-import "strings"
+import (
+	"sort"
+	"unicode"
+)
+
+type indexedMatch struct {
+	matchRange
+	index int
+}
 
 // SetSearch installs a new needle, recomputes matches, snaps
 // currentMatch to the first hit at/after the cursor. Empty clears.
@@ -10,7 +18,11 @@ func (e *editor) SetSearch(needle string) {
 		return
 	}
 	e.searchNeedle = needle
+	e.lastSearch = needle
+	e.searchGeneration++
 	e.matches = e.computeMatches(needle)
+	e.indexMatches()
+	e.searchRevision = e.buf.Revision()
 	e.currentMatch = e.firstMatchAtOrAfterCursor()
 }
 
@@ -21,6 +33,8 @@ func (e *editor) RefreshMatches() {
 		return
 	}
 	e.matches = e.computeMatches(e.searchNeedle)
+	e.indexMatches()
+	e.searchRevision = e.buf.Revision()
 	if len(e.matches) == 0 {
 		e.currentMatch = -1
 		return
@@ -31,6 +45,8 @@ func (e *editor) RefreshMatches() {
 }
 
 func (e *editor) ClearSearch() {
+	e.searchGeneration++
+	e.matchRows = nil
 	e.searchNeedle = ""
 	e.matches = nil
 	e.currentMatch = -1
@@ -73,6 +89,9 @@ func (e *editor) PrevMatch() {
 
 // ReplaceCurrent replaces the active match, rebuilds, advances.
 func (e *editor) ReplaceCurrent(replacement string) bool {
+	if e.searchRevision != e.buf.Revision() {
+		return false
+	}
 	if e.currentMatch < 0 || e.currentMatch >= len(e.matches) {
 		return false
 	}
@@ -91,13 +110,18 @@ func (e *editor) ReplaceCurrent(replacement string) bool {
 // ReplaceAll walks matches in reverse so earlier positions stay
 // valid under shortening replacements.
 func (e *editor) ReplaceAll(replacement string) int {
+	if e.searchRevision != e.buf.Revision() {
+		return 0
+	}
 	if len(e.matches) == 0 {
 		return 0
 	}
 	n := len(e.matches)
-	for i := n - 1; i >= 0; i-- {
-		e.applyReplaceAt(e.matches[i], replacement)
-	}
+	e.buf.Transaction(func() {
+		for i := n - 1; i >= 0; i-- {
+			e.applyReplaceAt(e.matches[i], replacement)
+		}
+	})
 	e.RefreshMatches()
 	if len(e.matches) > 0 {
 		e.currentMatch = 0
@@ -108,28 +132,9 @@ func (e *editor) ReplaceAll(replacement string) int {
 	return n
 }
 
-// applyReplaceAt positions cursor at match end, backspaces match
-// runes, inserts replacement. All through public buf API so undo
-// snapshots stay consistent.
+// applyReplaceAt replaces one match as a single range edit.
 func (e *editor) applyReplaceAt(m matchRange, replacement string) {
-	e.buf.ClearSelection()
-	curRow, _ := e.buf.Cursor()
-	for curRow < m.row {
-		e.buf.MoveDown()
-		curRow, _ = e.buf.Cursor()
-	}
-	for curRow > m.row {
-		e.buf.MoveUp()
-		curRow, _ = e.buf.Cursor()
-	}
-	e.buf.MoveHome()
-	for i := 0; i < m.col+m.length; i++ {
-		e.buf.MoveRight()
-	}
-	for i := 0; i < m.length; i++ {
-		e.buf.Backspace()
-	}
-	e.buf.InsertText(replacement)
+	e.buf.ReplaceRange(m.row, m.col, m.row, m.col+m.length, replacement)
 	e.ClearErrorLocation()
 }
 
@@ -141,33 +146,21 @@ func (e *editor) jumpToCurrentMatch() {
 	}
 	m := e.matches[e.currentMatch]
 	e.buf.ClearSelection()
-	curRow, _ := e.buf.Cursor()
-	for curRow < m.row {
-		e.buf.MoveDown()
-		curRow, _ = e.buf.Cursor()
-	}
-	for curRow > m.row {
-		e.buf.MoveUp()
-		curRow, _ = e.buf.Cursor()
-	}
-	e.buf.MoveHome()
-	for i := 0; i < m.col; i++ {
-		e.buf.MoveRight()
-	}
+	e.buf.SetCursor(m.row, m.col)
 }
 
-// matchStyleAt reports whether (row, col) falls in a match and
-// whether that match is the current one. Linear scan; match list
-// is bounded by visible hits.
-func (e *editor) matchStyleAt(row, col int) (isCurrent bool, inMatch bool) {
-	for i, m := range e.matches {
-		if m.row != row {
-			continue
-		}
-		if col < m.col || col >= m.col+m.length {
-			continue
-		}
-		return i == e.currentMatch, true
+// indexMatches groups sorted matches by row for bounded rendering lookups.
+func (e *editor) indexMatches() {
+	e.matchRows = make(map[int][]indexedMatch)
+	for index, m := range e.matches {
+		e.matchRows[m.row] = append(e.matchRows[m.row], indexedMatch{m, index})
+	}
+}
+func (e *editor) matchStyleAt(row, col int) (bool, bool) {
+	matches := e.matchRows[row]
+	i := sort.Search(len(matches), func(i int) bool { return matches[i].col+matches[i].length > col })
+	if i < len(matches) && col >= matches[i].col {
+		return matches[i].index == e.currentMatch, true
 	}
 	return false, false
 }
@@ -175,17 +168,26 @@ func (e *editor) matchStyleAt(row, col int) (isCurrent bool, inMatch bool) {
 // computeMatches returns non-overlapping case-insensitive matches
 // per line. Matches don't cross newlines.
 func (e *editor) computeMatches(needle string) []matchRange {
+	return findEditorMatches(e.buf.lines, needle, e.searchMatchCase, e.searchWholeWord)
+}
+func findEditorMatches(lines [][]rune, needle string, matchCase, wholeWord bool) []matchRange {
 	if needle == "" {
 		return nil
 	}
-	lowerNeedle := strings.ToLower(needle)
-	needleRunes := []rune(lowerNeedle)
+	needleRunes := []rune(needle)
+	for i, r := range needleRunes {
+		if !matchCase {
+			needleRunes[i] = toLowerRune(r)
+		}
+	}
 	var out []matchRange
-	for row := 0; row < e.buf.LineCount(); row++ {
-		line := e.buf.Line(row)
+	for row, line := range lines {
 		lowered := make([]rune, len(line))
 		for i, r := range line {
-			lowered[i] = toLowerRune(r)
+			lowered[i] = r
+			if !matchCase {
+				lowered[i] = toLowerRune(r)
+			}
 		}
 		for col := 0; col+len(needleRunes) <= len(lowered); col++ {
 			match := true
@@ -194,6 +196,9 @@ func (e *editor) computeMatches(needle string) []matchRange {
 					match = false
 					break
 				}
+			}
+			if match && wholeWord {
+				match = (col == 0 || !isWordChar(line[col-1])) && (col+len(needleRunes) == len(line) || !isWordChar(line[col+len(needleRunes)]))
 			}
 			if match {
 				out = append(out, matchRange{
@@ -223,11 +228,5 @@ func (e *editor) firstMatchAtOrAfterCursor() int {
 	return 0
 }
 
-// toLowerRune does ASCII-only folding. SQL identifiers are ASCII
-// in practice; full Unicode folding would double the cost.
-func toLowerRune(r rune) rune {
-	if r >= 'A' && r <= 'Z' {
-		return r + ('a' - 'A')
-	}
-	return r
-}
+// toLowerRune applies Unicode simple lowercase mapping on both search operands.
+func toLowerRune(r rune) rune { return unicode.ToLower(r) }

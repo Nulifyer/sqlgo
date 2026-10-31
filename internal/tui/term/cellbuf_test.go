@@ -5,6 +5,28 @@ import (
 	"testing"
 )
 
+func TestCellbufPreservesGraphemeSequences(t *testing.T) {
+	c := NewCellbuf(12, 1)
+	c.WriteAt(1, 1, "e\u0301👩‍💻x")
+	for _, point := range []struct {
+		col  int
+		text string
+	}{{1, "e\u0301"}, {2, "👩‍💻"}, {4, "x"}} {
+		cell := c.At(1, point.col)
+		got := string(append([]rune{cell.R}, cell.Combining...))
+		if got != point.text {
+			t.Fatalf("column %d: %q != %q", point.col, got, point.text)
+		}
+	}
+	if !c.At(1, 3).WideCont {
+		t.Fatal("emoji lost its second display cell")
+	}
+	c.WriteAt(1, 5, "a\x1bb")
+	if len(c.At(1, 5).Combining) != 0 {
+		t.Fatal("control attached to printable cell")
+	}
+}
+
 func TestCellbufWriteAtMarksTouched(t *testing.T) {
 	t.Parallel()
 	c := NewCellbuf(10, 3)

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Nulifyer/sqlgo/internal/atomicfile"
 )
 
 func TestAtomicOutputAbortPreservesDestination(t *testing.T) {
@@ -13,11 +15,11 @@ func TestAtomicOutputAbortPreservesDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := createAtomicOutput(path)
+	out, err := atomicfile.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := out.file.WriteString("new\n"); err != nil {
+	if _, err := out.Writer().Write([]byte("new\n")); err != nil {
 		t.Fatal(err)
 	}
 	if err := out.Finish(false); err != nil {
@@ -38,7 +40,7 @@ func TestRunAbortPreservesDestinationBeforeSafetyApproval(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := createAtomicOutput(path)
+	out, err := atomicfile.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,11 +70,11 @@ func TestAtomicOutputCommitReplacesDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := createAtomicOutput(path)
+	out, err := atomicfile.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := out.file.WriteString("new\n"); err != nil {
+	if _, err := out.Writer().Write([]byte("new\n")); err != nil {
 		t.Fatal(err)
 	}
 	if err := out.Finish(true); err != nil {
