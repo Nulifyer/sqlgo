@@ -57,14 +57,14 @@ jobs:
         run: go test ./internal/tui/term ./internal/atomicfile -count=1
 
   windows-installer:
-    name: Windows installer (${{ matrix.shell }})
+    name: Windows installer
     runs-on: windows-latest
-    strategy:
-      matrix:
-        shell: [powershell, pwsh]
     steps:
       - name: Checkout
         uses: actions/checkout@v6.0.2
-      - name: Test installer checksum verification
-        shell: ${{ matrix.shell }}
+      - name: Test installer checksum verification in Windows PowerShell
+        shell: powershell
+        run: ./.scripts/tests/install.ps1
+      - name: Test installer checksum verification in PowerShell 7
+        shell: pwsh
         run: ./.scripts/tests/install.ps1
