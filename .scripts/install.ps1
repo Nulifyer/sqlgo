@@ -41,11 +41,18 @@ if (-not $checksumAsset) {
 Write-Host "  Downloading $tag..."
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 $zipFile = "$installDir\sqlgo-update.zip"
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipFile
+Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $zipFile
 
 # 3. Verify checksum
 Write-Host "  Verifying checksum..."
-$checksums = (Invoke-WebRequest -Uri $checksumAsset.browser_download_url).Content
+$checksumResponse = Invoke-WebRequest -UseBasicParsing -Uri $checksumAsset.browser_download_url
+# GitHub serves release assets as application/octet-stream, which PowerShell
+# returns as bytes. Decode before splitting the checksum file into lines.
+$checksums = if ($checksumResponse.Content -is [byte[]]) {
+    [System.Text.Encoding]::UTF8.GetString($checksumResponse.Content)
+} else {
+    $checksumResponse.Content
+}
 $expectedLine = ($checksums -split "`n") | Where-Object {
     $fields = $_.Trim() -split "\s+"
     $fields.Count -ge 2 -and

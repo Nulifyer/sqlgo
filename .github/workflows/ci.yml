@@ -55,3 +55,16 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go test ./internal/tui/term ./internal/atomicfile -count=1
+
+  windows-installer:
+    name: Windows installer (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+      - name: Test installer checksum verification
+        shell: ${{ matrix.shell }}
+        run: ./.scripts/tests/install.ps1
